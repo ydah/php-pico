@@ -1301,11 +1301,6 @@ static pc_ast *parse_statement(pc_parser *parser) {
         consume_statement_end(parser);
         return node;
     }
-    if (check(parser, T_NEW)) {
-        fail_at(parser, parser->current, "syntax %.*s is reserved for a later runtime milestone",
-                (int)parser->current.length, parser->current.start);
-        return NULL;
-    }
     node = new_node(parser, AST_EXPR_STMT, token.line);
     if (node != NULL) {
         node->as.expression.expression = parse_expression(parser);

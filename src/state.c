@@ -8,6 +8,7 @@
 #include "pphp/hal.h"
 #include "gc.h"
 #include "files.h"
+#include "pgems.h"
 
 #include <stdarg.h>
 #include <float.h>
@@ -96,6 +97,10 @@ pphp_state *pphp_open(void *pool, size_t pool_size) {
         pa_destroy(state->included_files);
         psymbol_destroy(&state->symbols);
         pphp_free(state);
+        return NULL;
+    }
+    if (!pphp_init_pgems(state)) {
+        pphp_close(state);
         return NULL;
     }
     return state;
@@ -521,6 +526,7 @@ int pphp_exec_pbc(pphp_state *state, const void *pbc, size_t length) {
 void pphp_tick(pphp_state *state) {
     if (state != NULL) {
         state->ticks++;
+        pphp_poll_pgems(state);
     }
 }
 

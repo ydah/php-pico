@@ -1,6 +1,7 @@
 #include "test.h"
 
 #include "pphp/pphp.h"
+#include "pphp/hal.h"
 #include "state.h"
 #include "codegen.h"
 #include "parser.h"
@@ -951,6 +952,50 @@ TEST(public_c_api_registers_functions_classes_methods_and_native_data) {
     pphp_close(state);
 }
 
+TEST(peripheral_gems_are_registered_and_route_operations_through_hal) {
+    const char *source =
+        "echo class_exists('GPIO'), class_exists('ADC'), class_exists('PWM'),"
+        " class_exists('I2C'), class_exists('SPI'), class_exists('UART'),"
+        " class_exists('Machine'), class_exists('Watchdog'), class_exists('RTC'),"
+        " ':', GPIO::OUT, ':', method_exists('I2C', 'scan'), ':',"
+        " strlen(Machine::unique_id()), ':';"
+        "RTC::set(100); echo RTC::now(), ':'; Machine::sleep_ms(0);"
+        "$gpio = new GPIO(25, GPIO::OUT); $gpio->high();"
+        "echo $gpio->read(), ':', (new ADC(1))->read_u16(), ':',"
+        " (new SPI(0, 2, 3, 4))->transfer('xy'), ':';"
+        "try { (new I2C(0, 4, 5))->read(64, 1); }"
+        "catch (RuntimeException $error) { echo 'hal'; }";
+    output_buffer output;
+    ASSERT_EQ(PPHP_OK, execute(source, &output, NULL, 0U));
+    ASSERT_STR("111111111:2:1:16:100:1:257:xy:hal", output.bytes);
+}
+
+TEST(gpio_events_dispatch_callbacks_only_at_vm_safe_points) {
+    pphp_state *state = pphp_open(vm_pool, sizeof(vm_pool));
+    output_buffer output;
+    ASSERT_TRUE(state != NULL);
+    memset(&output, 0, sizeof(output));
+    pphp_set_output(state, capture_output, &output);
+    ASSERT_EQ(PPHP_OK,
+              pphp_exec_source_mode(
+                  state,
+                  "$events = 0; $pin = new GPIO(6, GPIO::IN);"
+                  "$pin->irq(function ($value) { global $events;"
+                  " $events = $events + $value; }, GPIO::EDGE_RISE);",
+                  strlen("$events = 0; $pin = new GPIO(6, GPIO::IN);"
+                         "$pin->irq(function ($value) { global $events;"
+                         " $events = $events + $value; }, GPIO::EDGE_RISE);"),
+                  "gpio-event-setup", 1));
+    ASSERT_EQ(PPHP_HAL_OK, hal_event_push(1U, 6U, 3U));
+    pphp_tick(state);
+    memset(&output, 0, sizeof(output));
+    ASSERT_EQ(PPHP_OK,
+              pphp_exec_source_mode(state, "echo $events;", 13U,
+                                    "gpio-event-check", 1));
+    ASSERT_STR("3", output.bytes);
+    pphp_close(state);
+}
+
 int main(void) {
     static const test_case tests[] = {
         {"arithmetic VM", arithmetic_runs_through_compiler_and_vm},
@@ -1004,7 +1049,9 @@ int main(void) {
         {"object cycle collection", cycle_collector_reclaims_self_and_mutual_object_cycles},
         {"file builtins", file_builtins_cover_whole_file_stream_and_path_operations},
         {"include and require", include_once_loads_definitions_and_require_reports_missing_files},
-        {"public native extension API", public_c_api_registers_functions_classes_methods_and_native_data}
+        {"public native extension API", public_c_api_registers_functions_classes_methods_and_native_data},
+        {"peripheral gems", peripheral_gems_are_registered_and_route_operations_through_hal},
+        {"GPIO event dispatch", gpio_events_dispatch_callbacks_only_at_vm_safe_points}
     };
     return run_tests(tests, sizeof(tests) / sizeof(tests[0]));
 }

@@ -15,10 +15,33 @@ typedef struct hal_event {
     uint32_t argument;
 } hal_event;
 
+typedef struct gpio_state {
+    uint8_t initialized;
+    uint8_t mode;
+    uint8_t pull;
+    uint8_t level;
+    uint8_t edges;
+} gpio_state;
+
+typedef struct pwm_state {
+    uint32_t frequency;
+    uint32_t period;
+    uint32_t pulse;
+    uint16_t duty;
+    uint8_t initialized;
+} pwm_state;
+
 static hal_event events[16];
 static unsigned event_read;
 static unsigned event_write;
 static uint32_t random_state = UINT32_C(0x9e3779b9);
+static gpio_state gpio_pins[256];
+static pwm_state pwm_pins[256];
+static uint8_t adc_pins[256];
+static uint8_t i2c_units[2];
+static uint8_t spi_units[2];
+static uint8_t uart_units[2];
+static uint8_t flash_image[1024U * 1024U];
 
 int hal_init(void) {
     struct timeval now;
@@ -29,75 +52,96 @@ int hal_init(void) {
 }
 
 int hal_gpio_init(uint8_t pin, uint8_t mode, uint8_t pull) {
-    (void)pin; (void)mode; (void)pull;
-    return PPHP_HAL_UNSUPPORTED;
+    gpio_pins[pin].initialized = 1U;
+    gpio_pins[pin].mode = mode;
+    gpio_pins[pin].pull = pull;
+    return PPHP_HAL_OK;
 }
 int hal_gpio_write(uint8_t pin, uint8_t level) {
-    (void)pin; (void)level;
-    return PPHP_HAL_UNSUPPORTED;
+    if (!gpio_pins[pin].initialized) return PPHP_HAL_INVALID;
+    gpio_pins[pin].level = level == 0U ? 0U : 1U;
+    return PPHP_HAL_OK;
 }
 int hal_gpio_read(uint8_t pin) {
-    (void)pin;
-    return PPHP_HAL_UNSUPPORTED;
+    if (!gpio_pins[pin].initialized) return PPHP_HAL_INVALID;
+    return gpio_pins[pin].level;
 }
 int hal_gpio_irq_enable(uint8_t pin, uint8_t edges) {
-    (void)pin; (void)edges;
-    return PPHP_HAL_UNSUPPORTED;
+    if (!gpio_pins[pin].initialized) return PPHP_HAL_INVALID;
+    gpio_pins[pin].edges = edges;
+    return PPHP_HAL_OK;
 }
-int hal_adc_init(uint8_t pin) { (void)pin; return PPHP_HAL_UNSUPPORTED; }
+int hal_adc_init(uint8_t pin) { adc_pins[pin] = 1U; return PPHP_HAL_OK; }
 int hal_adc_read_u16(uint8_t pin, uint16_t *out) {
-    (void)pin; (void)out;
-    return PPHP_HAL_UNSUPPORTED;
+    if (!adc_pins[pin] || out == NULL) return PPHP_HAL_INVALID;
+    *out = (uint16_t)((uint16_t)pin * UINT16_C(257));
+    return PPHP_HAL_OK;
 }
 int hal_pwm_init(uint8_t pin, uint32_t hz) {
-    (void)pin; (void)hz;
-    return PPHP_HAL_UNSUPPORTED;
+    if (hz == 0U) return PPHP_HAL_INVALID;
+    pwm_pins[pin].initialized = 1U;
+    pwm_pins[pin].frequency = hz;
+    return PPHP_HAL_OK;
 }
 int hal_pwm_set_duty_u16(uint8_t pin, uint16_t duty) {
-    (void)pin; (void)duty;
-    return PPHP_HAL_UNSUPPORTED;
+    if (!pwm_pins[pin].initialized) return PPHP_HAL_INVALID;
+    pwm_pins[pin].duty = duty;
+    return PPHP_HAL_OK;
 }
 int hal_pwm_set_period_us(uint8_t pin, uint32_t us, uint32_t pulse_us) {
-    (void)pin; (void)us; (void)pulse_us;
-    return PPHP_HAL_UNSUPPORTED;
+    if (!pwm_pins[pin].initialized || pulse_us > us) return PPHP_HAL_INVALID;
+    pwm_pins[pin].period = us;
+    pwm_pins[pin].pulse = pulse_us;
+    return PPHP_HAL_OK;
 }
 int hal_i2c_init(uint8_t unit, uint8_t sda, uint8_t scl, uint32_t hz) {
-    (void)unit; (void)sda; (void)scl; (void)hz;
-    return PPHP_HAL_UNSUPPORTED;
+    (void)sda; (void)scl;
+    if (unit >= 2U || hz == 0U) return PPHP_HAL_INVALID;
+    i2c_units[unit] = 1U;
+    return PPHP_HAL_OK;
 }
 int hal_i2c_write(uint8_t unit, uint8_t addr, const uint8_t *bytes,
                   size_t length, int stop) {
-    (void)unit; (void)addr; (void)bytes; (void)length; (void)stop;
-    return PPHP_HAL_UNSUPPORTED;
+    (void)addr; (void)bytes; (void)length; (void)stop;
+    return unit < 2U && i2c_units[unit] ? PPHP_HAL_ERROR
+                                        : PPHP_HAL_INVALID;
 }
 int hal_i2c_read(uint8_t unit, uint8_t addr, uint8_t *bytes, size_t length) {
-    (void)unit; (void)addr; (void)bytes; (void)length;
-    return PPHP_HAL_UNSUPPORTED;
+    (void)addr; (void)bytes; (void)length;
+    return unit < 2U && i2c_units[unit] ? PPHP_HAL_ERROR
+                                        : PPHP_HAL_INVALID;
 }
 int hal_spi_init(uint8_t unit, uint8_t sck, uint8_t mosi, uint8_t miso,
                  uint32_t hz, uint8_t mode, uint8_t bits) {
-    (void)unit; (void)sck; (void)mosi; (void)miso;
-    (void)hz; (void)mode; (void)bits;
-    return PPHP_HAL_UNSUPPORTED;
+    (void)sck; (void)mosi; (void)miso; (void)mode; (void)bits;
+    if (unit >= 2U || hz == 0U) return PPHP_HAL_INVALID;
+    spi_units[unit] = 1U;
+    return PPHP_HAL_OK;
 }
 int hal_spi_transfer(uint8_t unit, const uint8_t *tx, uint8_t *rx,
                      size_t length) {
-    (void)unit; (void)tx; (void)rx; (void)length;
-    return PPHP_HAL_UNSUPPORTED;
+    size_t i;
+    if (unit >= 2U || !spi_units[unit]) return PPHP_HAL_INVALID;
+    if (rx != NULL) {
+        for (i = 0U; i < length; i++) rx[i] = tx == NULL ? 0U : tx[i];
+    }
+    return (int)length;
 }
 int hal_uart_init(uint8_t unit, uint8_t tx, uint8_t rx, uint32_t baud,
                   uint8_t data, uint8_t parity, uint8_t stop) {
-    (void)unit; (void)tx; (void)rx; (void)baud;
-    (void)data; (void)parity; (void)stop;
-    return PPHP_HAL_UNSUPPORTED;
+    (void)tx; (void)rx; (void)data; (void)parity; (void)stop;
+    if (unit >= 2U || baud == 0U) return PPHP_HAL_INVALID;
+    uart_units[unit] = 1U;
+    return PPHP_HAL_OK;
 }
 int hal_uart_write(uint8_t unit, const uint8_t *bytes, size_t length) {
-    (void)unit; (void)bytes; (void)length;
-    return PPHP_HAL_UNSUPPORTED;
+    if (unit >= 2U || !uart_units[unit] ||
+        (length != 0U && bytes == NULL)) return PPHP_HAL_INVALID;
+    return (int)length;
 }
 int hal_uart_read(uint8_t unit, uint8_t *bytes, size_t length) {
-    (void)unit; (void)bytes; (void)length;
-    return PPHP_HAL_UNSUPPORTED;
+    (void)bytes; (void)length;
+    return unit < 2U && uart_units[unit] ? 0 : PPHP_HAL_INVALID;
 }
 
 uint64_t hal_time_us(void) {
@@ -118,7 +162,7 @@ void hal_sleep_ms(uint32_t milliseconds) {
 
 void hal_deep_sleep_ms(uint32_t milliseconds) { hal_sleep_ms(milliseconds); }
 void hal_reset(void) {}
-uint32_t hal_cpu_freq(void) { return 0U; }
+uint32_t hal_cpu_freq(void) { return UINT32_C(125000000); }
 
 int hal_unique_id(uint8_t *buffer, size_t length) {
     char hostname[64];
@@ -157,16 +201,22 @@ int hal_console_read(uint8_t *bytes, size_t length) {
 }
 
 int hal_flash_read(uint32_t offset, void *buffer, size_t length) {
-    (void)offset; (void)buffer; (void)length;
-    return PPHP_HAL_UNSUPPORTED;
+    if (buffer == NULL || offset > sizeof(flash_image) ||
+        length > sizeof(flash_image) - offset) return PPHP_HAL_INVALID;
+    memcpy(buffer, flash_image + offset, length);
+    return PPHP_HAL_OK;
 }
 int hal_flash_prog(uint32_t offset, const void *buffer, size_t length) {
-    (void)offset; (void)buffer; (void)length;
-    return PPHP_HAL_UNSUPPORTED;
+    if (buffer == NULL || offset > sizeof(flash_image) ||
+        length > sizeof(flash_image) - offset) return PPHP_HAL_INVALID;
+    memcpy(flash_image + offset, buffer, length);
+    return PPHP_HAL_OK;
 }
 int hal_flash_erase(uint32_t block) {
-    (void)block;
-    return PPHP_HAL_UNSUPPORTED;
+    uint32_t offset = block * UINT32_C(4096);
+    if (offset >= sizeof(flash_image)) return PPHP_HAL_INVALID;
+    memset(flash_image + offset, 0xff, 4096U);
+    return PPHP_HAL_OK;
 }
 
 int hal_event_push(uint8_t type, uint8_t id, uint32_t argument) {
@@ -189,7 +239,6 @@ int hal_event_pop(uint8_t *type, uint8_t *id, uint32_t *argument) {
 }
 
 int hal_wdt_enable(uint32_t milliseconds) {
-    (void)milliseconds;
-    return PPHP_HAL_UNSUPPORTED;
+    return milliseconds == 0U ? PPHP_HAL_INVALID : PPHP_HAL_OK;
 }
 void hal_wdt_feed(void) {}

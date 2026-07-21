@@ -27,6 +27,10 @@
 #define PPHP_ENABLE_CYCLE_GC 1
 #endif
 
+#ifndef PPHP_ENABLE_PGEMS
+#define PPHP_ENABLE_PGEMS 1
+#endif
+
 #ifndef PPHP_LINE_INFO
 #define PPHP_LINE_INFO 1
 #endif
@@ -76,4 +80,3 @@ typedef float pphp_float;
 #endif
 
 #endif
-
