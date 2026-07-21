@@ -23,7 +23,7 @@ ASAN_PARSER_BINARY := build/host/test_parser_asan
 ASAN_VM_BINARY := build/host/test_vm_asan
 ASAN_LEAKS := $(if $(filter Darwin,$(shell uname -s)),0,1)
 
-.PHONY: all host test test-asan test-diff size clean
+.PHONY: all host test test-unit test-phpt test-asan test-diff size clean
 
 all: host
 
@@ -49,13 +49,18 @@ $(VM_TEST_BINARY): $(VM_TEST_SOURCES)
 	@mkdir -p $(@D)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(VM_TEST_SOURCES) $(LDFLAGS) $(LDLIBS) -o $@
 
-test: $(TEST_BINARY) $(LEXER_TEST_BINARY) $(PARSER_TEST_BINARY) $(VM_TEST_BINARY) $(HOST_BINARY)
+test-unit: $(TEST_BINARY) $(LEXER_TEST_BINARY) $(PARSER_TEST_BINARY) $(VM_TEST_BINARY) $(HOST_BINARY)
 	$(TEST_BINARY)
 	$(LEXER_TEST_BINARY)
 	$(PARSER_TEST_BINARY)
 	$(VM_TEST_BINARY)
 	$(HOST_BINARY) --version
 	sh tests/cli/smoke.sh $(HOST_BINARY)
+
+test-phpt: $(HOST_BINARY)
+	sh tools/phpt_run.sh --binary $(HOST_BINARY) tests/phpt
+
+test: test-unit test-phpt
 
 test-asan:
 	@mkdir -p $(dir $(ASAN_BINARY))
@@ -73,7 +78,7 @@ test-asan:
 	ASAN_OPTIONS=detect_leaks=$(ASAN_LEAKS) $(ASAN_VM_BINARY)
 
 test-diff: test
-	@printf 'Differential tests are added with the language runtime milestones.\n'
+	sh tools/difftest.sh --binary $(HOST_BINARY) tests/phpt
 
 size: host
 	sh tools/sizecheck.sh $(HOST_BINARY)
