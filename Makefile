@@ -6,7 +6,7 @@ LDLIBS := -lm
 
 CORE_SOURCES := src/alloc.c src/value.c src/pstring.c src/symbol.c src/parray.c src/resource.c src/pclass.c src/closure.c
 COMPILER_SOURCES := compiler/lexer.c compiler/ast.c compiler/parser.c
-RUNTIME_SOURCES := $(CORE_SOURCES) src/exception.c src/value_ops.c src/pbc.c src/state.c src/vm.c stdlib/builtins.c stdlib/strings.c stdlib/arrays.c stdlib/formatting.c stdlib/json.c stdlib/system.c hal/posix/hal_posix.c
+RUNTIME_SOURCES := $(CORE_SOURCES) src/exception.c src/gc.c src/value_ops.c src/pbc.c src/state.c src/vm.c stdlib/builtins.c stdlib/strings.c stdlib/arrays.c stdlib/formatting.c stdlib/json.c stdlib/system.c hal/posix/hal_posix.c
 HOST_SOURCES := $(RUNTIME_SOURCES) $(COMPILER_SOURCES) compiler/codegen.c tools/disasm.c shell/p2sh.c ports/host/main.c
 TEST_SOURCES := $(CORE_SOURCES) tests/unit/test_core.c
 LEXER_TEST_SOURCES := compiler/lexer.c tests/unit/test_lexer.c

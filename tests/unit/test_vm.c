@@ -816,6 +816,20 @@ TEST(interfaces_and_abstract_final_contracts_are_enforced) {
     ASSERT_TRUE(strstr(error, "cannot define method") != NULL);
 }
 
+TEST(cycle_collector_reclaims_self_and_mutual_object_cycles) {
+    const char *source =
+        "class Node { public $next; }"
+        "$self = new Node(); $self->next = $self; unset($self);"
+        "echo gc_collect_cycles(), ':';"
+        "$left = new Node(); $right = new Node();"
+        "$left->next = $right; $right->next = $left;"
+        "unset($left); unset($right); echo gc_collect_cycles(), ':',"
+        " gc_collect_cycles();";
+    output_buffer output;
+    ASSERT_EQ(PPHP_OK, execute(source, &output, NULL, 0U));
+    ASSERT_STR("1:2:0", output.bytes);
+}
+
 int main(void) {
     static const test_case tests[] = {
         {"arithmetic VM", arithmetic_runs_through_compiler_and_vm},
@@ -865,7 +879,8 @@ int main(void) {
         {"array mutation, callbacks, and sorts", array_mutators_callbacks_and_sorts_preserve_cow_semantics},
         {"array string replacement", str_replace_accepts_array_search_replacement_and_subject_values},
         {"static and magic class features", static_class_members_promotion_and_magic_methods_execute},
-        {"interface, abstract, and final contracts", interfaces_and_abstract_final_contracts_are_enforced}
+        {"interface, abstract, and final contracts", interfaces_and_abstract_final_contracts_are_enforced},
+        {"object cycle collection", cycle_collector_reclaims_self_and_mutual_object_cycles}
     };
     return run_tests(tests, sizeof(tests) / sizeof(tests[0]));
 }

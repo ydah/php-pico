@@ -6,6 +6,7 @@
 #include "pclass.h"
 #include "parray.h"
 #include "pphp/hal.h"
+#include "gc.h"
 
 #include <stdarg.h>
 #include <float.h>
@@ -100,6 +101,7 @@ void pphp_close(pphp_state *state) {
     pa_destroy(state->globals);
     pa_destroy(state->statics);
     pa_destroy(state->constants);
+    (void)pphp_gc_collect(state);
     pphp_clear_classes(state);
     for (i = 0U; i < state->repl_module_count; i++) {
         pmodule_destroy(state->repl_modules[i]);

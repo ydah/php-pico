@@ -42,6 +42,7 @@ struct pphp_state {
     size_t class_count;
     size_t class_capacity;
     pclass *building_class;
+    pobject *gc_objects;
     pobject *oom_exception;
     pphp_output_fn output;
     void *output_context;

@@ -57,6 +57,8 @@ struct pobject {
     pheader header;
     pclass *class_entry;
     pphp_state *owner_state;
+    struct pobject *gc_prev;
+    struct pobject *gc_next;
     pvalue slots[];
 };
 

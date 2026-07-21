@@ -3,6 +3,7 @@
 #include "parray.h"
 #include "pphp/hal.h"
 #include "value_ops.h"
+#include "gc.h"
 
 #include <limits.h>
 #include <stdio.h>
@@ -351,7 +352,7 @@ static int call_system(pphp_state *state, const pstring *name,
     }
     if (name_is(name, "gc_collect_cycles")) {
         if (count != 0U) return invalid_arguments(state, name);
-        *result = pv_int(0);
+        *result = pv_int((pphp_int)pphp_gc_collect(state));
         return 1;
     }
     if (name_is(name, "error_log")) {

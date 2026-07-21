@@ -328,6 +328,12 @@ pobject *pobject_new(pphp_state *state, pclass *class_entry) {
     object->header.flags = 0U;
     object->class_entry = class_entry;
     object->owner_state = state;
+    object->gc_prev = NULL;
+    object->gc_next = state == NULL ? NULL : state->gc_objects;
+    if (state != NULL) {
+        if (state->gc_objects != NULL) state->gc_objects->gc_prev = object;
+        state->gc_objects = object;
+    }
     for (i = 0U; i < class_entry->property_count; i++) {
         object->slots[i] = class_entry->properties[i].default_value;
         pv_retain(object->slots[i]);
@@ -397,7 +403,7 @@ void pobject_destroy(pobject *object) {
     size_t i;
     if (object == NULL) return;
     if (object->owner_state != NULL &&
-        (object->header.flags & UINT8_C(0x80)) == 0U) {
+        (object->header.flags & UINT8_C(0xc0)) == 0U) {
         const pmethod *destructor = pclass_find_method(
             object->class_entry, "__destruct", 10U);
         if (destructor != NULL && (destructor->flags & PC_STATIC) == 0U) {
@@ -430,6 +436,14 @@ void pobject_destroy(pobject *object) {
                            saved_error);
             object->owner_state->error_line = saved_line;
         }
+    }
+    if (object->owner_state != NULL) {
+        if (object->gc_prev != NULL) {
+            object->gc_prev->gc_next = object->gc_next;
+        } else {
+            object->owner_state->gc_objects = object->gc_next;
+        }
+        if (object->gc_next != NULL) object->gc_next->gc_prev = object->gc_prev;
     }
     for (i = 0U; i < object->class_entry->property_count; i++) {
         pv_release(object->slots[i]);
