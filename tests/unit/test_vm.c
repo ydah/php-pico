@@ -514,6 +514,39 @@ TEST(string_builtins_cover_search_transform_split_and_join) {
                output.bytes);
 }
 
+TEST(array_builtins_preserve_php_key_and_order_rules) {
+    const char *source =
+        "$a = ['x' => 1, 4 => 2, 3];"
+        "$keys = array_keys($a); $values = array_values($a);"
+        "$slice = array_slice($a, 1, 2);"
+        "$merged = array_merge(['a' => 1, 8 => 2], ['a' => 3, 9 => 4]);"
+        "$reversed = array_reverse($a);"
+        "$filled = array_fill(-2, 4, 'z');"
+        "$fillKeys = array_fill_keys(['name', 3], 7);"
+        "$flipped = array_flip(['first' => 'a', 'second' => 2, 'third' => 'a']);"
+        "$combined = array_combine(['left', 'right'], [9, 8]);"
+        "$range = range(3, 1);"
+        "echo (in_array(2, $a, true) ? 1 : 0), ':', array_search(3, $a, true), ':',"
+        " (array_key_exists('x', $a) ? 1 : 0), ':',"
+        " $keys[0], ',', $keys[1], ',', $keys[2], ':',"
+        " $values[0], ',', $values[1], ',', $values[2], ':',"
+        " $slice[0], ',', $slice[1], ':',"
+        " $merged['a'], ',', $merged[0], ',', $merged[1], ':',"
+        " $reversed[0], ',', $reversed[1], ',', $reversed['x'], ':',"
+        " array_sum($a), ',', array_product([2, 3, 4]), ':',"
+        " $filled[-2], ',', $filled[-1], ',', $filled[0], ',', $filled[1], ':',"
+        " $fillKeys['name'], ',', $fillKeys[3], ':',"
+        " $flipped['a'], ',', $flipped[2], ':',"
+        " $combined['left'], ',', $combined['right'], ':',"
+        " $range[0], ',', $range[1], ',', $range[2], ':',"
+        " (array_is_list([1, 2]) ? 1 : 0),"
+        " (array_is_list([1 => 2]) ? 1 : 0);";
+    output_buffer output;
+    ASSERT_EQ(PPHP_OK, execute(source, &output, NULL, 0U));
+    ASSERT_STR("1:5:1:x,4,5:1,2,3:2,3:3,2,4:3,2,1:6,24:z,z,z,z:7,7:third,second:9,8:3,2,1:10",
+               output.bytes);
+}
+
 int main(void) {
     static const test_case tests[] = {
         {"arithmetic VM", arithmetic_runs_through_compiler_and_vm},
@@ -549,7 +582,8 @@ int main(void) {
         {"object clone", clone_copies_property_slots_and_invokes_clone_hook},
         {"type builtins", type_conversion_and_predicate_builtins_follow_php_values},
         {"math builtins", math_builtins_cover_integer_float_and_collection_forms},
-        {"string builtins", string_builtins_cover_search_transform_split_and_join}
+        {"string builtins", string_builtins_cover_search_transform_split_and_join},
+        {"array builtins", array_builtins_preserve_php_key_and_order_rules}
     };
     return run_tests(tests, sizeof(tests) / sizeof(tests[0]));
 }

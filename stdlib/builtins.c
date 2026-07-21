@@ -4,6 +4,7 @@
 #include "parray.h"
 #include "pclass.h"
 #include "strings.h"
+#include "arrays.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -401,7 +402,9 @@ static int call_math_builtin(pphp_state *state, const pstring *name,
 
 int pphp_call_builtin(pphp_state *state, const pstring *name,
                       const pvalue *arguments, size_t count, pvalue *result) {
-    int handled = pphp_call_string_builtin(state, name, arguments, count, result);
+    int handled = pphp_call_array_builtin(state, name, arguments, count, result);
+    if (handled != 0) return handled;
+    handled = pphp_call_string_builtin(state, name, arguments, count, result);
     if (handled != 0) return handled;
     handled = call_conversion_builtin(state, name, arguments, count, result);
     if (handled != 0) return handled;
