@@ -647,6 +647,21 @@ TEST(constant_and_reflection_builtins_share_runtime_registries) {
     ASSERT_STR("1:1:7:11:1:10:ReflectedClass", output.bytes);
 }
 
+TEST(formatting_builtins_cover_width_precision_bases_and_print_r) {
+    const char *source =
+        "$formatted = sprintf("
+        " '%05d|%-4s|%.2f|%x|%X|%o|%b|%c|%e|%g|%%|%u',"
+        " -12, 'xy', 1.236, 255, 255, 8, 10, 65, 12.5, 12.5, -1);"
+        "echo $formatted, ':';"
+        "$length = printf('[%04d]', 7); echo ':', $length, ':';"
+        "$printed = print_r(['x' => 1, 2], true);"
+        "echo str_replace(\"\\n\", '|', $printed);";
+    output_buffer output;
+    ASSERT_EQ(PPHP_OK, execute(source, &output, NULL, 0U));
+    ASSERT_STR("-0012|xy  |1.24|ff|FF|10|1010|A|1.250000e+1|12.5|%|4294967295:[0007]:6:Array|(|    [x] => 1|    [0] => 2|)|",
+               output.bytes);
+}
+
 int main(void) {
     static const test_case tests[] = {
         {"arithmetic VM", arithmetic_runs_through_compiler_and_vm},
@@ -688,7 +703,8 @@ int main(void) {
         {"array and argument unpacking", array_and_argument_unpacking_preserve_evaluation_order},
         {"persistent language bindings", global_static_and_named_constants_use_persistent_storage},
         {"REPL global persistence", repl_chunks_retain_globals_and_constants_by_name},
-        {"constant and reflection builtins", constant_and_reflection_builtins_share_runtime_registries}
+        {"constant and reflection builtins", constant_and_reflection_builtins_share_runtime_registries},
+        {"formatting builtins", formatting_builtins_cover_width_precision_bases_and_print_r}
     };
     return run_tests(tests, sizeof(tests) / sizeof(tests[0]));
 }
