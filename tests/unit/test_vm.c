@@ -662,6 +662,23 @@ TEST(formatting_builtins_cover_width_precision_bases_and_print_r) {
                output.bytes);
 }
 
+TEST(json_builtins_round_trip_ordered_arrays_and_pretty_output) {
+    const char *source =
+        "$json = json_encode(["
+        " 'name' => 'pico', 'values' => [1, true, null], 'slash' => 'a/b'"
+        "]);"
+        "$decoded = json_decode($json);"
+        "$pretty = json_encode(['a' => 1, 'b' => [true, null]],"
+        " JSON_PRETTY_PRINT);"
+        "echo $json, ':', $decoded['name'], ':', $decoded['values'][1], ':',"
+        " str_replace(\"\\n\", '|', $pretty), ':',"
+        " (json_decode('{bad') === null ? 1 : 0);";
+    output_buffer output;
+    ASSERT_EQ(PPHP_OK, execute(source, &output, NULL, 0U));
+    ASSERT_STR("{\"name\":\"pico\",\"values\":[1,true,null],\"slash\":\"a\\/b\"}:pico:1:{|    \"a\": 1,|    \"b\": [|        true,|        null|    ]|}:1",
+               output.bytes);
+}
+
 int main(void) {
     static const test_case tests[] = {
         {"arithmetic VM", arithmetic_runs_through_compiler_and_vm},
@@ -704,7 +721,8 @@ int main(void) {
         {"persistent language bindings", global_static_and_named_constants_use_persistent_storage},
         {"REPL global persistence", repl_chunks_retain_globals_and_constants_by_name},
         {"constant and reflection builtins", constant_and_reflection_builtins_share_runtime_registries},
-        {"formatting builtins", formatting_builtins_cover_width_precision_bases_and_print_r}
+        {"formatting builtins", formatting_builtins_cover_width_precision_bases_and_print_r},
+        {"JSON builtins", json_builtins_round_trip_ordered_arrays_and_pretty_output}
     };
     return run_tests(tests, sizeof(tests) / sizeof(tests[0]));
 }
