@@ -22,10 +22,13 @@ static size_t operand_size(uint8_t opcode) {
         case OP_LOAD_I8:
         case OP_LOAD_LOCAL:
         case OP_STORE_LOCAL:
+        case OP_BIND_GLOBAL:
         case OP_ECHO:
         case OP_CALL_VALUE:
             return 1U;
         case OP_LOAD_CONST:
+        case OP_LOAD_NAMED_CONST:
+        case OP_DEF_CONST:
         case OP_CALL_ARRAY:
         case OP_MCALL_ARRAY:
         case OP_NEW_OBJ_ARRAY:
@@ -43,6 +46,7 @@ static size_t operand_size(uint8_t opcode) {
         case OP_MCALL:
         case OP_DEF_PROP:
         case OP_FE_NEXT:
+        case OP_STATIC_INIT:
             return 3U;
         case OP_PROP_GET:
         case OP_PROP_SET:
@@ -102,6 +106,7 @@ static int disassemble_proto(FILE *stream, const pproto *proto, size_t index) {
                 break;
             case OP_LOAD_LOCAL:
             case OP_STORE_LOCAL:
+            case OP_BIND_GLOBAL:
             case OP_ECHO:
             case OP_CALL_VALUE:
                 fprintf(stream, " %u", proto->code[pc]);
@@ -112,6 +117,13 @@ static int disassemble_proto(FILE *stream, const pproto *proto, size_t index) {
             case OP_LOAD_CONST: {
                 uint16_t constant = code_u16(proto->code, pc);
                 fprintf(stream, " %u", constant);
+                print_constant(stream, proto, constant);
+                break;
+            }
+            case OP_LOAD_NAMED_CONST:
+            case OP_DEF_CONST: {
+                uint16_t constant = code_u16(proto->code, pc);
+                fprintf(stream, " name=%u", constant);
                 print_constant(stream, proto, constant);
                 break;
             }
@@ -184,6 +196,12 @@ static int disassemble_proto(FILE *stream, const pproto *proto, size_t index) {
                 int16_t relative = (int16_t)code_u16(proto->code, pc);
                 fprintf(stream, " %+d -> %td haskey=%u", relative,
                         (ptrdiff_t)(pc + 3U) + relative, proto->code[pc + 2U]);
+                break;
+            }
+            case OP_STATIC_INIT: {
+                int16_t relative = (int16_t)code_u16(proto->code, pc + 1U);
+                fprintf(stream, " slot=%u %+d -> %td", proto->code[pc],
+                        relative, (ptrdiff_t)(pc + 3U) + relative);
                 break;
             }
             case OP_CLOSURE: {

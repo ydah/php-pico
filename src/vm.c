@@ -30,6 +30,94 @@ static pvalue pop(pphp_state *state) {
     return state->stack[--state->stack_count];
 }
 
+static int slot_mask_has(const uint8_t *mask, uint8_t slot) {
+    return (mask[slot >> 3U] & (uint8_t)(1U << (slot & 7U))) != 0U;
+}
+
+static void slot_mask_set(uint8_t *mask, uint8_t slot) {
+    mask[slot >> 3U] |= (uint8_t)(1U << (slot & 7U));
+}
+
+static void slot_mask_clear(uint8_t *mask, uint8_t slot) {
+    mask[slot >> 3U] &= (uint8_t)~(uint8_t)(1U << (slot & 7U));
+}
+
+static pstring *static_slot_key(pphp_state *state, const pframe *frame,
+                                uint8_t slot) {
+    const pstring *function_name = frame->proto->name;
+    const pstring *local_name = frame->proto->locals[slot];
+    size_t length = function_name->length + 2U + local_name->length;
+    char *bytes = pphp_alloc(length);
+    pstring *key;
+    if (bytes == NULL) return NULL;
+    memcpy(bytes, function_name->data, function_name->length);
+    memcpy(bytes + function_name->length, "::", 2U);
+    memcpy(bytes + function_name->length + 2U, local_name->data,
+           local_name->length);
+    key = psymbol_intern(&state->symbols, bytes, length);
+    pphp_free(bytes);
+    return key;
+}
+
+static parray *slot_storage(pphp_state *state, const pframe *frame,
+                            uint8_t slot, pstring **key) {
+    if (slot_mask_has(frame->static_mask, slot)) {
+        *key = static_slot_key(state, frame, slot);
+        return state->statics;
+    }
+    if (frame->all_globals || slot_mask_has(frame->global_mask, slot)) {
+        const pstring *local = frame->proto->locals[slot];
+        *key = psymbol_intern(&state->symbols, local->data, local->length);
+        return state->globals;
+    }
+    *key = NULL;
+    return NULL;
+}
+
+static int read_local_value(pphp_state *state, pframe *frame, uint8_t slot,
+                            pvalue *result) {
+    pstring *key;
+    parray *storage = slot_storage(state, frame, slot, &key);
+    *result = pv_null();
+    if (storage == NULL) {
+        *result = state->stack[frame->base + slot];
+        pv_retain(*result);
+        return 1;
+    }
+    if (key == NULL) {
+        pphp_runtime_error(state, frame->line,
+                           "out of memory resolving variable storage");
+        return 0;
+    }
+    (void)pa_get(storage, pv_heap(PT_STRING, &key->header), result);
+    return 1;
+}
+
+static int load_local_value(pphp_state *state, pframe *frame, uint8_t slot) {
+    pvalue value;
+    return read_local_value(state, frame, slot, &value) && push(state, value);
+}
+
+static int store_local_value(pphp_state *state, pframe *frame, uint8_t slot,
+                             pvalue value) {
+    pstring *key;
+    parray *storage = slot_storage(state, frame, slot, &key);
+    if (storage == NULL) {
+        pv_release(state->stack[frame->base + slot]);
+        state->stack[frame->base + slot] = value;
+        return 1;
+    }
+    if (key == NULL ||
+        !pa_set(storage, pv_heap(PT_STRING, &key->header), value)) {
+        pv_release(value);
+        pphp_runtime_error(state, frame->line,
+                           "out of memory storing persistent variable");
+        return 0;
+    }
+    pv_release(value);
+    return 1;
+}
+
 static uint8_t read_u8(pphp_state *state, pframe *frame) {
     if (frame->pc >= frame->proto->code_length) {
         pphp_runtime_error(state, frame->line, "truncated bytecode");
@@ -227,8 +315,8 @@ static int throw_exception(pphp_state *state, pvalue exception,
             if (entry->class_constant == UINT16_MAX) {
                 if (entry->variable_slot != UINT8_MAX &&
                     entry->variable_slot < frame->proto->n_locals) {
-                    pv_release(state->stack[frame->base + entry->variable_slot]);
-                    state->stack[frame->base + entry->variable_slot] = exception;
+                    (void)store_local_value(state, frame,
+                                            entry->variable_slot, exception);
                 } else {
                     pv_release(exception);
                     pphp_runtime_error(state, frame->line,
@@ -237,8 +325,8 @@ static int throw_exception(pphp_state *state, pvalue exception,
                 }
             } else if (entry->variable_slot != UINT8_MAX &&
                        entry->variable_slot < frame->proto->n_locals) {
-                pv_release(state->stack[frame->base + entry->variable_slot]);
-                state->stack[frame->base + entry->variable_slot] = exception;
+                (void)store_local_value(state, frame, entry->variable_slot,
+                                        exception);
             } else {
                 pv_release(exception);
             }
@@ -478,6 +566,8 @@ static int call_function(pphp_state *state, pframe *caller, uint16_t name_index,
         return 0;
     }
     state->stack_count = argument_base + callee->n_locals;
+    memset(&state->frames[state->frame_count], 0,
+           sizeof(state->frames[state->frame_count]));
     state->frames[state->frame_count].proto = callee;
     state->frames[state->frame_count].pc = 0U;
     state->frames[state->frame_count].base = argument_base;
@@ -528,6 +618,8 @@ static int call_named_value(pphp_state *state, pframe *caller,
     }
     pv_release(callable);
     state->stack_count = base + callee->n_locals;
+    memset(&state->frames[state->frame_count], 0,
+           sizeof(state->frames[state->frame_count]));
     state->frames[state->frame_count].proto = callee;
     state->frames[state->frame_count].pc = 0U;
     state->frames[state->frame_count].base = base;
@@ -627,6 +719,8 @@ static int call_value(pphp_state *state, pframe *caller,
     }
     pv_release(callable);
     state->stack_count = base + callee->n_locals;
+    memset(&state->frames[state->frame_count], 0,
+           sizeof(state->frames[state->frame_count]));
     state->frames[state->frame_count].proto = callee;
     state->frames[state->frame_count].pc = 0U;
     state->frames[state->frame_count].base = base;
@@ -743,6 +837,8 @@ static int enter_method(pphp_state *state, pframe *caller, const pmethod *method
         return 0;
     }
     state->stack_count = base + callee->n_locals;
+    memset(&state->frames[state->frame_count], 0,
+           sizeof(state->frames[state->frame_count]));
     state->frames[state->frame_count].proto = callee;
     state->frames[state->frame_count].pc = 0U;
     state->frames[state->frame_count].base = base;
@@ -886,11 +982,13 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
     state->module = module;
     state->stack_count = module->protos[0]->n_locals;
     state->frame_count = 1U;
+    memset(&state->frames[0], 0, sizeof(state->frames[0]));
     state->frames[0].proto = module->protos[0];
     state->frames[0].pc = 0U;
     state->frames[0].base = 0U;
     state->frames[0].line = 1U;
     state->frames[0].argument_count = 0U;
+    state->frames[0].all_globals = 1U;
     state->frames[0].has_return_override = 0;
     state->frames[0].return_override = pv_null();
     state->frames[0].called_scope = NULL;
@@ -958,9 +1056,7 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                 if (slot >= frame->proto->n_locals) {
                     pphp_runtime_error(state, frame->line, "local index out of range");
                 } else {
-                    pvalue value = state->stack[frame->base + slot];
-                    pv_retain(value);
-                    (void)push(state, value);
+                    (void)load_local_value(state, frame, slot);
                 }
                 break;
             }
@@ -971,14 +1067,66 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                     pv_release(value);
                     pphp_runtime_error(state, frame->line, "local index out of range");
                 } else {
-                    pv_release(state->stack[frame->base + slot]);
-                    state->stack[frame->base + slot] = value;
+                    (void)store_local_value(state, frame, slot, value);
                 }
                 break;
             }
             case OP_LOAD_ARGC:
                 (void)push(state, pv_int((pphp_int)frame->argument_count));
                 break;
+            case OP_BIND_GLOBAL: {
+                uint8_t slot = read_u8(state, frame);
+                if (slot >= frame->proto->n_locals) {
+                    pphp_runtime_error(state, frame->line,
+                                       "global binding slot is invalid");
+                } else {
+                    slot_mask_clear(frame->static_mask, slot);
+                    slot_mask_set(frame->global_mask, slot);
+                    pv_release(state->stack[frame->base + slot]);
+                    state->stack[frame->base + slot] = pv_null();
+                }
+                break;
+            }
+            case OP_STATIC_INIT: {
+                uint8_t slot = read_u8(state, frame);
+                int16_t relative = read_i16(state, frame);
+                pstring *key;
+                pvalue existing = pv_null();
+                if (slot >= frame->proto->n_locals) {
+                    pphp_runtime_error(state, frame->line,
+                                       "static binding slot is invalid");
+                    break;
+                }
+                slot_mask_clear(frame->global_mask, slot);
+                slot_mask_set(frame->static_mask, slot);
+                pv_release(state->stack[frame->base + slot]);
+                state->stack[frame->base + slot] = pv_null();
+                key = static_slot_key(state, frame, slot);
+                if (key == NULL) {
+                    pphp_runtime_error(state, frame->line,
+                                       "out of memory binding static variable");
+                } else if (pa_get(state->statics,
+                                  pv_heap(PT_STRING, &key->header), &existing)) {
+                    pv_release(existing);
+                    (void)jump_relative(state, frame, relative);
+                }
+                break;
+            }
+            case OP_LOAD_NAMED_CONST: {
+                uint16_t index = read_u16(state, frame);
+                const pstring *name = constant_string(state, frame, index);
+                pvalue value = pv_null();
+                if (name == NULL) break;
+                if (!pa_get(state->constants,
+                            pv_heap(PT_STRING, (pheader *)&name->header), &value)) {
+                    pphp_runtime_error(state, frame->line,
+                                       "undefined constant %.*s",
+                                       (int)name->length, name->data);
+                } else {
+                    (void)push(state, value);
+                }
+                break;
+            }
             case OP_ADD: case OP_SUB: case OP_MUL: case OP_DIV: case OP_MOD:
             case OP_POW: case OP_CONCAT: case OP_BAND: case OP_BOR: case OP_BXOR:
             case OP_SHL: case OP_SHR:
@@ -1306,6 +1454,34 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                 }
                 break;
             }
+            case OP_DEF_CONST: {
+                uint16_t name_index = read_u16(state, frame);
+                const pstring *name = constant_string(state, frame, name_index);
+                pvalue value = pop(state);
+                pvalue existing = pv_null();
+                if (name == NULL) {
+                    pv_release(value);
+                    break;
+                }
+                if (pa_get(state->constants,
+                           pv_heap(PT_STRING, (pheader *)&name->header),
+                           &existing)) {
+                    pv_release(existing);
+                    pv_release(value);
+                    pphp_runtime_error(state, frame->line,
+                                       "constant %.*s is already defined",
+                                       (int)name->length, name->data);
+                } else if (!pa_set(state->constants,
+                                   pv_heap(PT_STRING, (pheader *)&name->header),
+                                   value)) {
+                    pv_release(value);
+                    pphp_runtime_error(state, frame->line,
+                                       "out of memory defining constant");
+                } else {
+                    pv_release(value);
+                }
+                break;
+            }
             case OP_DEF_END:
                 if (state->building_class == NULL ||
                     !pphp_register_class(state, state->building_class)) {
@@ -1444,17 +1620,25 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                     if (kind != 0U || slot >= frame->proto->n_locals) {
                         valid = 0;
                         captures[capture] = pv_null();
-                    } else {
-                        captures[capture] = state->stack[frame->base + slot];
+                    } else if (!read_local_value(state, frame, slot,
+                                                 &captures[capture])) {
+                        valid = 0;
                     }
                 }
                 if (!valid) {
+                    while (capture > 0U) {
+                        capture--;
+                        pv_release(captures[capture]);
+                    }
                     pphp_runtime_error(state, frame->line,
                                        "invalid CLOSURE instruction");
                     break;
                 }
                 closure = pclosure_new(state->module->protos[proto_index],
                                        captures, capture_count);
+                for (capture = 0U; capture < capture_count; capture++) {
+                    pv_release(captures[capture]);
+                }
                 if (closure == NULL) {
                     pphp_runtime_error(state, frame->line,
                                        "out of memory creating closure");

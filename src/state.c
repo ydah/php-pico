@@ -4,8 +4,11 @@
 #include "parser.h"
 #include "vm.h"
 #include "pclass.h"
+#include "parray.h"
 
 #include <stdarg.h>
+#include <float.h>
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -13,6 +16,34 @@ static void discard_output(void *context, const char *bytes, size_t length) {
     (void)context;
     (void)bytes;
     (void)length;
+}
+
+static int set_constant(pphp_state *state, const char *name, pvalue value) {
+    pstring *key = psymbol_intern(&state->symbols, name, strlen(name));
+    return key != NULL && pa_set(state->constants,
+                                 pv_heap(PT_STRING, &key->header), value);
+}
+
+static int initialize_constants(pphp_state *state) {
+    pstring *newline = ps_new("\n", 1U);
+    pvalue newline_value;
+    int ok;
+    if (newline == NULL) return 0;
+    newline_value = pv_heap(PT_STRING, &newline->header);
+    ok = set_constant(state, "PHP_INT_MAX",
+                      pv_int((pphp_int)(PPHP_INT64 ? INT64_MAX : INT32_MAX))) &&
+         set_constant(state, "PHP_INT_SIZE", pv_int((pphp_int)sizeof(pphp_int))) &&
+         set_constant(state, "PHP_FLOAT_EPSILON",
+                      pv_float((pphp_float)(PPHP_USE_DOUBLE ? DBL_EPSILON
+                                                           : FLT_EPSILON))) &&
+         set_constant(state, "M_PI", pv_float((pphp_float)3.14159265358979323846)) &&
+         set_constant(state, "NAN", pv_float((pphp_float)NAN)) &&
+         set_constant(state, "INF", pv_float((pphp_float)INFINITY)) &&
+         set_constant(state, "PHP_EOL", newline_value) &&
+         set_constant(state, "JSON_PRETTY_PRINT", pv_int(128)) &&
+         set_constant(state, "FILE_APPEND", pv_int(8));
+    pv_release(newline_value);
+    return ok;
 }
 
 pphp_state *pphp_open(void *pool, size_t pool_size) {
@@ -30,6 +61,26 @@ pphp_state *pphp_open(void *pool, size_t pool_size) {
         pphp_free(state);
         return NULL;
     }
+    state->globals = pa_new(16U);
+    state->statics = pa_new(8U);
+    state->constants = pa_new(16U);
+    if (state->globals == NULL || state->statics == NULL ||
+        state->constants == NULL) {
+        pa_destroy(state->globals);
+        pa_destroy(state->statics);
+        pa_destroy(state->constants);
+        psymbol_destroy(&state->symbols);
+        pphp_free(state);
+        return NULL;
+    }
+    if (!initialize_constants(state)) {
+        pa_destroy(state->globals);
+        pa_destroy(state->statics);
+        pa_destroy(state->constants);
+        psymbol_destroy(&state->symbols);
+        pphp_free(state);
+        return NULL;
+    }
     return state;
 }
 
@@ -38,6 +89,9 @@ void pphp_close(pphp_state *state) {
         return;
     }
     pphp_clear_classes(state);
+    pa_destroy(state->globals);
+    pa_destroy(state->statics);
+    pa_destroy(state->constants);
     psymbol_destroy(&state->symbols);
     pphp_free(state);
 }

@@ -593,6 +593,42 @@ TEST(array_and_argument_unpacking_preserve_evaluation_order) {
     ASSERT_STR("6:15:15:3:7:0,5,6,2,7", output.bytes);
 }
 
+TEST(global_static_and_named_constants_use_persistent_storage) {
+    const char *source =
+        "const BASE = 3, TOTAL = BASE + 2;"
+        "$counter = 10;"
+        "function change($amount) {"
+        " global $counter; $counter += $amount; return $counter;"
+        "}"
+        "function tick() { static $value = 1; return $value++; }"
+        "function conditionalGlobal() {"
+        " $value = 9; if (false) { global $value; } return $value;"
+        "}"
+        "function defaultConstant($value = TOTAL) { return $value; }"
+        "echo change(2), ':', $counter, ':', tick(), ',', tick(), ':',"
+        " conditionalGlobal(), ':', defaultConstant(), ':',"
+        " (PHP_INT_MAX > 0 ? 1 : 0), ':', PHP_INT_SIZE;";
+    output_buffer output;
+    ASSERT_EQ(PPHP_OK, execute(source, &output, NULL, 0U));
+    ASSERT_STR("12:12:1,2:9:5:1:4", output.bytes);
+}
+
+TEST(repl_chunks_retain_globals_and_constants_by_name) {
+    const char *first = "$value = 40; const STEP = 2;";
+    const char *second = "echo $value + STEP;";
+    pphp_state *state = pphp_open(vm_pool, sizeof(vm_pool));
+    output_buffer output;
+    ASSERT_TRUE(state != NULL);
+    memset(&output, 0, sizeof(output));
+    pphp_set_output(state, capture_output, &output);
+    ASSERT_EQ(PPHP_OK,
+              pphp_exec_source_mode(state, first, strlen(first), "repl-1", 1));
+    ASSERT_EQ(PPHP_OK,
+              pphp_exec_source_mode(state, second, strlen(second), "repl-2", 1));
+    ASSERT_STR("42", output.bytes);
+    pphp_close(state);
+}
+
 int main(void) {
     static const test_case tests[] = {
         {"arithmetic VM", arithmetic_runs_through_compiler_and_vm},
@@ -631,7 +667,9 @@ int main(void) {
         {"string builtins", string_builtins_cover_search_transform_split_and_join},
         {"array builtins", array_builtins_preserve_php_key_and_order_rules},
         {"default and variadic parameters", default_and_variadic_parameters_work_for_all_callable_forms},
-        {"array and argument unpacking", array_and_argument_unpacking_preserve_evaluation_order}
+        {"array and argument unpacking", array_and_argument_unpacking_preserve_evaluation_order},
+        {"persistent language bindings", global_static_and_named_constants_use_persistent_storage},
+        {"REPL global persistence", repl_chunks_retain_globals_and_constants_by_name}
     };
     return run_tests(tests, sizeof(tests) / sizeof(tests[0]));
 }

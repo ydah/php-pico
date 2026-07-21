@@ -26,6 +26,9 @@ typedef enum pphp_opcode {
     OP_LOAD_LOCAL = 0x16,
     OP_STORE_LOCAL = 0x17,
     OP_LOAD_ARGC = 0x18,
+    OP_BIND_GLOBAL = 0x19,
+    OP_STATIC_INIT = 0x1a,
+    OP_LOAD_NAMED_CONST = 0x1b,
     OP_ADD = 0x20,
     OP_SUB = 0x21,
     OP_MUL = 0x22,
@@ -86,6 +89,7 @@ typedef enum pphp_opcode {
     OP_DEF_CLASS = 0x86,
     OP_DEF_METHOD = 0x87,
     OP_DEF_PROP = 0x88,
+    OP_DEF_CONST = 0x89,
     OP_DEF_END = 0x8a,
     OP_LINE = 0x90
 } pphp_opcode;

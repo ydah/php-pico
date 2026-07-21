@@ -76,11 +76,13 @@ void pc_ast_append(pc_ast **head, pc_ast **tail, pc_ast *node) {
     if (node == NULL) {
         return;
     }
-    node->next = NULL;
     if (*tail == NULL) {
         *head = node;
     } else {
         (*tail)->next = node;
+    }
+    while (node->next != NULL) {
+        node = node->next;
     }
     *tail = node;
 }

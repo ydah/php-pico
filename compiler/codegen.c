@@ -376,8 +376,9 @@ static int collect_captures(capture_set *set, const pc_ast *node) {
         case AST_BLOCK:
         case AST_ARRAY:
         case AST_ECHO:
-        case AST_GLOBAL:
             return collect_capture_list(set, node->as.list.items);
+        case AST_GLOBAL:
+            return 1;
         case AST_UNARY:
         case AST_UNSET:
         case AST_ISSET:
@@ -699,6 +700,7 @@ static int is_constant_default(const pc_ast *node) {
         case AST_INT:
         case AST_FLOAT:
         case AST_STRING:
+        case AST_IDENTIFIER:
             return 1;
         case AST_UNARY:
             return node->as.unary.op != T_ELLIPSIS &&
@@ -946,6 +948,12 @@ static void compile_expression(generator *gen, const pc_ast *node) {
             value = pv_heap(PT_STRING, &string->header);
             emit_constant(gen, value, node->line);
             pv_release(value);
+            break;
+        }
+        case AST_IDENTIFIER: {
+            uint16_t name = name_constant(gen, node->as.literal.token);
+            emit_byte(gen, OP_LOAD_NAMED_CONST, node->line);
+            emit_u16(gen, name, node->line);
             break;
         }
         case AST_VARIABLE: {
@@ -1754,27 +1762,55 @@ static void compile_statement(generator *gen, const pc_ast *node) {
         case AST_CLASS:
             compile_class_definition(gen, node);
             break;
-        case AST_STATIC:
+        case AST_STATIC: {
+            uint8_t slot;
+            size_t skip;
+            if (!variable_slot(gen, node->as.binding.name, &slot)) break;
+            if (node->as.binding.value != NULL &&
+                !is_constant_default(node->as.binding.value)) {
+                fail(gen, node->line,
+                     "static variable initializer must be a constant expression");
+                break;
+            }
+            emit_byte(gen, OP_STATIC_INIT, node->line);
+            emit_byte(gen, slot, node->line);
+            skip = gen->proto->code_length;
+            emit_u16(gen, 0U, node->line);
             if (node->as.binding.value != NULL) {
-                pc_ast variable;
-                pc_ast assignment;
-                memset(&variable, 0, sizeof(variable));
-                memset(&assignment, 0, sizeof(assignment));
-                variable.kind = AST_VARIABLE;
-                variable.line = node->line;
-                variable.as.literal.token = node->as.binding.name;
-                assignment.kind = AST_ASSIGN;
-                assignment.line = node->line;
-                assignment.as.binary.op = T_EQUAL;
-                assignment.as.binary.left = &variable;
-                assignment.as.binary.right = node->as.binding.value;
-                compile_expression(gen, &assignment);
-                emit_byte(gen, OP_POP, node->line);
+                compile_expression(gen, node->as.binding.value);
+            } else {
+                emit_byte(gen, OP_LOAD_NULL, node->line);
+            }
+            emit_byte(gen, OP_STORE_LOCAL, node->line);
+            emit_byte(gen, slot, node->line);
+            patch_jump(gen, skip, gen->proto->code_length, node->line);
+            break;
+        }
+        case AST_GLOBAL: {
+            const pc_ast *variable = node->as.list.items;
+            while (variable != NULL) {
+                uint8_t slot;
+                if (!variable_slot(gen, variable->as.literal.token, &slot)) break;
+                emit_byte(gen, OP_BIND_GLOBAL, variable->line);
+                emit_byte(gen, slot, variable->line);
+                variable = variable->next;
             }
             break;
-        case AST_GLOBAL:
+        }
+        case AST_CONST: {
+            uint16_t name;
+            if (node->as.binding.value == NULL ||
+                !is_constant_default(node->as.binding.value)) {
+                fail(gen, node->line,
+                     "constant initializer must be a constant expression");
+                break;
+            }
+            compile_expression(gen, node->as.binding.value);
+            name = name_constant(gen, node->as.binding.name);
+            emit_byte(gen, OP_DEF_CONST, node->line);
+            emit_u16(gen, name, node->line);
             break;
-        case AST_CONST:
+        }
         case AST_INCLUDE:
             fail(gen, node->line, "%s requires a later runtime milestone",
                  pc_ast_kind_name(node->kind));

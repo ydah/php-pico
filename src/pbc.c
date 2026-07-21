@@ -267,6 +267,11 @@ static int collect_strings(const pmodule *module, string_list *strings) {
                 return 0;
             }
         }
+        for (j = 0U; j < module->protos[i]->n_locals; j++) {
+            if (!strings_add(strings, module->protos[i]->locals[j], &ignored)) {
+                return 0;
+            }
+        }
     }
     return 1;
 }
@@ -322,6 +327,7 @@ int pphp_pbc_write_file(const pmodule *module, const char *path) {
         for (j = 0U; j < proto->constant_count; j++) {
             total += serialized_constant_size(proto->constants[j]);
         }
+        total += (size_t)proto->n_locals * 2U;
         total += proto->catch_count * 10U;
         total = align4(total);
     }
@@ -330,7 +336,7 @@ int pphp_pbc_write_file(const pmodule *module, const char *path) {
     if (bytes == NULL) goto done;
     memset(bytes, 0, total);
     memcpy(bytes, "PPBC", 4U);
-    put_u16(bytes, 4U, 1U);
+    put_u16(bytes, 4U, 2U);
     put_u16(bytes, 6U, (uint16_t)((PPHP_INT64 ? 1U : 0U) |
                                   (PPHP_USE_DOUBLE ? 2U : 0U)));
     put_u32(bytes, 8U, (uint32_t)total);
@@ -397,6 +403,12 @@ int pphp_pbc_write_file(const pmodule *module, const char *path) {
             } else {
                 goto done;
             }
+        }
+        for (j = 0U; j < proto->n_locals; j++) {
+            uint16_t local_sid;
+            if (!string_index(&strings, proto->locals[j], &local_sid)) goto done;
+            put_u16(bytes, offset, local_sid);
+            offset += 2U;
         }
         for (j = 0U; j < proto->catch_count; j++) {
             const pcatch *entry = &proto->catches[j];
@@ -473,7 +485,7 @@ int pphp_pbc_load(const void *data, size_t length, pmodule *module) {
     size_t i;
     int result = PPHP_E_PARSE;
     if (bytes == NULL || length < 16U || memcmp(bytes, "PPBC", 4U) != 0 ||
-        get_u16(bytes, 4U) != 1U || get_u32(bytes, 8U) != length) {
+        get_u16(bytes, 4U) != 2U || get_u32(bytes, 8U) != length) {
         return PPHP_E_PARSE;
     }
     n_protos = get_u16(bytes, 12U);
@@ -507,6 +519,7 @@ int pphp_pbc_load(const void *data, size_t length, pmodule *module) {
         uint16_t constant_count;
         uint16_t catch_count;
         uint16_t name_sid;
+        uint8_t local_count;
         pproto *proto;
         size_t j;
         if (offset + 16U > length) goto failed_module;
@@ -527,7 +540,7 @@ int pphp_pbc_load(const void *data, size_t length, pmodule *module) {
         proto->n_required = bytes[offset + 1U];
         proto->variadic = (uint8_t)(bytes[offset + 2U] & 1U);
         proto->is_method = (uint8_t)((bytes[offset + 2U] & 2U) != 0U);
-        proto->n_locals = bytes[offset + 3U];
+        local_count = bytes[offset + 3U];
         proto->max_stack = get_u16(bytes, offset + 6U);
         proto->code = pphp_alloc(code_length);
         if (code_length != 0U && proto->code == NULL) {
@@ -574,6 +587,19 @@ int pphp_pbc_load(const void *data, size_t length, pmodule *module) {
                 result = PPHP_E_NOMEM;
                 goto failed_module;
             }
+        }
+        for (j = 0U; j < local_count; j++) {
+            uint16_t local_sid;
+            uint8_t slot;
+            if (offset + 2U > length) goto failed_module;
+            local_sid = get_u16(bytes, offset);
+            if (local_sid >= n_strings ||
+                !pproto_add_local(proto, strings[local_sid]->data,
+                                  strings[local_sid]->length, &slot) ||
+                slot != j) {
+                goto failed_module;
+            }
+            offset += 2U;
         }
         for (j = 0U; j < catch_count; j++) {
             pcatch entry;
@@ -635,6 +661,9 @@ const char *pphp_opcode_name(uint8_t opcode) {
         case OP_LOAD_LOCAL: return "LOAD_LOCAL";
         case OP_STORE_LOCAL: return "STORE_LOCAL";
         case OP_LOAD_ARGC: return "LOAD_ARGC";
+        case OP_BIND_GLOBAL: return "BIND_GLOBAL";
+        case OP_STATIC_INIT: return "STATIC_INIT";
+        case OP_LOAD_NAMED_CONST: return "LOAD_NAMED_CONST";
         case OP_ADD: return "ADD";
         case OP_SUB: return "SUB";
         case OP_MUL: return "MUL";
@@ -695,6 +724,7 @@ const char *pphp_opcode_name(uint8_t opcode) {
         case OP_DEF_CLASS: return "DEF_CLASS";
         case OP_DEF_METHOD: return "DEF_METHOD";
         case OP_DEF_PROP: return "DEF_PROP";
+        case OP_DEF_CONST: return "DEF_CONST";
         case OP_DEF_END: return "DEF_END";
         case OP_LINE: return "LINE";
         default: return "UNKNOWN";

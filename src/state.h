@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "pbc.h"
+#include "parray.h"
 #include "pphp/pphp.h"
 #include "symbol.h"
 
@@ -14,6 +15,9 @@ typedef struct pframe {
     size_t base;
     uint32_t line;
     uint8_t argument_count;
+    uint8_t all_globals;
+    uint8_t global_mask[32];
+    uint8_t static_mask[32];
     pvalue return_override;
     int has_return_override;
     pclass *called_scope;
@@ -26,6 +30,9 @@ struct pphp_state {
     size_t frame_count;
     const pmodule *module;
     psymbol_table symbols;
+    parray *globals;
+    parray *statics;
+    parray *constants;
     pclass **classes;
     size_t class_count;
     size_t class_capacity;
