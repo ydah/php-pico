@@ -194,6 +194,8 @@ TEST(pbc_serialization_round_trips_through_loader) {
     }
     pmodule_destroy(&original);
     ASSERT_EQ(PPHP_OK, pphp_pbc_read_file(path, &loaded));
+    ASSERT_TRUE(loaded.owns_backing != 0U);
+    ASSERT_TRUE(loaded.protos[0]->owns_code == 0U);
     memset(&output, 0, sizeof(output));
     pphp_set_output(state, capture_output, &output);
     ASSERT_EQ(PPHP_OK, pphp_vm_execute(state, &loaded));
@@ -225,6 +227,24 @@ TEST(language_conformance_covers_casts_lvalues_nullsafe_and_interpolation) {
     output_buffer output;
     ASSERT_EQ(PPHP_OK, execute(source, &output, NULL, 0U));
     ASSERT_STR("1:13:1:3:5::3", output.bytes);
+}
+
+TEST(member_lvalues_and_dynamic_names_preserve_cow_and_evaluation_order) {
+    const char *source =
+        "class MemberBox {"
+        " public $items = [3, 1, 2]; public static $shared = [2, 1];"
+        " public function total($extra) { return array_sum($this->items) + $extra; }"
+        "}"
+        "$box = new MemberBox(); $original = $box->items;"
+        "$property = 'items'; $method = 'total'; $evaluations = 0;"
+        "$box->{$property}[$evaluations++] += 4;"
+        "sort($box->items); rsort(MemberBox::$shared);"
+        "echo $original[0], ':', implode(',', $box->items), ':',"
+        " implode(',', MemberBox::$shared), ':', $box->$method(1), ':',"
+        " isset($box->{$property}), ':', $evaluations;";
+    output_buffer output;
+    ASSERT_EQ(PPHP_OK, execute(source, &output, NULL, 0U));
+    ASSERT_STR("3:1,2,7:2,1:11:1:1", output.bytes);
 }
 
 TEST(conditional_functions_register_only_when_their_declaration_executes) {
@@ -1118,6 +1138,7 @@ int main(void) {
         {"PBC round trip", pbc_serialization_round_trips_through_loader},
         {"array COW runtime", arrays_use_copy_on_write_and_normalized_keys},
         {"language conformance", language_conformance_covers_casts_lvalues_nullsafe_and_interpolation},
+        {"member lvalues", member_lvalues_and_dynamic_names_preserve_cow_and_evaluation_order},
         {"conditional functions", conditional_functions_register_only_when_their_declaration_executes},
         {"foreach runtime", foreach_preserves_insertion_order_and_supports_break_continue},
         {"foreach snapshot", foreach_uses_snapshot_when_array_is_modified},

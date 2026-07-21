@@ -116,6 +116,7 @@ struct pc_ast {
         } index;
         struct {
             pc_ast *base;
+            pc_ast *dynamic_name;
             pc_token name;
             pc_token_type op;
         } member;

@@ -533,7 +533,8 @@ static int collect_captures(capture_set *set, const pc_ast *node) {
             return collect_captures(set, node->as.index.base) &&
                    collect_captures(set, node->as.index.key);
         case AST_MEMBER:
-            return collect_captures(set, node->as.member.base);
+            return collect_captures(set, node->as.member.base) &&
+                   collect_captures(set, node->as.member.dynamic_name);
         case AST_ARRAY_ITEM:
             return collect_captures(set, node->as.array_item.key) &&
                    collect_captures(set, node->as.array_item.value);
@@ -913,6 +914,11 @@ typedef struct index_lvalue {
     uint8_t key_slots[PPHP_PARSE_DEPTH_MAX];
     uint8_t parent_slots[PPHP_PARSE_DEPTH_MAX];
     uint8_t root_slot;
+    uint8_t root_object_slot;
+    uint8_t root_name_slot;
+    const pc_ast *root_member;
+    int root_is_static;
+    int root_is_dynamic;
     size_t depth;
 } index_lvalue;
 
@@ -947,12 +953,60 @@ static int prepare_index_lvalue(generator *gen, const pc_ast *leaf,
         reverse[count++] = cursor;
         cursor = cursor->as.index.base;
     }
-    if (count == 0U || cursor == NULL || cursor->kind != AST_VARIABLE ||
-        !variable_slot(gen, cursor->as.literal.token, &lvalue->root_slot)) {
+    if (count == 0U || cursor == NULL) {
         if (!gen->failed) {
             fail(gen, leaf->line,
                  "array assignment must ultimately target a variable");
         }
+        return 0;
+    }
+    if (cursor->kind == AST_VARIABLE) {
+        if (!variable_slot(gen, cursor->as.literal.token,
+                           &lvalue->root_slot)) return 0;
+    } else if (cursor->kind == AST_MEMBER &&
+               cursor->as.member.op != T_NULLSAFE_ARROW &&
+               (cursor->as.member.op == T_ARROW ||
+                (cursor->as.member.op == T_SCOPE &&
+                 cursor->as.member.base->kind == AST_IDENTIFIER))) {
+        uint16_t name;
+        lvalue->root_member = cursor;
+        lvalue->root_is_static = cursor->as.member.op == T_SCOPE;
+        lvalue->root_is_dynamic = cursor->as.member.dynamic_name != NULL;
+        if (lvalue->root_is_static && lvalue->root_is_dynamic) {
+            fail(gen, cursor->line, "dynamic static property is invalid");
+            return 0;
+        }
+        if (!temporary_slot(gen, cursor->line, &lvalue->root_slot)) return 0;
+        if (lvalue->root_is_static) {
+            uint16_t class_name = name_constant(
+                gen, cursor->as.member.base->as.literal.token);
+            name = member_name_constant(gen, cursor->as.member.name);
+            emit_byte(gen, OP_SPROP_GET, cursor->line);
+            emit_u16(gen, class_name, cursor->line);
+            emit_u16(gen, name, cursor->line);
+        } else {
+            if (!temporary_slot(gen, cursor->line,
+                                &lvalue->root_object_slot)) return 0;
+            compile_expression(gen, cursor->as.member.base);
+            emit_store_slot(gen, lvalue->root_object_slot, cursor->line);
+            emit_load_slot(gen, lvalue->root_object_slot, cursor->line);
+            if (lvalue->root_is_dynamic) {
+                if (!temporary_slot(gen, cursor->line,
+                                    &lvalue->root_name_slot)) return 0;
+                compile_expression(gen, cursor->as.member.dynamic_name);
+                emit_store_slot(gen, lvalue->root_name_slot, cursor->line);
+                emit_load_slot(gen, lvalue->root_name_slot, cursor->line);
+                emit_byte(gen, OP_PROP_GET_DYNAMIC, cursor->line);
+            } else {
+                name = name_constant(gen, cursor->as.member.name);
+                emit_byte(gen, OP_PROP_GET, cursor->line);
+                emit_u16(gen, name, cursor->line);
+            }
+        }
+        emit_store_slot(gen, lvalue->root_slot, cursor->line);
+    } else {
+        fail(gen, leaf->line,
+             "array assignment must ultimately target a variable or property");
         return 0;
     }
     lvalue->depth = count;
@@ -1018,6 +1072,48 @@ static void clear_index_lvalue(generator *gen, const index_lvalue *lvalue,
             clear_temporary_slot(gen, lvalue->parent_slots[i], line);
         }
     }
+    if (lvalue->root_member != NULL) {
+        clear_temporary_slot(gen, lvalue->root_slot, line);
+        if (!lvalue->root_is_static) {
+            clear_temporary_slot(gen, lvalue->root_object_slot, line);
+            if (lvalue->root_is_dynamic) {
+                clear_temporary_slot(gen, lvalue->root_name_slot, line);
+            }
+        }
+    }
+}
+
+static void store_index_root(generator *gen, const index_lvalue *lvalue,
+                             uint32_t line) {
+    emit_store_slot(gen, lvalue->root_slot, line);
+    if (lvalue->root_member != NULL) {
+        uint16_t name;
+        if (lvalue->root_is_static) {
+            uint16_t class_name = name_constant(
+                gen, lvalue->root_member->as.member.base->as.literal.token);
+            name = member_name_constant(gen,
+                                        lvalue->root_member->as.member.name);
+            emit_load_slot(gen, lvalue->root_slot, line);
+            emit_byte(gen, OP_SPROP_SET, line);
+            emit_u16(gen, class_name, line);
+            emit_u16(gen, name, line);
+        } else {
+            emit_load_slot(gen, lvalue->root_object_slot, line);
+            if (lvalue->root_is_dynamic) {
+                emit_load_slot(gen, lvalue->root_name_slot, line);
+            } else {
+                name = name_constant(gen,
+                                     lvalue->root_member->as.member.name);
+            }
+            emit_load_slot(gen, lvalue->root_slot, line);
+            emit_byte(gen,
+                      lvalue->root_is_dynamic ? OP_PROP_SET_DYNAMIC
+                                              : OP_PROP_SET,
+                      line);
+            if (!lvalue->root_is_dynamic) emit_u16(gen, name, line);
+        }
+        emit_byte(gen, OP_POP, line);
+    }
 }
 
 static void propagate_index_update(generator *gen,
@@ -1035,7 +1131,7 @@ static void propagate_index_update(generator *gen,
         emit_byte(gen, OP_IDX_SET, line);
         emit_byte(gen, OP_POP, line);
     }
-    emit_store_slot(gen, lvalue->root_slot, line);
+    store_index_root(gen, lvalue, line);
     clear_temporary_slot(gen, update_slot, line);
 }
 
@@ -1119,9 +1215,11 @@ static void compile_member_assignment(generator *gen, const pc_ast *node) {
     uint16_t name;
     uint8_t value_slot;
     uint8_t object_slot = 0U;
+    uint8_t name_slot = 0U;
     size_t complete = 0U;
     pphp_opcode opcode = OP_NOP;
     int is_static = member->as.member.op == T_SCOPE;
+    int is_dynamic = member->as.member.dynamic_name != NULL;
     if (member->as.member.op == T_NULLSAFE_ARROW) {
         fail(gen, node->line, "nullsafe property access is not assignable");
         return;
@@ -1134,13 +1232,24 @@ static void compile_member_assignment(generator *gen, const pc_ast *node) {
         fail(gen, node->line, "invalid static property target");
         return;
     }
+    if (is_static && is_dynamic) {
+        fail(gen, node->line, "dynamic static property target is invalid");
+        return;
+    }
     if (!temporary_slot(gen, node->line, &value_slot)) return;
-    name = is_static ? member_name_constant(gen, member->as.member.name)
-                     : name_constant(gen, member->as.member.name);
+    name = is_dynamic ? 0U
+                      : (is_static
+                             ? member_name_constant(gen, member->as.member.name)
+                             : name_constant(gen, member->as.member.name));
     if (!is_static) {
         if (!temporary_slot(gen, node->line, &object_slot)) return;
         compile_expression(gen, member->as.member.base);
         emit_store_slot(gen, object_slot, node->line);
+        if (is_dynamic) {
+            if (!temporary_slot(gen, node->line, &name_slot)) return;
+            compile_expression(gen, member->as.member.dynamic_name);
+            emit_store_slot(gen, name_slot, node->line);
+        }
     }
     if (operation != T_EQUAL) {
         if (is_static) {
@@ -1151,8 +1260,13 @@ static void compile_member_assignment(generator *gen, const pc_ast *node) {
             emit_u16(gen, name, node->line);
         } else {
             emit_load_slot(gen, object_slot, node->line);
-            emit_byte(gen, OP_PROP_GET, node->line);
-            emit_u16(gen, name, node->line);
+            if (is_dynamic) {
+                emit_load_slot(gen, name_slot, node->line);
+                emit_byte(gen, OP_PROP_GET_DYNAMIC, node->line);
+            } else {
+                emit_byte(gen, OP_PROP_GET, node->line);
+                emit_u16(gen, name, node->line);
+            }
         }
         if (operation == T_COALESCE_EQUAL) {
             complete = emit_jump(gen, OP_JMP_NOTNULL_KEEP, node->line);
@@ -1178,14 +1292,17 @@ static void compile_member_assignment(generator *gen, const pc_ast *node) {
         emit_u16(gen, name, node->line);
     } else {
         emit_load_slot(gen, object_slot, node->line);
+        if (is_dynamic) emit_load_slot(gen, name_slot, node->line);
         emit_load_slot(gen, value_slot, node->line);
-        emit_byte(gen, OP_PROP_SET, node->line);
-        emit_u16(gen, name, node->line);
+        emit_byte(gen, is_dynamic ? OP_PROP_SET_DYNAMIC : OP_PROP_SET,
+                  node->line);
+        if (!is_dynamic) emit_u16(gen, name, node->line);
     }
     if (operation == T_COALESCE_EQUAL) {
         patch_jump(gen, complete, gen->proto->code_length, node->line);
     }
     if (!is_static) clear_temporary_slot(gen, object_slot, node->line);
+    if (is_dynamic) clear_temporary_slot(gen, name_slot, node->line);
     clear_temporary_slot(gen, value_slot, node->line);
 }
 
@@ -1278,20 +1395,27 @@ static void compile_increment(generator *gen, const pc_ast *node) {
         const pc_ast *member = node->as.unary.operand;
         uint8_t object_slot = 0U;
         uint8_t value_slot;
+        uint8_t name_slot = 0U;
         uint8_t old_slot = 0U;
         uint16_t name;
         int is_static = member->as.member.op == T_SCOPE;
+        int is_dynamic = member->as.member.dynamic_name != NULL;
         if (member->as.member.op == T_NULLSAFE_ARROW ||
             (!is_static && member->as.member.op != T_ARROW) ||
             (is_static && member->as.member.base->kind != AST_IDENTIFIER) ||
+            (is_static && is_dynamic) ||
             !temporary_slot(gen, node->line, &value_slot) ||
             (node->as.unary.postfix &&
              !temporary_slot(gen, node->line, &old_slot))) {
             if (!gen->failed) fail(gen, node->line, "invalid property increment");
             return;
         }
-        name = is_static ? member_name_constant(gen, member->as.member.name)
-                         : name_constant(gen, member->as.member.name);
+        name = is_dynamic ? 0U
+                          : (is_static
+                                 ? member_name_constant(gen,
+                                                        member->as.member.name)
+                                 : name_constant(gen,
+                                                 member->as.member.name));
         if (is_static) {
             uint16_t class_name = name_constant(
                 gen, member->as.member.base->as.literal.token);
@@ -1302,9 +1426,19 @@ static void compile_increment(generator *gen, const pc_ast *node) {
             if (!temporary_slot(gen, node->line, &object_slot)) return;
             compile_expression(gen, member->as.member.base);
             emit_store_slot(gen, object_slot, node->line);
+            if (is_dynamic) {
+                if (!temporary_slot(gen, node->line, &name_slot)) return;
+                compile_expression(gen, member->as.member.dynamic_name);
+                emit_store_slot(gen, name_slot, node->line);
+            }
             emit_load_slot(gen, object_slot, node->line);
-            emit_byte(gen, OP_PROP_GET, node->line);
-            emit_u16(gen, name, node->line);
+            if (is_dynamic) {
+                emit_load_slot(gen, name_slot, node->line);
+                emit_byte(gen, OP_PROP_GET_DYNAMIC, node->line);
+            } else {
+                emit_byte(gen, OP_PROP_GET, node->line);
+                emit_u16(gen, name, node->line);
+            }
         }
         if (node->as.unary.postfix) {
             emit_byte(gen, OP_DUP, node->line);
@@ -1324,15 +1458,18 @@ static void compile_increment(generator *gen, const pc_ast *node) {
             emit_u16(gen, name, node->line);
         } else {
             emit_load_slot(gen, object_slot, node->line);
+            if (is_dynamic) emit_load_slot(gen, name_slot, node->line);
             emit_load_slot(gen, value_slot, node->line);
-            emit_byte(gen, OP_PROP_SET, node->line);
-            emit_u16(gen, name, node->line);
+            emit_byte(gen, is_dynamic ? OP_PROP_SET_DYNAMIC : OP_PROP_SET,
+                      node->line);
+            if (!is_dynamic) emit_u16(gen, name, node->line);
         }
         if (node->as.unary.postfix) {
             emit_byte(gen, OP_POP, node->line);
             emit_load_slot(gen, old_slot, node->line);
         }
         if (!is_static) clear_temporary_slot(gen, object_slot, node->line);
+        if (is_dynamic) clear_temporary_slot(gen, name_slot, node->line);
         clear_temporary_slot(gen, value_slot, node->line);
         if (node->as.unary.postfix) {
             clear_temporary_slot(gen, old_slot, node->line);
@@ -1438,11 +1575,15 @@ static void compile_quiet_expression(generator *gen, const pc_ast *node) {
     if (node->kind == AST_MEMBER &&
         (node->as.member.op == T_ARROW ||
          node->as.member.op == T_NULLSAFE_ARROW)) {
-        uint16_t name;
         compile_quiet_expression(gen, node->as.member.base);
-        name = name_constant(gen, node->as.member.name);
-        emit_byte(gen, OP_PROP_GET_QUIET, node->line);
-        emit_u16(gen, name, node->line);
+        if (node->as.member.dynamic_name != NULL) {
+            compile_expression(gen, node->as.member.dynamic_name);
+            emit_byte(gen, OP_PROP_GET_DYNAMIC_QUIET, node->line);
+        } else {
+            uint16_t name = name_constant(gen, node->as.member.name);
+            emit_byte(gen, OP_PROP_GET_QUIET, node->line);
+            emit_u16(gen, name, node->line);
+        }
         return;
     }
     compile_expression(gen, node);
@@ -1687,20 +1828,39 @@ static void compile_expression(generator *gen, const pc_ast *node) {
                     null_result = emit_jump(gen, OP_JMP_IFNULL_KEEP,
                                             node->line);
                 }
-                method_name = name_constant(gen, node->as.call.callee->as.member.name);
+                method_name = node->as.call.callee->as.member.dynamic_name == NULL
+                                  ? name_constant(
+                                        gen,
+                                        node->as.call.callee->as.member.name)
+                                  : 0U;
+                if (node->as.call.callee->as.member.dynamic_name != NULL) {
+                    compile_expression(
+                        gen, node->as.call.callee->as.member.dynamic_name);
+                }
                 if (has_spread) {
                     compile_argument_array(gen, argument, node->as.call.count,
                                            node->line);
-                    emit_byte(gen, OP_MCALL_ARRAY, node->line);
-                    emit_u16(gen, method_name, node->line);
+                    if (node->as.call.callee->as.member.dynamic_name != NULL) {
+                        emit_byte(gen, OP_MCALL_DYNAMIC_ARRAY, node->line);
+                    } else {
+                        emit_byte(gen, OP_MCALL_ARRAY, node->line);
+                        emit_u16(gen, method_name, node->line);
+                    }
                 } else {
                     while (argument != NULL) {
                         compile_expression(gen, argument);
                         argument = argument->next;
                     }
-                    emit_byte(gen, OP_MCALL, node->line);
-                    emit_u16(gen, method_name, node->line);
-                    emit_byte(gen, (uint8_t)node->as.call.count, node->line);
+                    if (node->as.call.callee->as.member.dynamic_name != NULL) {
+                        emit_byte(gen, OP_MCALL_DYNAMIC, node->line);
+                        emit_byte(gen, (uint8_t)node->as.call.count,
+                                  node->line);
+                    } else {
+                        emit_byte(gen, OP_MCALL, node->line);
+                        emit_u16(gen, method_name, node->line);
+                        emit_byte(gen, (uint8_t)node->as.call.count,
+                                  node->line);
+                    }
                 }
                 if (node->as.call.callee->as.member.op == T_NULLSAFE_ARROW) {
                     patch_jump(gen, null_result, gen->proto->code_length,
@@ -1758,18 +1918,77 @@ static void compile_expression(generator *gen, const pc_ast *node) {
                 token_is_array_mutator(
                     node->as.call.callee->as.literal.token)) {
                 uint8_t slot;
-                if (argument->kind != AST_VARIABLE ||
-                    !variable_slot(gen, argument->as.literal.token, &slot)) {
+                if (argument->kind == AST_VARIABLE &&
+                    variable_slot(gen, argument->as.literal.token, &slot)) {
+                    emit_byte(gen, OP_LOAD_LOCAL, node->line);
+                    emit_byte(gen, slot, node->line);
+                    emit_byte(gen, OP_ARR_SEPARATE, node->line);
+                    emit_byte(gen, OP_DUP, node->line);
+                    emit_byte(gen, OP_STORE_LOCAL, node->line);
+                    emit_byte(gen, slot, node->line);
+                } else if (argument->kind == AST_MEMBER &&
+                           argument->as.member.op != T_NULLSAFE_ARROW &&
+                           argument->as.member.dynamic_name == NULL &&
+                           (argument->as.member.op == T_ARROW ||
+                            (argument->as.member.op == T_SCOPE &&
+                             argument->as.member.base->kind ==
+                                 AST_IDENTIFIER))) {
+                    uint8_t array_slot;
+                    uint8_t object_slot = 0U;
+                    uint16_t member_name;
+                    int is_static = argument->as.member.op == T_SCOPE;
+                    if (!is_static &&
+                        argument->as.member.name.type == T_VARIABLE) {
+                        fail(gen, node->line,
+                             "dynamic property mutation is not supported");
+                        break;
+                    }
+                    if (!temporary_slot(gen, node->line, &array_slot)) break;
+                    member_name = is_static
+                                      ? member_name_constant(
+                                            gen, argument->as.member.name)
+                                      : name_constant(gen,
+                                                      argument->as.member.name);
+                    if (is_static) {
+                        uint16_t class_name = name_constant(
+                            gen, argument->as.member.base->as.literal.token);
+                        emit_byte(gen, OP_SPROP_GET, node->line);
+                        emit_u16(gen, class_name, node->line);
+                        emit_u16(gen, member_name, node->line);
+                    } else {
+                        if (!temporary_slot(gen, node->line, &object_slot)) break;
+                        compile_expression(gen, argument->as.member.base);
+                        emit_store_slot(gen, object_slot, node->line);
+                        emit_load_slot(gen, object_slot, node->line);
+                        emit_byte(gen, OP_PROP_GET, node->line);
+                        emit_u16(gen, member_name, node->line);
+                    }
+                    emit_byte(gen, OP_ARR_SEPARATE, node->line);
+                    emit_store_slot(gen, array_slot, node->line);
+                    if (is_static) {
+                        uint16_t class_name = name_constant(
+                            gen, argument->as.member.base->as.literal.token);
+                        emit_load_slot(gen, array_slot, node->line);
+                        emit_byte(gen, OP_SPROP_SET, node->line);
+                        emit_u16(gen, class_name, node->line);
+                        emit_u16(gen, member_name, node->line);
+                    } else {
+                        emit_load_slot(gen, object_slot, node->line);
+                        emit_load_slot(gen, array_slot, node->line);
+                        emit_byte(gen, OP_PROP_SET, node->line);
+                        emit_u16(gen, member_name, node->line);
+                    }
+                    emit_byte(gen, OP_POP, node->line);
+                    emit_load_slot(gen, array_slot, node->line);
+                    clear_temporary_slot(gen, array_slot, node->line);
+                    if (!is_static) {
+                        clear_temporary_slot(gen, object_slot, node->line);
+                    }
+                } else {
                     fail(gen, node->line,
-                         "array mutation target must be a variable");
+                         "array mutation target must be a variable or property");
                     break;
                 }
-                emit_byte(gen, OP_LOAD_LOCAL, node->line);
-                emit_byte(gen, slot, node->line);
-                emit_byte(gen, OP_ARR_SEPARATE, node->line);
-                emit_byte(gen, OP_DUP, node->line);
-                emit_byte(gen, OP_STORE_LOCAL, node->line);
-                emit_byte(gen, slot, node->line);
                 argument = argument->next;
                 separated_array = 1;
             }
@@ -1825,18 +2044,29 @@ static void compile_expression(generator *gen, const pc_ast *node) {
                 break;
             }
             compile_expression(gen, node->as.member.base);
-            name = name_constant(gen, node->as.member.name);
+            name = node->as.member.dynamic_name == NULL
+                       ? name_constant(gen, node->as.member.name) : 0U;
             if (node->as.member.op == T_NULLSAFE_ARROW) {
                 size_t null_result = emit_jump(gen, OP_JMP_IFNULL_KEEP,
                                                node->line);
-                emit_byte(gen, OP_PROP_GET, node->line);
-                emit_u16(gen, name, node->line);
+                if (node->as.member.dynamic_name != NULL) {
+                    compile_expression(gen, node->as.member.dynamic_name);
+                    emit_byte(gen, OP_PROP_GET_DYNAMIC, node->line);
+                } else {
+                    emit_byte(gen, OP_PROP_GET, node->line);
+                    emit_u16(gen, name, node->line);
+                }
                 patch_jump(gen, null_result, gen->proto->code_length,
                            node->line);
                 break;
             }
-            emit_byte(gen, OP_PROP_GET, node->line);
-            emit_u16(gen, name, node->line);
+            if (node->as.member.dynamic_name != NULL) {
+                compile_expression(gen, node->as.member.dynamic_name);
+                emit_byte(gen, OP_PROP_GET_DYNAMIC, node->line);
+            } else {
+                emit_byte(gen, OP_PROP_GET, node->line);
+                emit_u16(gen, name, node->line);
+            }
             break;
         }
         case AST_NEW: {
@@ -2915,6 +3145,7 @@ static void compile_named_functions(generator *gen, const pc_ast *node,
             break;
         case AST_MEMBER:
             compile_named_functions(gen, node->as.member.base, 0);
+            compile_named_functions(gen, node->as.member.dynamic_name, 0);
             break;
         case AST_ARRAY_ITEM:
             compile_named_functions(gen, node->as.array_item.key, 0);

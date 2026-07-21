@@ -148,7 +148,11 @@ static void dump_node(FILE *stream, const pc_ast *node, unsigned depth) {
             break;
         case AST_MEMBER:
             fprintf(stream, " %s", pc_token_name(node->as.member.op));
-            dump_token(stream, node->as.member.name);
+            if (node->as.member.dynamic_name == NULL) {
+                dump_token(stream, node->as.member.name);
+            } else {
+                fputs(" {dynamic}", stream);
+            }
             break;
         case AST_BREAK:
         case AST_CONTINUE:
@@ -216,6 +220,7 @@ static void dump_node(FILE *stream, const pc_ast *node, unsigned depth) {
             break;
         case AST_MEMBER:
             dump_node(stream, node->as.member.base, depth + 1U);
+            dump_node(stream, node->as.member.dynamic_name, depth + 1U);
             break;
         case AST_ARRAY_ITEM:
             dump_node(stream, node->as.array_item.key, depth + 1U);

@@ -24,6 +24,7 @@ typedef struct pproto {
     uint8_t variadic;
     uint8_t is_method;
     uint8_t conditional;
+    uint8_t owns_code;
     uint8_t n_locals;
     uint16_t max_stack;
     uint8_t *code;
@@ -42,6 +43,8 @@ typedef struct pmodule {
     pproto **protos;
     size_t count;
     size_t capacity;
+    void *backing;
+    uint8_t owns_backing;
 } pmodule;
 
 pproto *pproto_new(const char *name, size_t length);

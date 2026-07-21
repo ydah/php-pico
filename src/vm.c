@@ -2156,6 +2156,29 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                 (void)push(state, value);
                 break;
             }
+            case OP_PROP_GET_DYNAMIC_QUIET: {
+                pvalue name_value = pop(state);
+                pvalue object_value = pop(state);
+                pvalue value = pv_null();
+                if (name_value.type == PT_STRING &&
+                    object_value.type == PT_OBJECT) {
+                    const pstring *name = (const pstring *)name_value.as.gc;
+                    pobject *object = (pobject *)object_value.as.gc;
+                    const pproperty *property = pclass_find_property(
+                        object->class_entry, name->data, name->length);
+                    if (property != NULL &&
+                        pclass_member_visible(property->flags,
+                                              property->owner,
+                                              frame->called_scope)) {
+                        value = object->slots[property->slot];
+                        pv_retain(value);
+                    }
+                }
+                pv_release(name_value);
+                pv_release(object_value);
+                (void)push(state, value);
+                break;
+            }
             case OP_PROP_GET: {
                 uint16_t name_index = read_u16(state, frame);
                 const pstring *name = constant_string(state, frame, name_index);
@@ -2193,6 +2216,49 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                         (void)push(state, value);
                     }
                 }
+                pv_release(object_value);
+                break;
+            }
+            case OP_PROP_GET_DYNAMIC: {
+                pvalue name_value = pop(state);
+                pvalue object_value = pop(state);
+                const pstring *name = name_value.type == PT_STRING
+                                          ? (const pstring *)name_value.as.gc
+                                          : NULL;
+                if (name == NULL || object_value.type != PT_OBJECT) {
+                    pphp_runtime_error(state, frame->line,
+                                       name == NULL
+                                           ? "dynamic property name must be a string"
+                                           : "property access on non-object");
+                } else {
+                    pobject *object = (pobject *)object_value.as.gc;
+                    const pproperty *property = pclass_find_property(
+                        object->class_entry, name->data, name->length);
+                    if (property == NULL) {
+                        pvalue argument = name_value;
+                        pvalue value = pv_null();
+                        int invoked = invoke_magic(state, object, "__get", 5U,
+                                                   &argument, 1U, &value);
+                        if (invoked > 0) {
+                            (void)push(state, value);
+                        } else if (invoked == 0) {
+                            pphp_runtime_error(state, frame->line,
+                                               "undefined property %.*s",
+                                               (int)name->length, name->data);
+                        }
+                    } else if (!pclass_member_visible(
+                                   property->flags, property->owner,
+                                   frame->called_scope)) {
+                        pphp_runtime_error(state, frame->line,
+                                           "cannot access non-public property %.*s",
+                                           (int)name->length, name->data);
+                    } else {
+                        pvalue value = object->slots[property->slot];
+                        pv_retain(value);
+                        (void)push(state, value);
+                    }
+                }
+                pv_release(name_value);
                 pv_release(object_value);
                 break;
             }
@@ -2253,6 +2319,66 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                 pv_release(value);
                 break;
             }
+            case OP_PROP_SET_DYNAMIC: {
+                pvalue value = pop(state);
+                pvalue name_value = pop(state);
+                pvalue object_value = pop(state);
+                const pstring *name = name_value.type == PT_STRING
+                                          ? (const pstring *)name_value.as.gc
+                                          : NULL;
+                if (name == NULL || object_value.type != PT_OBJECT) {
+                    pphp_runtime_error(state, frame->line,
+                                       name == NULL
+                                           ? "dynamic property name must be a string"
+                                           : "property assignment on non-object");
+                } else {
+                    pobject *object = (pobject *)object_value.as.gc;
+                    const pproperty *property = pclass_find_property(
+                        object->class_entry, name->data, name->length);
+                    if (property == NULL) {
+                        pvalue arguments[2];
+                        pvalue ignored = pv_null();
+                        int invoked;
+                        arguments[0] = name_value;
+                        arguments[1] = value;
+                        invoked = invoke_magic(state, object, "__set", 5U,
+                                               arguments, 2U, &ignored);
+                        pv_release(ignored);
+                        if (invoked > 0) {
+                            (void)push(state, value);
+                            value = pv_null();
+                        } else if (invoked == 0) {
+                            pphp_runtime_error(state, frame->line,
+                                               "undefined property %.*s",
+                                               (int)name->length, name->data);
+                        }
+                    } else if (!pclass_member_visible(
+                                   property->flags, property->owner,
+                                   frame->called_scope)) {
+                        pphp_runtime_error(state, frame->line,
+                                           "cannot access non-public property %.*s",
+                                           (int)name->length, name->data);
+                    } else if ((property->flags & PC_READONLY) != 0U &&
+                               (frame->called_scope != property->owner ||
+                                pobject_property_written(object,
+                                                         property->slot))) {
+                        pphp_runtime_error(state, frame->line,
+                                           "cannot modify readonly property %.*s",
+                                           (int)name->length, name->data);
+                    } else {
+                        pv_retain(value);
+                        pv_release(object->slots[property->slot]);
+                        object->slots[property->slot] = value;
+                        pobject_mark_property_written(object, property->slot);
+                        (void)push(state, value);
+                        value = pv_null();
+                    }
+                }
+                pv_release(value);
+                pv_release(name_value);
+                pv_release(object_value);
+                break;
+            }
             case OP_MCALL:
             case OP_MCALL_ARRAY: {
                 uint16_t name_index = read_u16(state, frame);
@@ -2267,6 +2393,39 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                     argument_count = read_u8(state, frame);
                 }
                 (void)invoke_named_method(state, frame, name, argument_count);
+                break;
+            }
+            case OP_MCALL_DYNAMIC:
+            case OP_MCALL_DYNAMIC_ARRAY: {
+                uint8_t argument_count;
+                size_t name_position;
+                pvalue name_value;
+                const pstring *name;
+                if (opcode == OP_MCALL_DYNAMIC_ARRAY) {
+                    if (!expand_argument_array(state, frame->line,
+                                               &argument_count)) break;
+                } else {
+                    argument_count = read_u8(state, frame);
+                }
+                if (state->stack_count < (size_t)argument_count + 2U) {
+                    pphp_runtime_error(state, frame->line,
+                                       "invalid dynamic method operands");
+                    break;
+                }
+                name_position = state->stack_count - argument_count - 1U;
+                name_value = state->stack[name_position];
+                if (name_value.type != PT_STRING) {
+                    pphp_runtime_error(state, frame->line,
+                                       "dynamic method name must be a string");
+                    break;
+                }
+                name = (const pstring *)name_value.as.gc;
+                memmove(state->stack + name_position,
+                        state->stack + name_position + 1U,
+                        (size_t)argument_count * sizeof(*state->stack));
+                state->stack_count--;
+                (void)invoke_named_method(state, frame, name, argument_count);
+                pv_release(name_value);
                 break;
             }
             case OP_SCALL:

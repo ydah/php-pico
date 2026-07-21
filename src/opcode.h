@@ -109,7 +109,12 @@ typedef enum pphp_opcode {
     OP_DEF_CONST = 0x89,
     OP_DEF_END = 0x8a,
     OP_DEF_INTERFACE = 0x8b,
-    OP_LINE = 0x90
+    OP_LINE = 0x90,
+    OP_PROP_GET_DYNAMIC = 0x91,
+    OP_PROP_SET_DYNAMIC = 0x92,
+    OP_PROP_GET_DYNAMIC_QUIET = 0x93,
+    OP_MCALL_DYNAMIC = 0x94,
+    OP_MCALL_DYNAMIC_ARRAY = 0x95
 } pphp_opcode;
 
 const char *pphp_opcode_name(uint8_t opcode);

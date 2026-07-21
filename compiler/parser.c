@@ -811,14 +811,27 @@ static pc_ast *parse_infix(pc_parser *parser, pc_ast *left, pc_token op, int pre
     }
     if (op.type == T_ARROW || op.type == T_NULLSAFE_ARROW || op.type == T_SCOPE) {
         pc_token name = parser->current;
+        pc_ast *dynamic_name = NULL;
+        if (op.type != T_SCOPE && match(parser, T_LBRACE)) {
+            dynamic_name = parse_expression_precedence(parser, PREC_NONE + 1);
+            (void)consume(parser, T_RBRACE,
+                          "expected '}' after dynamic member name");
+            memset(&name, 0, sizeof(name));
+            name.line = op.line;
+        } else if (op.type != T_SCOPE && name.type == T_VARIABLE) {
+            advance_token(parser);
+            dynamic_name = literal_node(parser, AST_VARIABLE, name);
+        } else {
         if (name.type != T_IDENTIFIER && name.type != T_VARIABLE && name.type != T_CLASS) {
             fail_at(parser, name, "expected member name");
             return left;
         }
         advance_token(parser);
+        }
         node = new_node(parser, AST_MEMBER, op.line);
         if (node != NULL) {
             node->as.member.base = left;
+            node->as.member.dynamic_name = dynamic_name;
             node->as.member.name = name;
             node->as.member.op = op.type;
         }

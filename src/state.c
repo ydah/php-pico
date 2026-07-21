@@ -379,6 +379,9 @@ int pphp_exec_include(pphp_state *state, const char *path, uint8_t mode,
             pv_release(path_value);
             return status;
         }
+        module.backing = bytes;
+        module.owns_backing = 1U;
+        bytes = NULL;
     } else {
         pc_arena_init(&arena, 4096U);
         pc_parser_init(&parser, &arena, bytes, length, 0);

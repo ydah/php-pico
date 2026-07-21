@@ -33,6 +33,7 @@ pproto *pproto_new(const char *name, size_t length) {
         return NULL;
     }
     memset(proto, 0, sizeof(*proto));
+    proto->owns_code = 1U;
     proto->name = ps_new(name == NULL ? "" : name, name == NULL ? 0U : length);
     if (proto->name == NULL) {
         pphp_free(proto);
@@ -57,7 +58,7 @@ void pproto_destroy(pproto *proto) {
     ps_destroy(proto->name);
     pphp_free(proto->locals);
     pphp_free(proto->constants);
-    pphp_free(proto->code);
+    if (proto->owns_code) pphp_free(proto->code);
     pphp_free(proto->catches);
     pphp_free(proto);
 }
@@ -173,6 +174,7 @@ void pmodule_destroy(pmodule *module) {
         pproto_destroy(module->protos[i]);
     }
     pphp_free(module->protos);
+    if (module->owns_backing) pphp_free(module->backing);
     memset(module, 0, sizeof(*module));
 }
 
@@ -492,7 +494,12 @@ int pphp_pbc_read_file(const char *path, pmodule *module) {
         return PPHP_E_IO;
     }
     result = pphp_pbc_load(bytes, (size_t)read_count, module);
-    pphp_free(bytes);
+    if (result == PPHP_OK) {
+        module->backing = bytes;
+        module->owns_backing = 1U;
+    } else {
+        pphp_free(bytes);
+    }
     return result;
 }
 
@@ -569,14 +576,10 @@ int pphp_pbc_load(const void *data, size_t length, pmodule *module) {
         proto->conditional = (uint8_t)((bytes[offset + 2U] & 8U) != 0U);
         local_count = bytes[offset + 3U];
         proto->max_stack = get_u16(bytes, offset + 6U);
-        proto->code = pphp_alloc(code_length);
-        if (code_length != 0U && proto->code == NULL) {
-            result = PPHP_E_NOMEM;
-            goto failed_module;
-        }
-        memcpy(proto->code, bytes + offset + 16U, code_length);
+        proto->code = (uint8_t *)(uintptr_t)(bytes + offset + 16U);
+        proto->owns_code = 0U;
         proto->code_length = code_length;
-        proto->code_capacity = code_length;
+        proto->code_capacity = 0U;
         offset += 16U + align4(code_length);
         for (j = 0U; j < constant_count; j++) {
             pvalue value;
@@ -772,6 +775,11 @@ const char *pphp_opcode_name(uint8_t opcode) {
         case OP_DEF_END: return "DEF_END";
         case OP_DEF_INTERFACE: return "DEF_INTERFACE";
         case OP_LINE: return "LINE";
+        case OP_PROP_GET_DYNAMIC: return "PROP_GET_DYNAMIC";
+        case OP_PROP_SET_DYNAMIC: return "PROP_SET_DYNAMIC";
+        case OP_PROP_GET_DYNAMIC_QUIET: return "PROP_GET_DYNAMIC_QUIET";
+        case OP_MCALL_DYNAMIC: return "MCALL_DYNAMIC";
+        case OP_MCALL_DYNAMIC_ARRAY: return "MCALL_DYNAMIC_ARRAY";
         default: return "UNKNOWN";
     }
 }

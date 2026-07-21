@@ -18,5 +18,16 @@ if (false) {
 echo (int)'1.9', ':', $source['node']['value'], ':', $copy['node']['value'], ':';
 echo ++$copy['node']['next'], ':', $object?->missing(), ':', "{$copy['node'][$key]}", ':';
 echo selected_function(), ':', function_exists('skipped_function') ? 1 : 0;
+class DynamicBox {
+    public $items = [3, 1, 2];
+    public function first() { return $this->items[0]; }
+}
+$box = new DynamicBox();
+$property = 'items';
+$method = 'first';
+$copy = $box->items;
+$box->{$property}[0] += 4;
+sort($box->items);
+echo ':', $copy[0], ':', implode(',', $box->items), ':', $box->$method();
 --EXPECT--
-1:1:3:5::3:7:0
+1:1:3:5::3:7:0:3:1,2,7:1
