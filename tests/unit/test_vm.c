@@ -458,6 +458,37 @@ TEST(clone_copies_property_slots_and_invokes_clone_hook) {
     ASSERT_STR("caught", output.bytes);
 }
 
+TEST(type_conversion_and_predicate_builtins_follow_php_values) {
+    const char *source =
+        "$callable = fn() => 1;"
+        "echo intval('ff', 16), ':', floatval('1.5'), ':',"
+        " ((strval(false) === '') ? 1 : 0), ':',"
+        " (boolval('0') ? 1 : 0), ':',"
+        " (is_int(1) ? 1 : 0), (is_float(1.0) ? 1 : 0),"
+        " (is_string('x') ? 1 : 0), (is_bool(false) ? 1 : 0),"
+        " (is_array([]) ? 1 : 0), (is_object($callable) ? 1 : 0),"
+        " (is_null(null) ? 1 : 0), (is_numeric('1.5e2') ? 1 : 0),"
+        " (is_numeric('no') ? 1 : 0), (is_callable($callable) ? 1 : 0);";
+    output_buffer output;
+    ASSERT_EQ(PPHP_OK, execute(source, &output, NULL, 0U));
+    ASSERT_STR("255:1.5:1:0:1111111101", output.bytes);
+}
+
+TEST(math_builtins_cover_integer_float_and_collection_forms) {
+    const char *source =
+        "echo floor(2.9), ':', ceil(-2.1), ':', round(1.236, 2), ':',"
+        " sqrt(81), ':', pow(2, 5), ':', intdiv(7, 2), ':',"
+        " fmod(7, 4), ':', max([2, 9, 4]), ':', min(3, -2, 8), ':',"
+        " log(8, 2), ':', (pi() > 3 ? 1 : 0);";
+    output_buffer output;
+    ASSERT_EQ(PPHP_OK, execute(source, &output, NULL, 0U));
+    ASSERT_STR("2:-2:1.24:9:32:3:3:9:-2:3:1", output.bytes);
+    ASSERT_EQ(PPHP_OK,
+              execute("try { intdiv(1, 0); } catch (DivisionByZeroError) { echo 'caught'; }",
+                      &output, NULL, 0U));
+    ASSERT_STR("caught", output.bytes);
+}
+
 int main(void) {
     static const test_case tests[] = {
         {"arithmetic VM", arithmetic_runs_through_compiler_and_vm},
@@ -490,7 +521,9 @@ int main(void) {
         {"bound this closures", method_closures_bind_this_by_value},
         {"callable values", call_value_supports_strings_method_arrays_and_invokable_objects},
         {"static closure this", static_closures_reject_this_binding},
-        {"object clone", clone_copies_property_slots_and_invokes_clone_hook}
+        {"object clone", clone_copies_property_slots_and_invokes_clone_hook},
+        {"type builtins", type_conversion_and_predicate_builtins_follow_php_values},
+        {"math builtins", math_builtins_cover_integer_float_and_collection_forms}
     };
     return run_tests(tests, sizeof(tests) / sizeof(tests[0]));
 }

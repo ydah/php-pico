@@ -2,7 +2,9 @@
 
 #include "value_ops.h"
 #include "parray.h"
+#include "pclass.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -102,8 +104,308 @@ static void dump_value(pphp_state *state, pvalue value) {
     dump_value_depth(state, value, 0U);
 }
 
+static int require_count(pphp_state *state, const char *name, size_t count,
+                         size_t minimum, size_t maximum) {
+    if (count >= minimum && count <= maximum) return 1;
+    pphp_runtime_error(state, 0U,
+                       "%s() expects %zu to %zu arguments, %zu given",
+                       name, minimum, maximum, count);
+    return 0;
+}
+
+static int integer_from_string(const pstring *string, unsigned base,
+                               pphp_int *result) {
+    size_t i = 0U;
+    int sign = 1;
+    uint32_t value = 0U;
+    int digits = 0;
+    if (base < 2U || base > 36U) return 0;
+    while (i < string->length && (string->data[i] == ' ' ||
+           string->data[i] == '\t' || string->data[i] == '\n' ||
+           string->data[i] == '\r')) i++;
+    if (i < string->length && (string->data[i] == '+' || string->data[i] == '-')) {
+        sign = string->data[i++] == '-' ? -1 : 1;
+    }
+    if (i + 1U < string->length && string->data[i] == '0') {
+        char prefix = string->data[i + 1U];
+        if ((base == 16U && (prefix == 'x' || prefix == 'X')) ||
+            (base == 2U && (prefix == 'b' || prefix == 'B'))) i += 2U;
+    }
+    while (i < string->length) {
+        unsigned digit;
+        unsigned char c = (unsigned char)string->data[i++];
+        if (c >= '0' && c <= '9') digit = (unsigned)(c - '0');
+        else if (c >= 'a' && c <= 'z') digit = (unsigned)(c - 'a') + 10U;
+        else if (c >= 'A' && c <= 'Z') digit = (unsigned)(c - 'A') + 10U;
+        else break;
+        if (digit >= base) break;
+        value = value * base + digit;
+        digits++;
+    }
+    if (digits == 0) {
+        *result = 0;
+    } else if (sign < 0) {
+        *result = (pphp_int)(-(int64_t)value);
+    } else {
+        *result = (pphp_int)value;
+    }
+    return 1;
+}
+
+static int call_conversion_builtin(pphp_state *state, const pstring *name,
+                                   const pvalue *arguments, size_t count,
+                                   pvalue *result) {
+    if (name_is(name, "intval")) {
+        pphp_float number;
+        int integer;
+        unsigned base = 10U;
+        if (!require_count(state, "intval", count, 1U, 2U)) return -1;
+        if (count == 2U) {
+            if (arguments[1].type != PT_INT || arguments[1].as.i < 2 ||
+                arguments[1].as.i > 36) {
+                pphp_runtime_error(state, 0U, "intval() base must be between 2 and 36");
+                return -1;
+            }
+            base = (unsigned)arguments[1].as.i;
+        }
+        if (arguments[0].type == PT_STRING) {
+            pphp_int converted;
+            (void)integer_from_string((const pstring *)arguments[0].as.gc,
+                                      base, &converted);
+            *result = pv_int(converted);
+        } else if (pv_to_number(arguments[0], &number, &integer)) {
+            *result = pv_int((pphp_int)number);
+        } else {
+            *result = pv_int(arguments[0].type == PT_ARRAY &&
+                             pa_count((const parray *)arguments[0].as.gc) != 0U);
+        }
+        return 1;
+    }
+    if (name_is(name, "floatval")) {
+        pphp_float number;
+        int integer;
+        if (!require_count(state, "floatval", count, 1U, 1U)) return -1;
+        if (!pv_to_number(arguments[0], &number, &integer)) number = 0;
+        *result = pv_float(number);
+        return 1;
+    }
+    if (name_is(name, "strval")) {
+        pstring *string;
+        if (!require_count(state, "strval", count, 1U, 1U)) return -1;
+        string = pv_to_string(arguments[0]);
+        if (string == NULL) {
+            pphp_runtime_error(state, 0U, "strval() value cannot be converted to string");
+            return -1;
+        }
+        *result = pv_heap(PT_STRING, &string->header);
+        return 1;
+    }
+    if (name_is(name, "boolval")) {
+        if (!require_count(state, "boolval", count, 1U, 1U)) return -1;
+        *result = pv_bool(pv_is_truthy(arguments[0]));
+        return 1;
+    }
+    return 0;
+}
+
+static int call_type_builtin(pphp_state *state, const pstring *name,
+                             const pvalue *arguments, size_t count,
+                             pvalue *result) {
+    int matches;
+    if (!(name_is(name, "is_int") || name_is(name, "is_float") ||
+          name_is(name, "is_string") || name_is(name, "is_bool") ||
+          name_is(name, "is_array") || name_is(name, "is_object") ||
+          name_is(name, "is_null") || name_is(name, "is_numeric") ||
+          name_is(name, "is_callable"))) return 0;
+    if (!require_count(state, "type predicate", count, 1U, 1U)) return -1;
+    if (name_is(name, "is_int")) matches = arguments[0].type == PT_INT;
+    else if (name_is(name, "is_float")) matches = arguments[0].type == PT_FLOAT;
+    else if (name_is(name, "is_string")) matches = arguments[0].type == PT_STRING;
+    else if (name_is(name, "is_bool")) {
+        matches = arguments[0].type == PT_TRUE || arguments[0].type == PT_FALSE;
+    } else if (name_is(name, "is_array")) matches = arguments[0].type == PT_ARRAY;
+    else if (name_is(name, "is_object")) {
+        matches = arguments[0].type == PT_OBJECT || arguments[0].type == PT_CLOSURE;
+    } else if (name_is(name, "is_null")) matches = arguments[0].type == PT_NULL;
+    else if (name_is(name, "is_numeric")) {
+        pphp_float number;
+        int integer;
+        matches = (arguments[0].type == PT_INT || arguments[0].type == PT_FLOAT ||
+                   arguments[0].type == PT_STRING) &&
+                  pv_to_number(arguments[0], &number, &integer);
+    } else {
+        matches = arguments[0].type == PT_CLOSURE ||
+                  arguments[0].type == PT_STRING;
+        if (arguments[0].type == PT_OBJECT) {
+            matches = pclass_find_method(
+                ((pobject *)arguments[0].as.gc)->class_entry,
+                "__invoke", 8U) != NULL;
+        } else if (arguments[0].type == PT_ARRAY) {
+            pvalue target = pv_null();
+            pvalue method = pv_null();
+            matches = pa_get((const parray *)arguments[0].as.gc,
+                             pv_int(0), &target) &&
+                      pa_get((const parray *)arguments[0].as.gc,
+                             pv_int(1), &method) &&
+                      target.type == PT_OBJECT && method.type == PT_STRING &&
+                      pclass_find_method(
+                          ((pobject *)target.as.gc)->class_entry,
+                          ((pstring *)method.as.gc)->data,
+                          ((pstring *)method.as.gc)->length) != NULL;
+            pv_release(target);
+            pv_release(method);
+        }
+    }
+    *result = pv_bool(matches);
+    return 1;
+}
+
+static int numeric_argument(pphp_state *state, const char *name, pvalue value,
+                            pphp_float *number, int *integer) {
+    if (pv_to_number(value, number, integer)) return 1;
+    pphp_runtime_error(state, 0U, "%s() expects numeric arguments", name);
+    return 0;
+}
+
+static int call_math_builtin(pphp_state *state, const pstring *name,
+                             const pvalue *arguments, size_t count,
+                             pvalue *result) {
+    pphp_float a;
+    pphp_float b;
+    int ai;
+    int bi;
+    if (name_is(name, "pi")) {
+        if (!require_count(state, "pi", count, 0U, 0U)) return -1;
+        *result = pv_float((pphp_float)3.14159265358979323846);
+        return 1;
+    }
+    if (name_is(name, "intdiv") || name_is(name, "fdiv") ||
+        name_is(name, "fmod") || name_is(name, "pow") ||
+        name_is(name, "atan2")) {
+        if (!require_count(state, "binary math", count, 2U, 2U) ||
+            !numeric_argument(state, "binary math", arguments[0], &a, &ai) ||
+            !numeric_argument(state, "binary math", arguments[1], &b, &bi)) return -1;
+        if (name_is(name, "intdiv")) {
+            if ((pphp_int)b == 0) {
+                pphp_runtime_error(state, 0U, "Division by zero");
+                return -1;
+            }
+            *result = pv_int((pphp_int)a / (pphp_int)b);
+        } else if (name_is(name, "fdiv")) {
+            *result = pv_float(a / b);
+        } else if (name_is(name, "fmod")) {
+            *result = pv_float((pphp_float)fmod((double)a, (double)b));
+        } else if (name_is(name, "pow")) {
+            *result = pv_float((pphp_float)pow((double)a, (double)b));
+        } else {
+            *result = pv_float((pphp_float)atan2((double)a, (double)b));
+        }
+        return 1;
+    }
+    if (name_is(name, "floor") || name_is(name, "ceil") ||
+        name_is(name, "sqrt") || name_is(name, "exp") ||
+        name_is(name, "log10") || name_is(name, "sin") ||
+        name_is(name, "cos") || name_is(name, "tan") ||
+        name_is(name, "asin") || name_is(name, "acos") ||
+        name_is(name, "atan")) {
+        double value;
+        if (!require_count(state, "unary math", count, 1U, 1U) ||
+            !numeric_argument(state, "unary math", arguments[0], &a, &ai)) return -1;
+        if (name_is(name, "floor")) value = floor((double)a);
+        else if (name_is(name, "ceil")) value = ceil((double)a);
+        else if (name_is(name, "sqrt")) value = sqrt((double)a);
+        else if (name_is(name, "exp")) value = exp((double)a);
+        else if (name_is(name, "log10")) value = log10((double)a);
+        else if (name_is(name, "sin")) value = sin((double)a);
+        else if (name_is(name, "cos")) value = cos((double)a);
+        else if (name_is(name, "tan")) value = tan((double)a);
+        else if (name_is(name, "asin")) value = asin((double)a);
+        else if (name_is(name, "acos")) value = acos((double)a);
+        else value = atan((double)a);
+        *result = pv_float((pphp_float)value);
+        return 1;
+    }
+    if (name_is(name, "log")) {
+        if (!require_count(state, "log", count, 1U, 2U) ||
+            !numeric_argument(state, "log", arguments[0], &a, &ai)) return -1;
+        if (count == 2U) {
+            if (!numeric_argument(state, "log", arguments[1], &b, &bi)) return -1;
+            *result = pv_float((pphp_float)(log((double)a) / log((double)b)));
+        } else {
+            *result = pv_float((pphp_float)log((double)a));
+        }
+        return 1;
+    }
+    if (name_is(name, "round")) {
+        int precision = 0;
+        double scale;
+        if (!require_count(state, "round", count, 1U, 2U) ||
+            !numeric_argument(state, "round", arguments[0], &a, &ai)) return -1;
+        if (count == 2U && arguments[1].type == PT_INT) precision = arguments[1].as.i;
+        scale = pow(10.0, (double)precision);
+        *result = pv_float((pphp_float)(round((double)a * scale) / scale));
+        return 1;
+    }
+    if (name_is(name, "max") || name_is(name, "min")) {
+        pvalue best;
+        size_t i;
+        if (count == 0U) {
+            pphp_runtime_error(state, 0U, "max/min expects at least one argument");
+            return -1;
+        }
+        if (count == 1U && arguments[0].type == PT_ARRAY) {
+            const parray *array = (const parray *)arguments[0].as.gc;
+            size_t position = 0U;
+            pvalue key;
+            size_t next;
+            if (!pa_entry_at(array, 0U, &key, &best, &position)) {
+                pphp_runtime_error(state, 0U, "max/min array must not be empty");
+                return -1;
+            }
+            pv_release(key);
+            while (pa_entry_at(array, position, &key, result, &next)) {
+                int compared = 0;
+                const char *error = NULL;
+                (void)pv_compare(*result, best, 0, &compared, &error);
+                if ((name_is(name, "max") && compared > 0) ||
+                    (name_is(name, "min") && compared < 0)) {
+                    pv_release(best);
+                    best = *result;
+                } else {
+                    pv_release(*result);
+                }
+                pv_release(key);
+                position = next;
+            }
+        } else {
+            best = arguments[0];
+            pv_retain(best);
+            for (i = 1U; i < count; i++) {
+                int compared = 0;
+                const char *error = NULL;
+                (void)pv_compare(arguments[i], best, 0, &compared, &error);
+                if ((name_is(name, "max") && compared > 0) ||
+                    (name_is(name, "min") && compared < 0)) {
+                    pv_release(best);
+                    best = arguments[i];
+                    pv_retain(best);
+                }
+            }
+        }
+        *result = best;
+        return 1;
+    }
+    return 0;
+}
+
 int pphp_call_builtin(pphp_state *state, const pstring *name,
                       const pvalue *arguments, size_t count, pvalue *result) {
+    int handled = call_conversion_builtin(state, name, arguments, count, result);
+    if (handled != 0) return handled;
+    handled = call_type_builtin(state, name, arguments, count, result);
+    if (handled != 0) return handled;
+    handled = call_math_builtin(state, name, arguments, count, result);
+    if (handled != 0) return handled;
     if (name_is(name, "strlen")) {
         pstring *string;
         if (count != 1U) {
