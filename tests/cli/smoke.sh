@@ -36,4 +36,20 @@ grep -q 'FUNCTION' "$temporary/tokens.txt"
 $binary --ast "$temporary/program.php" > "$temporary/ast.txt"
 grep -q 'FUNCTION' "$temporary/ast.txt"
 
+shell_output=$(printf '%s\n' \
+    'version' \
+    "echo shell-data > $temporary/shell.txt" \
+    "cat $temporary/shell.txt" \
+    "cp $temporary/shell.txt $temporary/shell-copy.txt" \
+    "mv $temporary/shell-copy.txt $temporary/shell-moved.txt" \
+    "rm $temporary/shell-moved.txt" \
+    "phpc $temporary/program.php $temporary/shell.pbc" \
+    "php $temporary/shell.pbc" \
+    'free' \
+    'quit' | $binary --shell)
+printf '%s\n' "$shell_output" | grep -q 'php-pico 0.1.0-dev'
+printf '%s\n' "$shell_output" | grep -q 'shell-data'
+printf '%s\n' "$shell_output" | grep -q '81'
+printf '%s\n' "$shell_output" | grep -q 'total='
+
 exit 0

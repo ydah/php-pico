@@ -23,6 +23,7 @@ static void print_usage(FILE *stream) {
             "       php-pico -c input.php -o output.pbc\n"
             "       php-pico -d file.pbc\n"
             "       php-pico -r 'code'\n"
+            "       php-pico --shell\n"
             "       php-pico file.php\n");
 }
 
@@ -253,12 +254,28 @@ static int run_repl(void) {
     return result;
 }
 
+static int run_shell(void) {
+    pphp_state *state = pphp_open(NULL, 0U);
+    int result;
+    if (state == NULL) {
+        fprintf(stderr, "php-pico: cannot initialize VM\n");
+        return 255;
+    }
+    pphp_set_output(state, write_stdout, stdout);
+    result = pphp_host_shell(state, stdin, stdout, stderr);
+    pphp_close(state);
+    return result;
+}
+
 int main(int argc, char **argv) {
     pphp_pool_init(host_pool, sizeof(host_pool));
     (void)hal_init();
     if (argc == 2 && strcmp(argv[1], "--version") == 0) {
         printf("php-pico %s\n", PPHP_VERSION);
         return 0;
+    }
+    if (argc == 2 && strcmp(argv[1], "--shell") == 0) {
+        return run_shell();
     }
     if (argc == 3 && (strcmp(argv[1], "--tokens") == 0 ||
                       strcmp(argv[1], "--ast") == 0)) {
