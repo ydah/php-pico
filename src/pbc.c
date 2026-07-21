@@ -715,6 +715,7 @@ const char *pphp_opcode_name(uint8_t opcode) {
         case OP_ECHO: return "ECHO";
         case OP_CALL_ARRAY: return "CALL_ARRAY";
         case OP_CALL_VALUE_ARRAY: return "CALL_VALUE_ARRAY";
+        case OP_INCLUDE: return "INCLUDE";
         case OP_NEW_ARRAY: return "NEW_ARRAY";
         case OP_ARR_PUSH: return "ARR_PUSH";
         case OP_ARR_SET: return "ARR_SET";

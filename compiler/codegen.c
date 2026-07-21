@@ -1939,8 +1939,10 @@ static void compile_statement(generator *gen, const pc_ast *node) {
             break;
         }
         case AST_INCLUDE:
-            fail(gen, node->line, "%s requires a later runtime milestone",
-                 pc_ast_kind_name(node->kind));
+            compile_expression(gen, node->as.include_stmt.path);
+            emit_byte(gen, OP_INCLUDE, node->line);
+            emit_byte(gen, (uint8_t)node->as.include_stmt.mode, node->line);
+            emit_byte(gen, OP_POP, node->line);
             break;
         default:
             fail(gen, node->line, "statement node %s is not executable",

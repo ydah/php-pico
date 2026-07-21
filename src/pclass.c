@@ -327,12 +327,16 @@ pobject *pobject_new(pphp_state *state, pclass *class_entry) {
     object->header.type = PT_OBJECT;
     object->header.flags = 0U;
     object->class_entry = class_entry;
-    object->owner_state = state;
+    object->owner_state = state == NULL || state->root_state == NULL
+                              ? state : state->root_state;
     object->gc_prev = NULL;
-    object->gc_next = state == NULL ? NULL : state->gc_objects;
-    if (state != NULL) {
-        if (state->gc_objects != NULL) state->gc_objects->gc_prev = object;
-        state->gc_objects = object;
+    object->gc_next = object->owner_state == NULL
+                          ? NULL : object->owner_state->gc_objects;
+    if (object->owner_state != NULL) {
+        if (object->owner_state->gc_objects != NULL) {
+            object->owner_state->gc_objects->gc_prev = object;
+        }
+        object->owner_state->gc_objects = object;
     }
     for (i = 0U; i < class_entry->property_count; i++) {
         object->slots[i] = class_entry->properties[i].default_value;

@@ -17,6 +17,7 @@ parray_iterator *pa_iterator_new(parray *array) {
     iterator->resource.header.type = PT_RESOURCE;
     iterator->resource.header.flags = 0U;
     iterator->resource.destroy = iterator_destroy;
+    iterator->resource.kind = PRESOURCE_ITERATOR;
     iterator->array = array;
     iterator->position = 0U;
     pv_retain(pv_heap(PT_ARRAY, &array->header));

@@ -38,11 +38,13 @@ struct pphp_state {
     parray *globals;
     parray *statics;
     parray *constants;
+    parray *included_files;
     pclass **classes;
     size_t class_count;
     size_t class_capacity;
     pclass *building_class;
     pobject *gc_objects;
+    struct pphp_state *root_state;
     pobject *oom_exception;
     pphp_output_fn output;
     void *output_context;
@@ -64,6 +66,8 @@ void pphp_output(pphp_state *state, const char *bytes, size_t length);
 void pphp_runtime_error(pphp_state *state, uint32_t line, const char *format, ...);
 int pphp_exec_source_mode(pphp_state *state, const char *source, size_t length,
                           const char *chunk_name, int repl);
+int pphp_exec_include(pphp_state *state, const char *path, uint8_t mode,
+                      pvalue *result);
 pclass *pphp_find_class(const pphp_state *state, const char *name, size_t length);
 int pphp_register_class(pphp_state *state, pclass *class_entry);
 void pphp_clear_classes(pphp_state *state);

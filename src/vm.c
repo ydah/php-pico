@@ -1426,6 +1426,27 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                 }
                 break;
             }
+            case OP_INCLUDE: {
+                uint8_t mode = read_u8(state, frame);
+                pvalue path_value = pop(state);
+                pstring *path = pv_to_string(path_value);
+                pvalue include_result = pv_bool(0);
+                pv_release(path_value);
+                if (path == NULL) {
+                    pphp_runtime_error(state, frame->line,
+                                       "include path must be string-compatible");
+                } else {
+                    (void)pphp_exec_include(state, path->data, mode,
+                                            &include_result);
+                    ps_destroy(path);
+                    if (state->error[0] == '\0') {
+                        (void)push(state, include_result);
+                    } else {
+                        pv_release(include_result);
+                    }
+                }
+                break;
+            }
             case OP_RET: {
                 pvalue result = pop(state);
                 (void)return_from_function(state, result);
@@ -2161,6 +2182,7 @@ int pphp_vm_invoke(pphp_state *state, pvalue callable,
     child.stack_count = 0U;
     child.frame_count = 0U;
     child.module = NULL;
+    child.root_state = state->root_state == NULL ? state : state->root_state;
     child.repl_modules = modules;
     child.repl_module_count = module_count;
     child.repl_module_capacity = module_count;
@@ -2181,6 +2203,13 @@ int pphp_vm_invoke(pphp_state *state, pvalue callable,
     if (child.exit_requested) {
         state->exit_requested = 1;
         state->exit_status = child.exit_status;
+    }
+    state->random_state = child.random_state;
+    if (state->root_state != NULL) {
+        state->root_state->classes = child.classes;
+        state->root_state->class_count = child.class_count;
+        state->root_state->class_capacity = child.class_capacity;
+        state->root_state->random_state = child.random_state;
     }
 done:
     pphp_free(modules);

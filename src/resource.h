@@ -8,7 +8,13 @@
 typedef struct presource {
     pheader header;
     void (*destroy)(struct presource *resource);
+    uint8_t kind;
 } presource;
+
+enum {
+    PRESOURCE_ITERATOR = 1,
+    PRESOURCE_FILE = 2
+};
 
 typedef struct parray_iterator {
     presource resource;
@@ -21,4 +27,3 @@ int pa_iterator_next(parray_iterator *iterator, pvalue *key, pvalue *value);
 void presource_destroy(presource *resource);
 
 #endif
-

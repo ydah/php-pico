@@ -830,6 +830,53 @@ TEST(cycle_collector_reclaims_self_and_mutual_object_cycles) {
     ASSERT_STR("1:2:0", output.bytes);
 }
 
+TEST(file_builtins_cover_whole_file_stream_and_path_operations) {
+    const char *source =
+        "$path = 'build/host/php_pico_file_test.txt';"
+        "$moved = 'build/host/php_pico_file_moved.txt';"
+        "$dir = 'build/host/php_pico_dir_test';"
+        "echo file_put_contents($path, 'abc'), ':',"
+        " file_put_contents($path, 'd', FILE_APPEND), ':',"
+        " filesize($path), ':', file_get_contents($path), ':';"
+        "$file = fopen($path, 'r');"
+        "echo fread($file, 2), ':', ftell($file), ':',"
+        " fseek($file, 0, SEEK_SET), ':', fgets($file), ':',"
+        " fread($file, 1), ':', feof($file), ':', fclose($file), ':';"
+        "echo rename($path, $moved), ':', file_exists($moved), ':',"
+        " unlink($moved), ':', mkdir($dir), ':', rmdir($dir), ':',"
+        " function_exists('file_get_contents');";
+    output_buffer output;
+    ASSERT_EQ(PPHP_OK, execute(source, &output, NULL, 0U));
+    ASSERT_STR("3:1:4:abcd:ab:2:0:abcd::1:1:1:1:1:1:1:1", output.bytes);
+}
+
+TEST(include_once_loads_definitions_and_require_reports_missing_files) {
+    const char *path = "build/host/php_pico_include_test.php";
+    const char *included =
+        "<?php function included_twice($value) { return $value * 2; }"
+        "class IncludedValue { public function get() { return 7; } }"
+        "$included_global = 5; echo 'I';";
+    const char *source =
+        "include_once 'build/host/php_pico_include_test.php';"
+        "include_once 'build/host/php_pico_include_test.php';"
+        "$object = new IncludedValue();"
+        "echo ':', included_twice($included_global), ':', $object->get();";
+    FILE *file = fopen(path, "wb");
+    output_buffer output;
+    char error[256];
+    ASSERT_TRUE(file != NULL);
+    ASSERT_EQ((long)strlen(included),
+              (long)fwrite(included, 1U, strlen(included), file));
+    ASSERT_EQ(0, fclose(file));
+    ASSERT_EQ(PPHP_OK, execute(source, &output, error, sizeof(error)));
+    ASSERT_STR("I:10:7", output.bytes);
+    ASSERT_EQ(0, remove(path));
+    ASSERT_EQ(PPHP_E_RUNTIME,
+              execute("require 'build/host/does_not_exist.php';", &output,
+                      error, sizeof(error)));
+    ASSERT_TRUE(strstr(error, "required file") != NULL);
+}
+
 int main(void) {
     static const test_case tests[] = {
         {"arithmetic VM", arithmetic_runs_through_compiler_and_vm},
@@ -880,7 +927,9 @@ int main(void) {
         {"array string replacement", str_replace_accepts_array_search_replacement_and_subject_values},
         {"static and magic class features", static_class_members_promotion_and_magic_methods_execute},
         {"interface, abstract, and final contracts", interfaces_and_abstract_final_contracts_are_enforced},
-        {"object cycle collection", cycle_collector_reclaims_self_and_mutual_object_cycles}
+        {"object cycle collection", cycle_collector_reclaims_self_and_mutual_object_cycles},
+        {"file builtins", file_builtins_cover_whole_file_stream_and_path_operations},
+        {"include and require", include_once_loads_definitions_and_require_reports_missing_files}
     };
     return run_tests(tests, sizeof(tests) / sizeof(tests[0]));
 }

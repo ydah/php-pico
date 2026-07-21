@@ -8,6 +8,7 @@
 #include "formatting.h"
 #include "json.h"
 #include "system.h"
+#include "files.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -38,7 +39,7 @@ int pphp_builtin_exists(const pstring *name) {
         if (name_is(name, candidate)) return 1;
         candidate += strlen(candidate) + 1U;
     }
-    return 0;
+    return pphp_file_builtin_exists(name);
 }
 
 static int call_reflection_builtin(pphp_state *state, const pstring *name,
@@ -547,6 +548,8 @@ int pphp_call_builtin(pphp_state *state, const pstring *name,
     handled = pphp_call_json_builtin(state, name, arguments, count, result);
     if (handled != 0) return handled;
     handled = pphp_call_system_builtin(state, name, arguments, count, result);
+    if (handled != 0) return handled;
+    handled = pphp_call_file_builtin(state, name, arguments, count, result);
     if (handled != 0) return handled;
     handled = pphp_call_array_builtin(state, name, arguments, count, result);
     if (handled != 0) return handled;

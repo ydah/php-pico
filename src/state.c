@@ -7,6 +7,7 @@
 #include "parray.h"
 #include "pphp/hal.h"
 #include "gc.h"
+#include "files.h"
 
 #include <stdarg.h>
 #include <float.h>
@@ -48,7 +49,10 @@ static int initialize_constants(pphp_state *state) {
          set_constant(state, "ARRAY_FILTER_USE_KEY", pv_int(2)) &&
          set_constant(state, "SORT_REGULAR", pv_int(0)) &&
          set_constant(state, "SORT_NUMERIC", pv_int(1)) &&
-         set_constant(state, "SORT_STRING", pv_int(2));
+         set_constant(state, "SORT_STRING", pv_int(2)) &&
+         set_constant(state, "SEEK_SET", pv_int(0)) &&
+         set_constant(state, "SEEK_CUR", pv_int(1)) &&
+         set_constant(state, "SEEK_END", pv_int(2));
     pv_release(newline_value);
     return ok;
 }
@@ -63,6 +67,7 @@ pphp_state *pphp_open(void *pool, size_t pool_size) {
         return NULL;
     }
     memset(state, 0, sizeof(*state));
+    state->root_state = state;
     state->output = discard_output;
     state->invoke = pphp_vm_invoke;
     state->random_state = hal_random();
@@ -73,11 +78,13 @@ pphp_state *pphp_open(void *pool, size_t pool_size) {
     state->globals = pa_new(16U);
     state->statics = pa_new(8U);
     state->constants = pa_new(16U);
+    state->included_files = pa_new(8U);
     if (state->globals == NULL || state->statics == NULL ||
-        state->constants == NULL) {
+        state->constants == NULL || state->included_files == NULL) {
         pa_destroy(state->globals);
         pa_destroy(state->statics);
         pa_destroy(state->constants);
+        pa_destroy(state->included_files);
         psymbol_destroy(&state->symbols);
         pphp_free(state);
         return NULL;
@@ -86,6 +93,7 @@ pphp_state *pphp_open(void *pool, size_t pool_size) {
         pa_destroy(state->globals);
         pa_destroy(state->statics);
         pa_destroy(state->constants);
+        pa_destroy(state->included_files);
         psymbol_destroy(&state->symbols);
         pphp_free(state);
         return NULL;
@@ -101,6 +109,7 @@ void pphp_close(pphp_state *state) {
     pa_destroy(state->globals);
     pa_destroy(state->statics);
     pa_destroy(state->constants);
+    pa_destroy(state->included_files);
     (void)pphp_gc_collect(state);
     pphp_clear_classes(state);
     for (i = 0U; i < state->repl_module_count; i++) {
@@ -174,6 +183,136 @@ static int validate_repl_functions(pphp_state *state, const pmodule *module) {
         }
     }
     return 1;
+}
+
+int pphp_exec_include(pphp_state *state, const char *path, uint8_t mode,
+                      pvalue *result) {
+    pphp_state *owner;
+    pstring *path_string;
+    pvalue path_value;
+    pvalue existing = pv_null();
+    char *bytes = NULL;
+    size_t length = 0U;
+    pmodule module;
+    pmodule *execution_module = &module;
+    pc_arena arena;
+    pc_parser parser;
+    pc_ast *program;
+    pc_codegen_error codegen_error;
+    pphp_state child;
+    int once = mode == (uint8_t)T_INCLUDE_ONCE ||
+               mode == (uint8_t)T_REQUIRE_ONCE;
+    int required = mode == (uint8_t)T_REQUIRE ||
+                   mode == (uint8_t)T_REQUIRE_ONCE;
+    int status;
+    if (state == NULL || path == NULL || result == NULL) return PPHP_E_RUNTIME;
+    *result = pv_bool(0);
+    owner = state->root_state == NULL ? state : state->root_state;
+    path_string = ps_new(path, strlen(path));
+    if (path_string == NULL) {
+        pphp_runtime_error(state, 0U, "out of memory resolving include path");
+        return PPHP_E_NOMEM;
+    }
+    path_value = pv_heap(PT_STRING, &path_string->header);
+    if (once && pa_get(owner->included_files, path_value, &existing)) {
+        pv_release(existing);
+        pv_release(path_value);
+        *result = pv_bool(1);
+        return PPHP_OK;
+    }
+    if (!pphp_file_read_all(path, &bytes, &length)) {
+        if (required) {
+            pphp_runtime_error(state, 0U,
+                               "required file %s could not be opened", path);
+        }
+        pv_release(path_value);
+        return required ? PPHP_E_RUNTIME : PPHP_OK;
+    }
+    if (length >= 4U && memcmp(bytes, "PPBC", 4U) == 0) {
+        status = pphp_pbc_load(bytes, length, &module);
+        if (status != PPHP_OK) {
+            pphp_runtime_error(state, 0U,
+                               "included file %s is not valid PBC", path);
+            pphp_free(bytes);
+            pv_release(path_value);
+            return status;
+        }
+    } else {
+        pc_arena_init(&arena, 4096U);
+        pc_parser_init(&parser, &arena, bytes, length, 0);
+        program = pc_parse_program(&parser);
+        if (program == NULL) {
+            pphp_runtime_error(state, pc_parser_error_line(&parser),
+                               "Parse error: %s in %s",
+                               pc_parser_error(&parser), path);
+            pc_arena_destroy(&arena);
+            pphp_free(bytes);
+            pv_release(path_value);
+            return PPHP_E_PARSE;
+        }
+        if (!pc_codegen_program(program, &module, &codegen_error)) {
+            pphp_runtime_error(state, codegen_error.line,
+                               "Compile error: %s in %s",
+                               codegen_error.message, path);
+            pc_arena_destroy(&arena);
+            pphp_free(bytes);
+            pv_release(path_value);
+            return PPHP_E_PARSE;
+        }
+        pc_arena_destroy(&arena);
+    }
+    pphp_free(bytes);
+    if (!validate_repl_functions(owner, &module)) {
+        pmodule_destroy(&module);
+        pv_release(path_value);
+        (void)snprintf(state->error, sizeof(state->error), "%s", owner->error);
+        state->error_line = owner->error_line;
+        return PPHP_E_RUNTIME;
+    }
+    if (!retain_repl_module(owner, &module, &execution_module)) {
+        pmodule_destroy(&module);
+        pv_release(path_value);
+        pphp_runtime_error(state, 0U,
+                           "out of memory retaining included definitions");
+        return PPHP_E_NOMEM;
+    }
+    if (once && !pa_set(owner->included_files, path_value, pv_bool(1))) {
+        pv_release(path_value);
+        pphp_runtime_error(state, 0U, "out of memory tracking included file");
+        return PPHP_E_NOMEM;
+    }
+    pv_release(path_value);
+    child = *owner;
+    child.stack_count = 0U;
+    child.frame_count = 0U;
+    child.module = NULL;
+    child.root_state = owner;
+    child.repl_mode = 1;
+    child.capture_halt_result = 0;
+    child.halt_result = NULL;
+    child.exit_requested = 0;
+    child.exit_status = 0;
+    child.error[0] = '\0';
+    child.error_line = 0U;
+    child.chunk_name = path;
+    status = pphp_vm_execute(&child, execution_module);
+    owner->classes = child.classes;
+    owner->class_count = child.class_count;
+    owner->class_capacity = child.class_capacity;
+    owner->random_state = child.random_state;
+    if (child.exit_requested) {
+        owner->exit_requested = 1;
+        owner->exit_status = child.exit_status;
+        state->exit_requested = 1;
+        state->exit_status = child.exit_status;
+    }
+    if (status != PPHP_OK) {
+        (void)snprintf(state->error, sizeof(state->error), "%s", child.error);
+        state->error_line = child.error_line;
+        return status;
+    }
+    *result = pv_bool(1);
+    return PPHP_OK;
 }
 
 static int class_name_equal(const pstring *name, const char *other, size_t length) {

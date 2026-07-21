@@ -25,6 +25,7 @@ static size_t operand_size(uint8_t opcode) {
         case OP_BIND_GLOBAL:
         case OP_ECHO:
         case OP_CALL_VALUE:
+        case OP_INCLUDE:
             return 1U;
         case OP_LOAD_CONST:
         case OP_LOAD_NAMED_CONST:
@@ -118,6 +119,7 @@ static int disassemble_proto(FILE *stream, const pproto *proto, size_t index) {
             case OP_BIND_GLOBAL:
             case OP_ECHO:
             case OP_CALL_VALUE:
+            case OP_INCLUDE:
                 fprintf(stream, " %u", proto->code[pc]);
                 break;
             case OP_LOAD_I32:

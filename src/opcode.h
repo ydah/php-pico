@@ -66,6 +66,7 @@ typedef enum pphp_opcode {
     OP_ECHO = 0x54,
     OP_CALL_ARRAY = 0x55,
     OP_CALL_VALUE_ARRAY = 0x56,
+    OP_INCLUDE = 0x57,
     OP_NEW_ARRAY = 0x60,
     OP_ARR_PUSH = 0x61,
     OP_ARR_SET = 0x62,
