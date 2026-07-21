@@ -446,6 +446,7 @@ static int throw_exception(pphp_state *state, pvalue exception,
 
 static void convert_runtime_error(pphp_state *state, size_t throw_pc) {
     char message[sizeof(state->error)];
+    char raised_class[sizeof(state->raised_class)];
     const char *class_name = "Error";
     pobject *exception;
     if (state->error[0] == '\0' || state->frame_count == 0U) return;
@@ -453,7 +454,11 @@ static void convert_runtime_error(pphp_state *state, size_t throw_pc) {
     if (state->error_line == 0U) {
         state->error_line = state->frames[state->frame_count - 1U].line;
     }
-    if (strstr(message, "Division by zero") != NULL ||
+    if (state->raised_class[0] != '\0') {
+        (void)snprintf(raised_class, sizeof(raised_class), "%s",
+                       state->raised_class);
+        class_name = raised_class;
+    } else if (strstr(message, "Division by zero") != NULL ||
         strstr(message, "Modulo by zero") != NULL) {
         class_name = "DivisionByZeroError";
     } else if (strstr(message, "out of memory") != NULL ||
@@ -469,6 +474,7 @@ static void convert_runtime_error(pphp_state *state, size_t throw_pc) {
         class_name = "TypeError";
     }
     state->error[0] = '\0';
+    state->raised_class[0] = '\0';
     if (strcmp(class_name, "OutOfMemoryError") == 0 &&
         state->oom_exception != NULL) {
         exception = state->oom_exception;
@@ -612,6 +618,11 @@ static int call_function(pphp_state *state, pframe *caller, uint16_t name_index,
     argument_base = state->stack_count - argument_count;
     builtin = pphp_call_builtin(state, name, state->stack + argument_base,
                                 argument_count, &result);
+    if (builtin == 0) {
+        builtin = pphp_call_native_function(
+            state, name, state->stack + argument_base, argument_count,
+            &result);
+    }
     if (builtin != 0) {
         release_range(state, argument_base, state->stack_count);
         state->stack_count = argument_base;
@@ -664,6 +675,10 @@ static int call_named_value(pphp_state *state, pframe *caller,
     const pmodule *callee_module;
     int builtin = pphp_call_builtin(state, name, state->stack + base + 1U,
                                     argument_count, &result);
+    if (builtin == 0) {
+        builtin = pphp_call_native_function(
+            state, name, state->stack + base + 1U, argument_count, &result);
+    }
     if (builtin != 0) {
         release_range(state, base, state->stack_count);
         state->stack_count = base;
@@ -900,10 +915,10 @@ static int invoke_named_method(pphp_state *state, pframe *frame,
 
 static int enter_method(pphp_state *state, pframe *caller, const pmethod *method,
                         uint8_t argument_count, int constructor) {
-    const pproto *callee = method->proto;
+    const pproto *callee;
     size_t base;
     pvalue object_value;
-    if (method == NULL || callee == NULL || (method->flags & PC_STATIC) != 0U ||
+    if (method == NULL || (method->flags & PC_STATIC) != 0U ||
         state->stack_count < (size_t)argument_count + 1U) {
         pphp_runtime_error(state, caller->line, "invalid method call");
         return 0;
@@ -912,6 +927,26 @@ static int enter_method(pphp_state *state, pframe *caller, const pmethod *method
     object_value = state->stack[base];
     if (object_value.type != PT_OBJECT) {
         pphp_runtime_error(state, caller->line, "method call target is not an object");
+        return 0;
+    }
+    if (method->native != NULL) {
+        pvalue result = pv_null();
+        int status = pphp_call_native_method(
+            state, method->native, (pobject *)object_value.as.gc,
+            state->stack + base + 1U, argument_count, &result);
+        if (constructor) {
+            release_range(state, base + 1U, state->stack_count);
+            state->stack_count = base + 1U;
+            pv_release(result);
+            return status > 0;
+        }
+        release_range(state, base, state->stack_count);
+        state->stack_count = base;
+        return status > 0 && push(state, result);
+    }
+    callee = method->proto;
+    if (callee == NULL) {
+        pphp_runtime_error(state, caller->line, "invalid method call");
         return 0;
     }
     if (argument_count < callee->n_required) {
@@ -954,11 +989,27 @@ static int enter_method(pphp_state *state, pframe *caller, const pmethod *method
 static int enter_static_method(pphp_state *state, pframe *caller,
                                const pmethod *method, pclass *called_class,
                                uint8_t argument_count) {
-    const pproto *callee = method == NULL ? NULL : method->proto;
+    const pproto *callee;
     size_t base;
-    if (method == NULL || callee == NULL ||
+    if (method == NULL ||
         (method->flags & PC_STATIC) == 0U ||
         state->stack_count < argument_count) {
+        pphp_runtime_error(state, caller->line, "invalid static method call");
+        return 0;
+    }
+    base = state->stack_count - argument_count;
+    if (method->native != NULL) {
+        pvalue result = pv_null();
+        int status = pphp_call_native_method(
+            state, method->native, NULL, state->stack + base,
+            argument_count, &result);
+        (void)called_class;
+        release_range(state, base, state->stack_count);
+        state->stack_count = base;
+        return status > 0 && push(state, result);
+    }
+    callee = method->proto;
+    if (callee == NULL) {
         pphp_runtime_error(state, caller->line, "invalid static method call");
         return 0;
     }
@@ -973,7 +1024,6 @@ static int enter_static_method(pphp_state *state, pframe *caller,
                            "stack overflow entering static method");
         return 0;
     }
-    base = state->stack_count - argument_count;
     if (!bind_arguments(state, callee, base, base, argument_count, 0U,
                         caller->line)) return 0;
     state->stack_count = base + callee->n_locals;
@@ -1162,7 +1212,7 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
         pphp_runtime_error(state, 0U, "module has no entry point");
         return PPHP_E_RUNTIME;
     }
-    if (!state->repl_mode) pphp_clear_classes(state);
+    if (!state->repl_mode) pphp_clear_user_classes(state);
     if (pphp_find_class(state, "Throwable", 9U) == NULL &&
         !pphp_register_exception_classes(state)) {
         pphp_runtime_error(state, 0U, "cannot initialize exception classes");

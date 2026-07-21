@@ -117,6 +117,10 @@ void pphp_close(pphp_state *state) {
         pphp_free(state->repl_modules[i]);
     }
     pphp_free(state->repl_modules);
+    for (i = 0U; i < state->native_function_count; i++) {
+        ps_destroy(state->native_functions[i].name);
+    }
+    pphp_free(state->native_functions);
     psymbol_destroy(&state->symbols);
     pphp_free(state);
 }
@@ -377,6 +381,33 @@ void pphp_clear_classes(pphp_state *state) {
     state->class_capacity = 0U;
 }
 
+void pphp_clear_user_classes(pphp_state *state) {
+    size_t read_index;
+    if (state == NULL) return;
+    if (state->oom_exception != NULL &&
+        !state->oom_exception->class_entry->persistent) {
+        pv_release(pv_heap(PT_OBJECT, &state->oom_exception->header));
+        state->oom_exception = NULL;
+    }
+    if (state->building_class != NULL && !state->building_class->persistent) {
+        pclass_destroy(state->building_class);
+        state->building_class = NULL;
+    }
+    for (read_index = state->class_count; read_index > 0U; read_index--) {
+        pclass *class_entry = state->classes[read_index - 1U];
+        if (!class_entry->persistent) {
+            pclass_destroy(class_entry);
+            if (read_index < state->class_count) {
+                memmove(state->classes + read_index - 1U,
+                        state->classes + read_index,
+                        (state->class_count - read_index) *
+                            sizeof(*state->classes));
+            }
+            state->class_count--;
+        }
+    }
+}
+
 void pphp_set_output(pphp_state *state, pphp_output_fn output, void *context) {
     if (state == NULL) {
         return;
@@ -415,6 +446,7 @@ int pphp_exec_source_mode(pphp_state *state, const char *source, size_t length,
         return PPHP_E_RUNTIME;
     }
     state->error[0] = '\0';
+    state->raised_class[0] = '\0';
     state->error_line = 0U;
     state->exit_requested = 0;
     state->exit_status = 0;
@@ -450,7 +482,7 @@ int pphp_exec_source_mode(pphp_state *state, const char *source, size_t length,
     }
     result = pphp_vm_execute(state, execution_module);
     if (!repl) {
-        pphp_clear_classes(state);
+        pphp_clear_user_classes(state);
         pmodule_destroy(&module);
         state->module = NULL;
     }
@@ -469,6 +501,7 @@ int pphp_exec_pbc(pphp_state *state, const void *pbc, size_t length) {
         return PPHP_E_RUNTIME;
     }
     state->error[0] = '\0';
+    state->raised_class[0] = '\0';
     state->error_line = 0U;
     state->exit_requested = 0;
     state->exit_status = 0;
@@ -480,7 +513,7 @@ int pphp_exec_pbc(pphp_state *state, const void *pbc, size_t length) {
         return result == PPHP_E_NOMEM ? PPHP_E_RUNTIME : PPHP_E_PARSE;
     }
     result = pphp_vm_execute(state, &module);
-    pphp_clear_classes(state);
+    pphp_clear_user_classes(state);
     pmodule_destroy(&module);
     return result;
 }

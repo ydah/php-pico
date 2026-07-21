@@ -15,6 +15,49 @@ typedef struct output_buffer {
 } output_buffer;
 
 static uint8_t vm_pool[256U * 1024U];
+static pclass *native_test_class;
+static int native_finalized;
+
+static int native_add(pphp_ctx *context) {
+    pphp_ret_int(context, pphp_arg_int(context, 0) +
+                              pphp_arg_int(context, 1));
+    return 0;
+}
+
+static void native_box_finalizer(void *data) {
+    (void)data;
+    native_finalized++;
+}
+
+static int native_make(pphp_ctx *context) {
+    pobject *object = pphp_obj_new_with(context, native_test_class,
+                                        sizeof(pphp_int),
+                                        native_box_finalizer);
+    pphp_int *value;
+    if (object == NULL) return -1;
+    value = pphp_obj_data(object);
+    *value = 40;
+    pphp_ret_object(context, object);
+    return 0;
+}
+
+static int native_increment(pphp_ctx *context) {
+    pphp_int *value = pphp_obj_data(pphp_this(context));
+    if (value == NULL) return pphp_raise(context, "RuntimeException",
+                                         "native data is unavailable");
+    *value += pphp_arg_int(context, 0);
+    pphp_ret_int(context, *value);
+    return 0;
+}
+
+static int native_label(pphp_ctx *context) {
+    pphp_ret_strn(context, "native", 6U);
+    return 0;
+}
+
+static int native_fail(pphp_ctx *context) {
+    return pphp_raise(context, "RuntimeException", "native failure");
+}
 
 static void capture_output(void *context, const char *bytes, size_t length) {
     output_buffer *output = context;
@@ -877,6 +920,37 @@ TEST(include_once_loads_definitions_and_require_reports_missing_files) {
     ASSERT_TRUE(strstr(error, "required file") != NULL);
 }
 
+TEST(public_c_api_registers_functions_classes_methods_and_native_data) {
+    const char *source =
+        "<?php $box = native_make(); echo native_add(2, 3), ':',"
+        " $box->increment(2), ':', NativeBox::label(), ':',"
+        " NativeBox::VALUE, ':', function_exists('native_add'), ':';"
+        "try { $box->fail(); } catch (RuntimeException $error) {"
+        " echo $error->getMessage(); } unset($box);";
+    pphp_state *state = pphp_open(vm_pool, sizeof(vm_pool));
+    output_buffer output;
+    int result;
+    ASSERT_TRUE(state != NULL);
+    native_finalized = 0;
+    native_test_class = pphp_def_class(state, "NativeBox", NULL);
+    ASSERT_TRUE(native_test_class != NULL);
+    pphp_def_func(state, "native_add", native_add, 2, 2);
+    pphp_def_func(state, "native_make", native_make, 0, 0);
+    pphp_def_method(native_test_class, "increment", native_increment,
+                    PPHP_PUBLIC);
+    pphp_def_method(native_test_class, "label", native_label,
+                    PPHP_PUBLIC | PPHP_STATIC);
+    pphp_def_method(native_test_class, "fail", native_fail, PPHP_PUBLIC);
+    pphp_def_cconst_int(native_test_class, "VALUE", 7);
+    memset(&output, 0, sizeof(output));
+    pphp_set_output(state, capture_output, &output);
+    result = pphp_exec_source(state, source, strlen(source), "native-api");
+    ASSERT_EQ(PPHP_OK, result);
+    ASSERT_STR("5:42:native:7:1:native failure", output.bytes);
+    ASSERT_EQ(1, native_finalized);
+    pphp_close(state);
+}
+
 int main(void) {
     static const test_case tests[] = {
         {"arithmetic VM", arithmetic_runs_through_compiler_and_vm},
@@ -929,7 +1003,8 @@ int main(void) {
         {"interface, abstract, and final contracts", interfaces_and_abstract_final_contracts_are_enforced},
         {"object cycle collection", cycle_collector_reclaims_self_and_mutual_object_cycles},
         {"file builtins", file_builtins_cover_whole_file_stream_and_path_operations},
-        {"include and require", include_once_loads_definitions_and_require_reports_missing_files}
+        {"include and require", include_once_loads_definitions_and_require_reports_missing_files},
+        {"public native extension API", public_c_api_registers_functions_classes_methods_and_native_data}
     };
     return run_tests(tests, sizeof(tests) / sizeof(tests[0]));
 }

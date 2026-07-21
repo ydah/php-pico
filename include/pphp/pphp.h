@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "pphp_config.h"
+#include "value.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -25,6 +26,17 @@ typedef struct pphp_ctx pphp_ctx;
 typedef struct pclass pclass;
 typedef struct pobject pobject;
 typedef void (*pphp_output_fn)(void *context, const char *bytes, size_t length);
+typedef int (*pphp_cfunc)(pphp_ctx *context);
+
+enum {
+    PPHP_PUBLIC = 1U << 0,
+    PPHP_PROTECTED = 1U << 1,
+    PPHP_PRIVATE = 1U << 2,
+    PPHP_STATIC = 1U << 3,
+    PPHP_ABSTRACT = 1U << 4,
+    PPHP_FINAL = 1U << 5,
+    PPHP_READONLY = 1U << 6
+};
 
 typedef struct pphp_pool_stats {
     size_t total;
@@ -51,6 +63,32 @@ const char *pphp_last_error(const pphp_state *state);
 uint32_t pphp_last_error_line(const pphp_state *state);
 int pphp_exit_requested(const pphp_state *state);
 int pphp_exit_status(const pphp_state *state);
+
+void pphp_def_func(pphp_state *state, const char *name, pphp_cfunc function,
+                   int minimum_arguments, int maximum_arguments);
+pclass *pphp_def_class(pphp_state *state, const char *name,
+                       const char *parent);
+void pphp_def_method(pclass *class_entry, const char *name,
+                     pphp_cfunc function, uint8_t flags);
+void pphp_def_cconst_int(pclass *class_entry, const char *name, pphp_int value);
+
+int pphp_argc(pphp_ctx *context);
+pvalue pphp_arg(pphp_ctx *context, int index);
+pphp_int pphp_arg_int(pphp_ctx *context, int index);
+const char *pphp_arg_str(pphp_ctx *context, int index, size_t *length);
+pobject *pphp_this(pphp_ctx *context);
+void pphp_ret_null(pphp_ctx *context);
+void pphp_ret_int(pphp_ctx *context, pphp_int value);
+void pphp_ret_float(pphp_ctx *context, pphp_float value);
+void pphp_ret_bool(pphp_ctx *context, int value);
+void pphp_ret_strn(pphp_ctx *context, const char *bytes, size_t length);
+void pphp_ret_value(pphp_ctx *context, pvalue value);
+void pphp_ret_object(pphp_ctx *context, pobject *object);
+int pphp_raise(pphp_ctx *context, const char *class_name,
+               const char *format, ...);
+pobject *pphp_obj_new_with(pphp_ctx *context, pclass *class_entry,
+                           size_t extra_bytes, void (*finalizer)(void *));
+void *pphp_obj_data(pobject *object);
 
 #ifdef __cplusplus
 }

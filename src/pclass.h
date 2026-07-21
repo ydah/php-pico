@@ -34,6 +34,7 @@ typedef struct pmethod {
     const pproto *proto;
     const pmodule *module;
     pclass *owner;
+    pphp_cfunc native;
 } pmethod;
 
 struct pclass {
@@ -51,6 +52,7 @@ struct pclass {
     size_t interface_count;
     size_t interface_capacity;
     uint8_t flags;
+    uint8_t persistent;
 };
 
 struct pobject {
@@ -59,6 +61,8 @@ struct pobject {
     pphp_state *owner_state;
     struct pobject *gc_prev;
     struct pobject *gc_next;
+    void *native_data;
+    void (*native_finalizer)(void *);
     pvalue slots[];
 };
 
@@ -69,6 +73,9 @@ int pclass_add_property(pclass *class_entry, const char *name, size_t length,
 int pclass_add_method(pclass *class_entry, const char *name, size_t length,
                       uint8_t flags, const pproto *proto,
                       const pmodule *module);
+int pclass_add_native_method(pclass *class_entry, const char *name,
+                             size_t length, uint8_t flags,
+                             pphp_cfunc function);
 int pclass_add_static_property(pclass *class_entry, const char *name,
                                size_t length, pvalue default_value);
 int pclass_get_static_property(const pclass *class_entry, const char *name,

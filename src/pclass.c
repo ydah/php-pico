@@ -282,7 +282,21 @@ int pclass_add_method(pclass *class_entry, const char *name, size_t length,
     method->proto = proto;
     method->module = module;
     method->owner = class_entry;
+    method->native = NULL;
     class_entry->method_count++;
+    return 1;
+}
+
+int pclass_add_native_method(pclass *class_entry, const char *name,
+                             size_t length, uint8_t flags,
+                             pphp_cfunc function) {
+    pmethod *method;
+    if (function == NULL ||
+        !pclass_add_method(class_entry, name, length, flags, NULL, NULL)) {
+        return 0;
+    }
+    method = &class_entry->methods[class_entry->method_count - 1U];
+    method->native = function;
     return 1;
 }
 
@@ -338,6 +352,8 @@ pobject *pobject_new(pphp_state *state, pclass *class_entry) {
         }
         object->owner_state->gc_objects = object;
     }
+    object->native_data = NULL;
+    object->native_finalizer = NULL;
     for (i = 0U; i < class_entry->property_count; i++) {
         object->slots[i] = class_entry->properties[i].default_value;
         pv_retain(object->slots[i]);
@@ -449,6 +465,10 @@ void pobject_destroy(pobject *object) {
         }
         if (object->gc_next != NULL) object->gc_next->gc_prev = object->gc_prev;
     }
+    if (object->native_finalizer != NULL) {
+        object->native_finalizer(object->native_data);
+    }
+    pphp_free(object->native_data);
     for (i = 0U; i < object->class_entry->property_count; i++) {
         pv_release(object->slots[i]);
     }
