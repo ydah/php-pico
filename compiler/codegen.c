@@ -968,7 +968,7 @@ static int prepare_index_lvalue(generator *gen, const pc_ast *leaf,
                (cursor->as.member.op == T_ARROW ||
                 (cursor->as.member.op == T_SCOPE &&
                  cursor->as.member.base->kind == AST_IDENTIFIER))) {
-        uint16_t name;
+        uint16_t name = 0U;
         lvalue->root_member = cursor;
         lvalue->root_is_static = cursor->as.member.op == T_SCOPE;
         lvalue->root_is_dynamic = cursor->as.member.dynamic_name != NULL;
@@ -1087,7 +1087,7 @@ static void store_index_root(generator *gen, const index_lvalue *lvalue,
                              uint32_t line) {
     emit_store_slot(gen, lvalue->root_slot, line);
     if (lvalue->root_member != NULL) {
-        uint16_t name;
+        uint16_t name = 0U;
         if (lvalue->root_is_static) {
             uint16_t class_name = name_constant(
                 gen, lvalue->root_member->as.member.base->as.literal.token);

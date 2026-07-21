@@ -107,8 +107,10 @@ pico_minimize_runtime(php-pico INCLUDE
 pico_enable_stdio_usb(php-pico 1)
 pico_enable_stdio_uart(php-pico 1)
 pico_add_extra_outputs(php-pico)
-add_custom_command(TARGET php-pico POST_BUILD
-  COMMAND ${CMAKE_COMMAND} -E copy_if_different
-          ${CMAKE_CURRENT_BINARY_DIR}/php-pico.uf2
-          ${CMAKE_CURRENT_BINARY_DIR}/php-pico-${PROJECT_VERSION}.uf2
-)
+if(NOT PICO_NO_PICOTOOL)
+  add_custom_command(TARGET php-pico POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${CMAKE_CURRENT_BINARY_DIR}/php-pico.uf2
+            ${CMAKE_CURRENT_BINARY_DIR}/php-pico-${PROJECT_VERSION}.uf2
+  )
+endif()
