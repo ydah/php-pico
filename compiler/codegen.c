@@ -197,6 +197,40 @@ static pphp_float parse_float_token(pc_token token) {
     return value;
 }
 
+static int escape_hex_digit(char byte) {
+    if (byte >= '0' && byte <= '9') return byte - '0';
+    if (byte >= 'a' && byte <= 'f') return byte - 'a' + 10;
+    if (byte >= 'A' && byte <= 'F') return byte - 'A' + 10;
+    return -1;
+}
+
+static size_t encode_utf8(char *output, uint32_t codepoint) {
+    if (codepoint <= 0x7fU) {
+        output[0] = (char)codepoint;
+        return 1U;
+    }
+    if (codepoint <= 0x7ffU) {
+        output[0] = (char)(0xc0U | (codepoint >> 6U));
+        output[1] = (char)(0x80U | (codepoint & 0x3fU));
+        return 2U;
+    }
+    if (codepoint <= 0xffffU &&
+        !(codepoint >= 0xd800U && codepoint <= 0xdfffU)) {
+        output[0] = (char)(0xe0U | (codepoint >> 12U));
+        output[1] = (char)(0x80U | ((codepoint >> 6U) & 0x3fU));
+        output[2] = (char)(0x80U | (codepoint & 0x3fU));
+        return 3U;
+    }
+    if (codepoint <= 0x10ffffU) {
+        output[0] = (char)(0xf0U | (codepoint >> 18U));
+        output[1] = (char)(0x80U | ((codepoint >> 12U) & 0x3fU));
+        output[2] = (char)(0x80U | ((codepoint >> 6U) & 0x3fU));
+        output[3] = (char)(0x80U | (codepoint & 0x3fU));
+        return 4U;
+    }
+    return 0U;
+}
+
 static pstring *decode_string(pc_token token) {
     const char *source = token.start;
     size_t length = token.length;
@@ -259,7 +293,72 @@ static pstring *decode_string(pc_token token) {
             case '\'': decoded[output++] = '\''; break;
             case '"': decoded[output++] = '"'; break;
             case '$': decoded[output++] = '$'; break;
-            default: decoded[output++] = c; break;
+            case 'x': {
+                int digit;
+                unsigned value = 0U;
+                unsigned count = 0U;
+                while (count < 2U && i + 1U < end &&
+                       (digit = escape_hex_digit(source[i + 1U])) >= 0) {
+                    i++;
+                    value = value * 16U + (unsigned)digit;
+                    count++;
+                }
+                if (count == 0U) {
+                    decoded[output++] = '\\';
+                    decoded[output++] = 'x';
+                } else {
+                    decoded[output++] = (char)value;
+                }
+                break;
+            }
+            case 'u': {
+                size_t cursor = i + 1U;
+                uint32_t codepoint = 0U;
+                unsigned digits = 0U;
+                int valid = cursor < end && source[cursor] == '{';
+                if (valid) cursor++;
+                while (valid && cursor < end && source[cursor] != '}') {
+                    int digit = escape_hex_digit(source[cursor]);
+                    if (digit < 0 || digits >= 6U) {
+                        valid = 0;
+                        break;
+                    }
+                    codepoint = codepoint * 16U + (uint32_t)digit;
+                    digits++;
+                    cursor++;
+                }
+                if (valid && digits != 0U && cursor < end &&
+                    source[cursor] == '}') {
+                    size_t encoded = encode_utf8(decoded + output,
+                                                 codepoint);
+                    if (encoded != 0U) {
+                        output += encoded;
+                        i = cursor;
+                        break;
+                    }
+                }
+                decoded[output++] = '\\';
+                decoded[output++] = 'u';
+                break;
+            }
+            default:
+                if (c >= '0' && c <= '7') {
+                    unsigned value = (unsigned)(c - '0');
+                    unsigned count = 1U;
+                    while (count < 3U && i + 1U < end &&
+                           source[i + 1U] >= '0' &&
+                           source[i + 1U] <= '7') {
+                        i++;
+                        value = value * 8U +
+                                (unsigned)(source[i] - '0');
+                        count++;
+                    }
+                    decoded[output++] = (char)(value & 0xffU);
+                } else {
+                    decoded[output++] = '\\';
+                    decoded[output++] = c;
+                }
+                break;
         }
     }
     {
@@ -324,6 +423,18 @@ static int exception_slot(generator *gen, uint32_t line, uint8_t *slot) {
     if (length <= 0 || (size_t)length >= sizeof(name) ||
         !pproto_add_local(gen->proto, name, (size_t)length, slot)) {
         fail(gen, line, "cannot allocate pending exception slot");
+        return 0;
+    }
+    return 1;
+}
+
+static int temporary_slot(generator *gen, uint32_t line, uint8_t *slot) {
+    char name[32];
+    int length = snprintf(name, sizeof(name), "\001temporary%u",
+                          (unsigned)gen->proto->n_locals);
+    if (length <= 0 || (size_t)length >= sizeof(name) ||
+        !pproto_add_local(gen->proto, name, (size_t)length, slot)) {
+        fail(gen, line, "cannot allocate compiler temporary slot");
         return 0;
     }
     return 1;
@@ -797,61 +908,296 @@ static pc_token_type compound_operator(pc_token_type type) {
     }
 }
 
+typedef struct index_lvalue {
+    const pc_ast *indices[PPHP_PARSE_DEPTH_MAX];
+    uint8_t key_slots[PPHP_PARSE_DEPTH_MAX];
+    uint8_t parent_slots[PPHP_PARSE_DEPTH_MAX];
+    uint8_t root_slot;
+    size_t depth;
+} index_lvalue;
+
+static void emit_load_slot(generator *gen, uint8_t slot, uint32_t line) {
+    emit_byte(gen, OP_LOAD_LOCAL, line);
+    emit_byte(gen, slot, line);
+}
+
+static void emit_store_slot(generator *gen, uint8_t slot, uint32_t line) {
+    emit_byte(gen, OP_STORE_LOCAL, line);
+    emit_byte(gen, slot, line);
+}
+
+static void clear_temporary_slot(generator *gen, uint8_t slot,
+                                 uint32_t line) {
+    emit_byte(gen, OP_LOAD_NULL, line);
+    emit_store_slot(gen, slot, line);
+}
+
+static int prepare_index_lvalue(generator *gen, const pc_ast *leaf,
+                                index_lvalue *lvalue) {
+    const pc_ast *reverse[PPHP_PARSE_DEPTH_MAX];
+    const pc_ast *cursor = leaf;
+    size_t count = 0U;
+    size_t i;
+    memset(lvalue, 0, sizeof(*lvalue));
+    while (cursor != NULL && cursor->kind == AST_INDEX) {
+        if (count >= PPHP_PARSE_DEPTH_MAX) {
+            fail(gen, leaf->line, "array assignment nesting exceeds limit");
+            return 0;
+        }
+        reverse[count++] = cursor;
+        cursor = cursor->as.index.base;
+    }
+    if (count == 0U || cursor == NULL || cursor->kind != AST_VARIABLE ||
+        !variable_slot(gen, cursor->as.literal.token, &lvalue->root_slot)) {
+        if (!gen->failed) {
+            fail(gen, leaf->line,
+                 "array assignment must ultimately target a variable");
+        }
+        return 0;
+    }
+    lvalue->depth = count;
+    for (i = 0U; i < count; i++) {
+        const pc_ast *index = reverse[count - i - 1U];
+        lvalue->indices[i] = index;
+        if (index->as.index.key == NULL) {
+            if (i + 1U != count) {
+                fail(gen, index->line,
+                     "only the final array index may be empty");
+                return 0;
+            }
+        } else {
+            if (!temporary_slot(gen, index->line, &lvalue->key_slots[i])) {
+                return 0;
+            }
+            compile_expression(gen, index->as.index.key);
+            emit_store_slot(gen, lvalue->key_slots[i], index->line);
+        }
+        if (i + 1U < count) {
+            if (i == 0U) {
+                emit_load_slot(gen, lvalue->root_slot, index->line);
+            } else {
+                emit_load_slot(gen, lvalue->parent_slots[i - 1U],
+                               index->line);
+            }
+            emit_load_slot(gen, lvalue->key_slots[i], index->line);
+            emit_byte(gen, OP_IDX_GET_QUIET, index->line);
+            if (!temporary_slot(gen, index->line,
+                                &lvalue->parent_slots[i])) {
+                return 0;
+            }
+            emit_store_slot(gen, lvalue->parent_slots[i], index->line);
+        }
+    }
+    return !gen->failed;
+}
+
+static void emit_index_parent(generator *gen, const index_lvalue *lvalue,
+                              size_t index, uint32_t line) {
+    emit_load_slot(gen,
+                   index == 0U ? lvalue->root_slot
+                               : lvalue->parent_slots[index - 1U],
+                   line);
+}
+
+static void emit_index_current(generator *gen, const index_lvalue *lvalue,
+                               uint32_t line) {
+    size_t leaf = lvalue->depth - 1U;
+    emit_index_parent(gen, lvalue, leaf, line);
+    emit_load_slot(gen, lvalue->key_slots[leaf], line);
+    emit_byte(gen, OP_IDX_GET, line);
+}
+
+static void clear_index_lvalue(generator *gen, const index_lvalue *lvalue,
+                               uint32_t line) {
+    size_t i;
+    for (i = 0U; i < lvalue->depth; i++) {
+        if (lvalue->indices[i]->as.index.key != NULL) {
+            clear_temporary_slot(gen, lvalue->key_slots[i], line);
+        }
+        if (i + 1U < lvalue->depth) {
+            clear_temporary_slot(gen, lvalue->parent_slots[i], line);
+        }
+    }
+}
+
+static void propagate_index_update(generator *gen,
+                                   const index_lvalue *lvalue,
+                                   uint32_t line) {
+    size_t index = lvalue->depth;
+    uint8_t update_slot;
+    if (!temporary_slot(gen, line, &update_slot)) return;
+    while (index > 1U && !gen->failed) {
+        index--;
+        emit_store_slot(gen, update_slot, line);
+        emit_index_parent(gen, lvalue, index - 1U, line);
+        emit_load_slot(gen, lvalue->key_slots[index - 1U], line);
+        emit_load_slot(gen, update_slot, line);
+        emit_byte(gen, OP_IDX_SET, line);
+        emit_byte(gen, OP_POP, line);
+    }
+    emit_store_slot(gen, lvalue->root_slot, line);
+    clear_temporary_slot(gen, update_slot, line);
+}
+
+static void store_index_value(generator *gen, const index_lvalue *lvalue,
+                              uint8_t value_slot, uint32_t line) {
+    size_t leaf = lvalue->depth - 1U;
+    emit_index_parent(gen, lvalue, leaf, line);
+    if (lvalue->indices[leaf]->as.index.key != NULL) {
+        emit_load_slot(gen, lvalue->key_slots[leaf], line);
+    }
+    emit_load_slot(gen, value_slot, line);
+    emit_byte(gen,
+              lvalue->indices[leaf]->as.index.key == NULL
+                  ? OP_IDX_APPEND : OP_IDX_SET,
+              line);
+    emit_byte(gen, OP_POP, line);
+    propagate_index_update(gen, lvalue, line);
+    emit_load_slot(gen, value_slot, line);
+}
+
+static void unset_index_value(generator *gen, const index_lvalue *lvalue,
+                              uint32_t line) {
+    size_t leaf = lvalue->depth - 1U;
+    if (lvalue->indices[leaf]->as.index.key == NULL) {
+        fail(gen, line, "cannot unset an empty array index");
+        return;
+    }
+    emit_index_parent(gen, lvalue, leaf, line);
+    emit_load_slot(gen, lvalue->key_slots[leaf], line);
+    emit_byte(gen, OP_IDX_UNSET, line);
+    propagate_index_update(gen, lvalue, line);
+    emit_byte(gen, OP_LOAD_NULL, line);
+    clear_index_lvalue(gen, lvalue, line);
+}
+
+static void compile_index_assignment(generator *gen, const pc_ast *node) {
+    index_lvalue lvalue;
+    pc_token_type operation = node->as.binary.op;
+    uint8_t value_slot;
+    size_t complete = 0U;
+    if (!prepare_index_lvalue(gen, node->as.binary.left, &lvalue) ||
+        !temporary_slot(gen, node->line, &value_slot)) {
+        return;
+    }
+    if (operation != T_EQUAL &&
+        lvalue.indices[lvalue.depth - 1U]->as.index.key == NULL) {
+        fail(gen, node->line, "an empty array index only supports assignment");
+        return;
+    }
+    if (operation == T_COALESCE_EQUAL) {
+        emit_index_current(gen, &lvalue, node->line);
+        complete = emit_jump(gen, OP_JMP_NOTNULL_KEEP, node->line);
+    } else if (operation != T_EQUAL) {
+        pphp_opcode opcode = binary_opcode(compound_operator(operation));
+        if (opcode == OP_NOP) {
+            fail(gen, node->line, "unsupported compound assignment");
+            return;
+        }
+        emit_index_current(gen, &lvalue, node->line);
+        compile_expression(gen, node->as.binary.right);
+        emit_byte(gen, (uint8_t)opcode, node->line);
+        emit_store_slot(gen, value_slot, node->line);
+        store_index_value(gen, &lvalue, value_slot, node->line);
+        clear_index_lvalue(gen, &lvalue, node->line);
+        clear_temporary_slot(gen, value_slot, node->line);
+        return;
+    }
+    compile_expression(gen, node->as.binary.right);
+    emit_store_slot(gen, value_slot, node->line);
+    store_index_value(gen, &lvalue, value_slot, node->line);
+    if (operation == T_COALESCE_EQUAL) {
+        patch_jump(gen, complete, gen->proto->code_length, node->line);
+    }
+    clear_index_lvalue(gen, &lvalue, node->line);
+    clear_temporary_slot(gen, value_slot, node->line);
+}
+
+static void compile_member_assignment(generator *gen, const pc_ast *node) {
+    const pc_ast *member = node->as.binary.left;
+    pc_token_type operation = node->as.binary.op;
+    uint16_t name;
+    uint8_t value_slot;
+    uint8_t object_slot = 0U;
+    size_t complete = 0U;
+    pphp_opcode opcode = OP_NOP;
+    int is_static = member->as.member.op == T_SCOPE;
+    if (member->as.member.op == T_NULLSAFE_ARROW) {
+        fail(gen, node->line, "nullsafe property access is not assignable");
+        return;
+    }
+    if (!is_static && member->as.member.op != T_ARROW) {
+        fail(gen, node->line, "invalid property assignment target");
+        return;
+    }
+    if (is_static && member->as.member.base->kind != AST_IDENTIFIER) {
+        fail(gen, node->line, "invalid static property target");
+        return;
+    }
+    if (!temporary_slot(gen, node->line, &value_slot)) return;
+    name = is_static ? member_name_constant(gen, member->as.member.name)
+                     : name_constant(gen, member->as.member.name);
+    if (!is_static) {
+        if (!temporary_slot(gen, node->line, &object_slot)) return;
+        compile_expression(gen, member->as.member.base);
+        emit_store_slot(gen, object_slot, node->line);
+    }
+    if (operation != T_EQUAL) {
+        if (is_static) {
+            uint16_t class_name = name_constant(
+                gen, member->as.member.base->as.literal.token);
+            emit_byte(gen, OP_SPROP_GET, node->line);
+            emit_u16(gen, class_name, node->line);
+            emit_u16(gen, name, node->line);
+        } else {
+            emit_load_slot(gen, object_slot, node->line);
+            emit_byte(gen, OP_PROP_GET, node->line);
+            emit_u16(gen, name, node->line);
+        }
+        if (operation == T_COALESCE_EQUAL) {
+            complete = emit_jump(gen, OP_JMP_NOTNULL_KEEP, node->line);
+        } else {
+            opcode = binary_opcode(compound_operator(operation));
+            if (opcode == OP_NOP) {
+                fail(gen, node->line, "unsupported compound assignment");
+                return;
+            }
+        }
+    }
+    compile_expression(gen, node->as.binary.right);
+    if (operation != T_EQUAL && operation != T_COALESCE_EQUAL) {
+        emit_byte(gen, (uint8_t)opcode, node->line);
+    }
+    emit_store_slot(gen, value_slot, node->line);
+    if (is_static) {
+        uint16_t class_name = name_constant(
+            gen, member->as.member.base->as.literal.token);
+        emit_load_slot(gen, value_slot, node->line);
+        emit_byte(gen, OP_SPROP_SET, node->line);
+        emit_u16(gen, class_name, node->line);
+        emit_u16(gen, name, node->line);
+    } else {
+        emit_load_slot(gen, object_slot, node->line);
+        emit_load_slot(gen, value_slot, node->line);
+        emit_byte(gen, OP_PROP_SET, node->line);
+        emit_u16(gen, name, node->line);
+    }
+    if (operation == T_COALESCE_EQUAL) {
+        patch_jump(gen, complete, gen->proto->code_length, node->line);
+    }
+    if (!is_static) clear_temporary_slot(gen, object_slot, node->line);
+    clear_temporary_slot(gen, value_slot, node->line);
+}
+
 static void compile_assignment(generator *gen, const pc_ast *node) {
     uint8_t slot;
     pc_token_type operation = node->as.binary.op;
     if (node->as.binary.left->kind == AST_INDEX) {
-        const pc_ast *index = node->as.binary.left;
-        uint8_t array_slot;
-        if (operation != T_EQUAL || index->as.index.base->kind != AST_VARIABLE ||
-            !variable_slot(gen, index->as.index.base->as.literal.token, &array_slot)) {
-            fail(gen, node->line, "complex array assignment is not supported");
-            return;
-        }
-        emit_byte(gen, OP_LOAD_LOCAL, node->line);
-        emit_byte(gen, array_slot, node->line);
-        if (index->as.index.key != NULL) {
-            compile_expression(gen, index->as.index.key);
-        }
-        compile_expression(gen, node->as.binary.right);
-        emit_byte(gen, index->as.index.key == NULL ? OP_IDX_APPEND : OP_IDX_SET,
-                  node->line);
-        emit_byte(gen, OP_SWAP, node->line);
-        emit_byte(gen, OP_STORE_LOCAL, node->line);
-        emit_byte(gen, array_slot, node->line);
+        compile_index_assignment(gen, node);
         return;
     }
     if (node->as.binary.left->kind == AST_MEMBER) {
-        const pc_ast *member = node->as.binary.left;
-        uint16_t name;
-        if (operation != T_EQUAL) {
-            fail(gen, node->line, "complex property assignment is not supported");
-            return;
-        }
-        if (member->as.member.op == T_SCOPE) {
-            uint16_t class_name;
-            if (member->as.member.base->kind != AST_IDENTIFIER) {
-                fail(gen, node->line, "invalid static property target");
-                return;
-            }
-            compile_expression(gen, node->as.binary.right);
-            class_name = name_constant(
-                gen, member->as.member.base->as.literal.token);
-            name = member_name_constant(gen, member->as.member.name);
-            emit_byte(gen, OP_SPROP_SET, node->line);
-            emit_u16(gen, class_name, node->line);
-            emit_u16(gen, name, node->line);
-            return;
-        }
-        if (member->as.member.op != T_ARROW) {
-            fail(gen, node->line, "invalid property assignment target");
-            return;
-        }
-        compile_expression(gen, member->as.member.base);
-        compile_expression(gen, node->as.binary.right);
-        name = name_constant(gen, member->as.member.name);
-        emit_byte(gen, OP_PROP_SET, node->line);
-        emit_u16(gen, name, node->line);
+        compile_member_assignment(gen, node);
         return;
     }
     if (node->as.binary.left->kind != AST_VARIABLE) {
@@ -859,6 +1205,16 @@ static void compile_assignment(generator *gen, const pc_ast *node) {
         return;
     }
     if (!variable_slot(gen, node->as.binary.left->as.literal.token, &slot)) {
+        return;
+    }
+    if (operation == T_COALESCE_EQUAL) {
+        size_t complete;
+        emit_load_slot(gen, slot, node->line);
+        complete = emit_jump(gen, OP_JMP_NOTNULL_KEEP, node->line);
+        compile_expression(gen, node->as.binary.right);
+        emit_byte(gen, OP_DUP, node->line);
+        emit_store_slot(gen, slot, node->line);
+        patch_jump(gen, complete, gen->proto->code_length, node->line);
         return;
     }
     if (operation != T_EQUAL) {
@@ -881,9 +1237,111 @@ static void compile_assignment(generator *gen, const pc_ast *node) {
 
 static void compile_increment(generator *gen, const pc_ast *node) {
     uint8_t slot;
+    if (node->as.unary.operand->kind == AST_INDEX) {
+        index_lvalue lvalue;
+        uint8_t value_slot;
+        uint8_t old_slot = 0U;
+        if (!prepare_index_lvalue(gen, node->as.unary.operand, &lvalue) ||
+            lvalue.indices[lvalue.depth - 1U]->as.index.key == NULL ||
+            !temporary_slot(gen, node->line, &value_slot) ||
+            (node->as.unary.postfix &&
+             !temporary_slot(gen, node->line, &old_slot))) {
+            if (!gen->failed &&
+                lvalue.indices[lvalue.depth - 1U]->as.index.key == NULL) {
+                fail(gen, node->line, "cannot increment an empty array index");
+            }
+            return;
+        }
+        emit_index_current(gen, &lvalue, node->line);
+        if (node->as.unary.postfix) {
+            emit_byte(gen, OP_DUP, node->line);
+            emit_store_slot(gen, old_slot, node->line);
+        }
+        emit_byte(gen, OP_LOAD_I8, node->line);
+        emit_byte(gen, 1U, node->line);
+        emit_byte(gen, node->as.unary.op == T_PLUS_PLUS ? OP_ADD : OP_SUB,
+                  node->line);
+        emit_store_slot(gen, value_slot, node->line);
+        store_index_value(gen, &lvalue, value_slot, node->line);
+        if (node->as.unary.postfix) {
+            emit_byte(gen, OP_POP, node->line);
+            emit_load_slot(gen, old_slot, node->line);
+        }
+        clear_index_lvalue(gen, &lvalue, node->line);
+        clear_temporary_slot(gen, value_slot, node->line);
+        if (node->as.unary.postfix) {
+            clear_temporary_slot(gen, old_slot, node->line);
+        }
+        return;
+    }
+    if (node->as.unary.operand->kind == AST_MEMBER) {
+        const pc_ast *member = node->as.unary.operand;
+        uint8_t object_slot = 0U;
+        uint8_t value_slot;
+        uint8_t old_slot = 0U;
+        uint16_t name;
+        int is_static = member->as.member.op == T_SCOPE;
+        if (member->as.member.op == T_NULLSAFE_ARROW ||
+            (!is_static && member->as.member.op != T_ARROW) ||
+            (is_static && member->as.member.base->kind != AST_IDENTIFIER) ||
+            !temporary_slot(gen, node->line, &value_slot) ||
+            (node->as.unary.postfix &&
+             !temporary_slot(gen, node->line, &old_slot))) {
+            if (!gen->failed) fail(gen, node->line, "invalid property increment");
+            return;
+        }
+        name = is_static ? member_name_constant(gen, member->as.member.name)
+                         : name_constant(gen, member->as.member.name);
+        if (is_static) {
+            uint16_t class_name = name_constant(
+                gen, member->as.member.base->as.literal.token);
+            emit_byte(gen, OP_SPROP_GET, node->line);
+            emit_u16(gen, class_name, node->line);
+            emit_u16(gen, name, node->line);
+        } else {
+            if (!temporary_slot(gen, node->line, &object_slot)) return;
+            compile_expression(gen, member->as.member.base);
+            emit_store_slot(gen, object_slot, node->line);
+            emit_load_slot(gen, object_slot, node->line);
+            emit_byte(gen, OP_PROP_GET, node->line);
+            emit_u16(gen, name, node->line);
+        }
+        if (node->as.unary.postfix) {
+            emit_byte(gen, OP_DUP, node->line);
+            emit_store_slot(gen, old_slot, node->line);
+        }
+        emit_byte(gen, OP_LOAD_I8, node->line);
+        emit_byte(gen, 1U, node->line);
+        emit_byte(gen, node->as.unary.op == T_PLUS_PLUS ? OP_ADD : OP_SUB,
+                  node->line);
+        emit_store_slot(gen, value_slot, node->line);
+        if (is_static) {
+            uint16_t class_name = name_constant(
+                gen, member->as.member.base->as.literal.token);
+            emit_load_slot(gen, value_slot, node->line);
+            emit_byte(gen, OP_SPROP_SET, node->line);
+            emit_u16(gen, class_name, node->line);
+            emit_u16(gen, name, node->line);
+        } else {
+            emit_load_slot(gen, object_slot, node->line);
+            emit_load_slot(gen, value_slot, node->line);
+            emit_byte(gen, OP_PROP_SET, node->line);
+            emit_u16(gen, name, node->line);
+        }
+        if (node->as.unary.postfix) {
+            emit_byte(gen, OP_POP, node->line);
+            emit_load_slot(gen, old_slot, node->line);
+        }
+        if (!is_static) clear_temporary_slot(gen, object_slot, node->line);
+        clear_temporary_slot(gen, value_slot, node->line);
+        if (node->as.unary.postfix) {
+            clear_temporary_slot(gen, old_slot, node->line);
+        }
+        return;
+    }
     if (node->as.unary.operand->kind != AST_VARIABLE ||
         !variable_slot(gen, node->as.unary.operand->as.literal.token, &slot)) {
-        fail(gen, node->line, "only local variables can be incremented");
+        fail(gen, node->line, "increment target is not assignable");
         return;
     }
     emit_byte(gen, OP_LOAD_LOCAL, node->line);
@@ -969,6 +1427,27 @@ static void compile_argument_array(generator *gen, const pc_ast *argument,
     }
 }
 
+static void compile_quiet_expression(generator *gen, const pc_ast *node) {
+    if (node == NULL || gen->failed) return;
+    if (node->kind == AST_INDEX && node->as.index.key != NULL) {
+        compile_quiet_expression(gen, node->as.index.base);
+        compile_expression(gen, node->as.index.key);
+        emit_byte(gen, OP_IDX_GET_QUIET, node->line);
+        return;
+    }
+    if (node->kind == AST_MEMBER &&
+        (node->as.member.op == T_ARROW ||
+         node->as.member.op == T_NULLSAFE_ARROW)) {
+        uint16_t name;
+        compile_quiet_expression(gen, node->as.member.base);
+        name = name_constant(gen, node->as.member.name);
+        emit_byte(gen, OP_PROP_GET_QUIET, node->line);
+        emit_u16(gen, name, node->line);
+        return;
+    }
+    compile_expression(gen, node);
+}
+
 static void compile_expression(generator *gen, const pc_ast *node) {
     if (node == NULL || gen->failed) {
         return;
@@ -1041,16 +1520,16 @@ static void compile_expression(generator *gen, const pc_ast *node) {
                 emit_byte(gen, OP_NOT, node->line);
                 emit_byte(gen, OP_BXOR, node->line);
             } else if (node->as.binary.op == T_INSTANCEOF) {
-                uint16_t class_name;
-                if (node->as.binary.right->kind != AST_IDENTIFIER) {
-                    fail(gen, node->line, "dynamic instanceof is not supported");
-                    break;
-                }
                 compile_expression(gen, node->as.binary.left);
-                class_name = name_constant(gen,
-                    node->as.binary.right->as.literal.token);
-                emit_byte(gen, OP_INSTANCEOF, node->line);
-                emit_u16(gen, class_name, node->line);
+                if (node->as.binary.right->kind == AST_IDENTIFIER) {
+                    uint16_t class_name = name_constant(
+                        gen, node->as.binary.right->as.literal.token);
+                    emit_byte(gen, OP_INSTANCEOF, node->line);
+                    emit_u16(gen, class_name, node->line);
+                } else {
+                    compile_expression(gen, node->as.binary.right);
+                    emit_byte(gen, OP_INSTANCEOF_DYNAMIC, node->line);
+                }
             } else {
                 pphp_opcode opcode = binary_opcode(node->as.binary.op);
                 if (opcode == OP_NOP) {
@@ -1073,6 +1552,19 @@ static void compile_expression(generator *gen, const pc_ast *node) {
             else if (node->as.unary.op == T_BANG) emit_byte(gen, OP_NOT, node->line);
             else if (node->as.unary.op == T_TILDE) emit_byte(gen, OP_BNOT, node->line);
             else if (node->as.unary.op == T_CLONE) emit_byte(gen, OP_CLONE, node->line);
+            else if (node->as.unary.op == T_INT_TYPE ||
+                     node->as.unary.op == T_FLOAT_TYPE ||
+                     node->as.unary.op == T_STRING_TYPE ||
+                     node->as.unary.op == T_BOOL_TYPE ||
+                     node->as.unary.op == T_ARRAY) {
+                uint8_t target = node->as.unary.op == T_INT_TYPE ? PT_INT :
+                                 (node->as.unary.op == T_FLOAT_TYPE ? PT_FLOAT :
+                                  (node->as.unary.op == T_STRING_TYPE ? PT_STRING :
+                                   (node->as.unary.op == T_BOOL_TYPE ? PT_TRUE :
+                                                                    PT_ARRAY)));
+                emit_byte(gen, OP_CAST, node->line);
+                emit_byte(gen, target, node->line);
+            }
             else if (node->as.unary.op != T_PLUS) {
                 fail(gen, node->line, "unsupported unary operator");
             }
@@ -1186,9 +1678,15 @@ static void compile_expression(generator *gen, const pc_ast *node) {
                 break;
             }
             if (node->as.call.callee->kind == AST_MEMBER &&
-                node->as.call.callee->as.member.op == T_ARROW) {
+                (node->as.call.callee->as.member.op == T_ARROW ||
+                 node->as.call.callee->as.member.op == T_NULLSAFE_ARROW)) {
                 uint16_t method_name;
+                size_t null_result = 0U;
                 compile_expression(gen, node->as.call.callee->as.member.base);
+                if (node->as.call.callee->as.member.op == T_NULLSAFE_ARROW) {
+                    null_result = emit_jump(gen, OP_JMP_IFNULL_KEEP,
+                                            node->line);
+                }
                 method_name = name_constant(gen, node->as.call.callee->as.member.name);
                 if (has_spread) {
                     compile_argument_array(gen, argument, node->as.call.count,
@@ -1203,6 +1701,10 @@ static void compile_expression(generator *gen, const pc_ast *node) {
                     emit_byte(gen, OP_MCALL, node->line);
                     emit_u16(gen, method_name, node->line);
                     emit_byte(gen, (uint8_t)node->as.call.count, node->line);
+                }
+                if (node->as.call.callee->as.member.op == T_NULLSAFE_ARROW) {
+                    patch_jump(gen, null_result, gen->proto->code_length,
+                               node->line);
                 }
                 break;
             }
@@ -1317,39 +1819,68 @@ static void compile_expression(generator *gen, const pc_ast *node) {
                 emit_u16(gen, name, node->line);
                 break;
             }
-            if (node->as.member.op != T_ARROW) {
+            if (node->as.member.op != T_ARROW &&
+                node->as.member.op != T_NULLSAFE_ARROW) {
                 fail(gen, node->line, "invalid member access");
                 break;
             }
             compile_expression(gen, node->as.member.base);
             name = name_constant(gen, node->as.member.name);
+            if (node->as.member.op == T_NULLSAFE_ARROW) {
+                size_t null_result = emit_jump(gen, OP_JMP_IFNULL_KEEP,
+                                               node->line);
+                emit_byte(gen, OP_PROP_GET, node->line);
+                emit_u16(gen, name, node->line);
+                patch_jump(gen, null_result, gen->proto->code_length,
+                           node->line);
+                break;
+            }
             emit_byte(gen, OP_PROP_GET, node->line);
             emit_u16(gen, name, node->line);
             break;
         }
         case AST_NEW: {
             const pc_ast *argument = node->as.new_expr.arguments;
-            uint16_t class_name;
             if (node->as.new_expr.class_name == NULL ||
-                node->as.new_expr.class_name->kind != AST_IDENTIFIER ||
+                (node->as.new_expr.class_name->kind != AST_IDENTIFIER &&
+                 node->as.new_expr.class_name->kind != AST_VARIABLE) ||
                 node->as.new_expr.count > 31U) {
                 fail(gen, node->line, "invalid class construction");
                 break;
             }
-            class_name = name_constant(gen, node->as.new_expr.class_name->as.literal.token);
+            if (node->as.new_expr.class_name->kind == AST_VARIABLE) {
+                compile_expression(gen, node->as.new_expr.class_name);
+            }
             if (argument_list_has_spread(argument)) {
                 compile_argument_array(gen, argument, node->as.new_expr.count,
                                        node->line);
-                emit_byte(gen, OP_NEW_OBJ_ARRAY, node->line);
-                emit_u16(gen, class_name, node->line);
+                if (node->as.new_expr.class_name->kind == AST_VARIABLE) {
+                    emit_byte(gen, OP_NEW_OBJ_DYNAMIC_ARRAY, node->line);
+                } else {
+                    uint16_t class_name = name_constant(
+                        gen,
+                        node->as.new_expr.class_name->as.literal.token);
+                    emit_byte(gen, OP_NEW_OBJ_ARRAY, node->line);
+                    emit_u16(gen, class_name, node->line);
+                }
             } else {
                 while (argument != NULL) {
                     compile_expression(gen, argument);
                     argument = argument->next;
                 }
-                emit_byte(gen, OP_NEW_OBJ, node->line);
-                emit_u16(gen, class_name, node->line);
-                emit_byte(gen, (uint8_t)node->as.new_expr.count, node->line);
+                if (node->as.new_expr.class_name->kind == AST_VARIABLE) {
+                    emit_byte(gen, OP_NEW_OBJ_DYNAMIC, node->line);
+                    emit_byte(gen, (uint8_t)node->as.new_expr.count,
+                              node->line);
+                } else {
+                    uint16_t class_name = name_constant(
+                        gen,
+                        node->as.new_expr.class_name->as.literal.token);
+                    emit_byte(gen, OP_NEW_OBJ, node->line);
+                    emit_u16(gen, class_name, node->line);
+                    emit_byte(gen, (uint8_t)node->as.new_expr.count,
+                              node->line);
+                }
             }
             break;
         }
@@ -1383,12 +1914,12 @@ static void compile_expression(generator *gen, const pc_ast *node) {
             emit_byte(gen, OP_IDX_GET, node->line);
             break;
         case AST_ISSET:
-            compile_expression(gen, node->as.unary.operand);
+            compile_quiet_expression(gen, node->as.unary.operand);
             emit_byte(gen, OP_LOAD_NULL, node->line);
             emit_byte(gen, OP_NIDENT, node->line);
             break;
         case AST_EMPTY:
-            compile_expression(gen, node->as.unary.operand);
+            compile_quiet_expression(gen, node->as.unary.operand);
             emit_byte(gen, OP_NOT, node->line);
             break;
         case AST_UNSET:
@@ -1399,6 +1930,12 @@ static void compile_expression(generator *gen, const pc_ast *node) {
                     emit_byte(gen, OP_DUP, node->line);
                     emit_byte(gen, OP_STORE_LOCAL, node->line);
                     emit_byte(gen, slot, node->line);
+                }
+            } else if (node->as.unary.operand->kind == AST_INDEX) {
+                index_lvalue lvalue;
+                if (prepare_index_lvalue(gen, node->as.unary.operand,
+                                         &lvalue)) {
+                    unset_index_value(gen, &lvalue, node->line);
                 }
             } else {
                 fail(gen, node->line, "unset target is not supported");
@@ -1884,8 +2421,23 @@ static void compile_statement(generator *gen, const pc_ast *node) {
             }
             break;
         }
-        case AST_FUNCTION:
+        case AST_FUNCTION: {
+            size_t i;
+            for (i = 1U; i < gen->module->count && i <= UINT16_MAX; i++) {
+                const pproto *proto = gen->module->protos[i];
+                if (proto->declaration == node) {
+                    if (proto->conditional) {
+                        emit_byte(gen, OP_DEF_FUNC, node->line);
+                        emit_u16(gen, (uint16_t)i, node->line);
+                    }
+                    break;
+                }
+            }
+            if (i >= gen->module->count || i > UINT16_MAX) {
+                fail(gen, node->line, "function prototype is missing");
+            }
             break;
+        }
         case AST_CLASS:
             compile_class_definition(gen, node);
             break;
@@ -1951,7 +2503,8 @@ static void compile_statement(generator *gen, const pc_ast *node) {
     }
 }
 
-static int compile_function(generator *gen, const pc_ast *function) {
+static int compile_function(generator *gen, const pc_ast *function,
+                            int conditional) {
     pproto *proto;
     const pc_ast *parameter;
     generator child;
@@ -1967,6 +2520,8 @@ static int compile_function(generator *gen, const pc_ast *function) {
         fail(gen, function->line, "out of memory while creating function");
         return 0;
     }
+    proto->declaration = function;
+    proto->conditional = (uint8_t)conditional;
     parameter = function->as.function.parameters;
     while (parameter != NULL) {
         uint8_t slot;
@@ -2263,6 +2818,165 @@ static void compile_class_definition(generator *gen, const pc_ast *class_node) {
     emit_byte(gen, OP_DEF_END, class_node->line);
 }
 
+static void compile_named_functions(generator *gen, const pc_ast *node,
+                                    int direct_top_level);
+
+static void compile_named_function_list(generator *gen, const pc_ast *node,
+                                        int direct_top_level) {
+    while (node != NULL && !gen->failed) {
+        compile_named_functions(gen, node, direct_top_level);
+        node = node->next;
+    }
+}
+
+static void compile_named_functions(generator *gen, const pc_ast *node,
+                                    int direct_top_level) {
+    const pc_ast *member;
+    size_t i;
+    if (node == NULL || gen->failed) return;
+    switch (node->kind) {
+        case AST_PROGRAM:
+            compile_named_function_list(gen, node->as.list.items, 1);
+            break;
+        case AST_BLOCK:
+        case AST_ARRAY:
+        case AST_ECHO:
+            compile_named_function_list(gen, node->as.list.items, 0);
+            break;
+        case AST_FUNCTION:
+            compile_named_functions(gen, node->as.function.body, 0);
+            if (direct_top_level) {
+                for (i = 1U; i < gen->module->count; i++) {
+                    const pproto *existing = gen->module->protos[i];
+                    if (!existing->is_method && !existing->conditional &&
+                        token_equal(node->as.function.name, existing->name)) {
+                        fail(gen, node->line, "function %.*s is already defined",
+                             (int)node->as.function.name.length,
+                             node->as.function.name.start);
+                        return;
+                    }
+                }
+            }
+            if (gen->module->count >= 512U) {
+                fail(gen, node->line, "module function limit exceeded");
+            } else {
+                (void)compile_function(gen, node, !direct_top_level);
+            }
+            break;
+        case AST_CLASS:
+            member = node->as.class_decl.members;
+            while (member != NULL && !gen->failed) {
+                if (member->kind == AST_FUNCTION) {
+                    compile_named_functions(gen, member->as.function.body, 0);
+                } else if (member->kind == AST_PROPERTY) {
+                    compile_named_functions(gen,
+                                            member->as.property.default_value,
+                                            0);
+                } else if (member->kind == AST_CONST) {
+                    compile_named_functions(gen, member->as.binding.value, 0);
+                }
+                member = member->next;
+            }
+            break;
+        case AST_CLOSURE:
+            compile_named_functions(gen, node->as.closure.body, 0);
+            break;
+        case AST_UNARY:
+        case AST_UNSET:
+        case AST_ISSET:
+        case AST_EMPTY:
+            compile_named_functions(gen, node->as.unary.operand, 0);
+            break;
+        case AST_BINARY:
+        case AST_ASSIGN:
+            compile_named_functions(gen, node->as.binary.left, 0);
+            compile_named_functions(gen, node->as.binary.right, 0);
+            break;
+        case AST_TERNARY:
+            compile_named_functions(gen, node->as.ternary.condition, 0);
+            compile_named_functions(gen, node->as.ternary.then_expr, 0);
+            compile_named_functions(gen, node->as.ternary.else_expr, 0);
+            break;
+        case AST_MATCH:
+            compile_named_functions(gen, node->as.match_expr.subject, 0);
+            compile_named_function_list(gen, node->as.match_expr.arms, 0);
+            break;
+        case AST_MATCH_ARM:
+            compile_named_function_list(gen, node->as.match_arm.conditions, 0);
+            compile_named_functions(gen, node->as.match_arm.result, 0);
+            break;
+        case AST_CALL:
+            compile_named_functions(gen, node->as.call.callee, 0);
+            compile_named_function_list(gen, node->as.call.arguments, 0);
+            break;
+        case AST_INDEX:
+            compile_named_functions(gen, node->as.index.base, 0);
+            compile_named_functions(gen, node->as.index.key, 0);
+            break;
+        case AST_MEMBER:
+            compile_named_functions(gen, node->as.member.base, 0);
+            break;
+        case AST_ARRAY_ITEM:
+            compile_named_functions(gen, node->as.array_item.key, 0);
+            compile_named_functions(gen, node->as.array_item.value, 0);
+            break;
+        case AST_EXPR_STMT:
+        case AST_RETURN:
+        case AST_THROW:
+            compile_named_functions(gen, node->as.expression.expression, 0);
+            break;
+        case AST_IF:
+            compile_named_functions(gen, node->as.if_stmt.condition, 0);
+            compile_named_functions(gen, node->as.if_stmt.then_branch, 0);
+            compile_named_functions(gen, node->as.if_stmt.else_branch, 0);
+            break;
+        case AST_WHILE:
+        case AST_DO_WHILE:
+            compile_named_functions(gen, node->as.loop.condition, 0);
+            compile_named_functions(gen, node->as.loop.body, 0);
+            break;
+        case AST_FOR:
+            compile_named_function_list(gen, node->as.for_stmt.initializers, 0);
+            compile_named_function_list(gen, node->as.for_stmt.conditions, 0);
+            compile_named_function_list(gen, node->as.for_stmt.increments, 0);
+            compile_named_functions(gen, node->as.for_stmt.body, 0);
+            break;
+        case AST_FOREACH:
+            compile_named_functions(gen, node->as.foreach_stmt.iterable, 0);
+            compile_named_functions(gen, node->as.foreach_stmt.body, 0);
+            break;
+        case AST_SWITCH:
+            compile_named_functions(gen, node->as.switch_stmt.subject, 0);
+            compile_named_function_list(gen, node->as.switch_stmt.cases, 0);
+            break;
+        case AST_CASE:
+            compile_named_functions(gen, node->as.case_stmt.condition, 0);
+            compile_named_functions(gen, node->as.case_stmt.body, 0);
+            break;
+        case AST_STATIC:
+        case AST_CONST:
+            compile_named_functions(gen, node->as.binding.value, 0);
+            break;
+        case AST_INCLUDE:
+            compile_named_functions(gen, node->as.include_stmt.path, 0);
+            break;
+        case AST_NEW:
+            compile_named_functions(gen, node->as.new_expr.class_name, 0);
+            compile_named_function_list(gen, node->as.new_expr.arguments, 0);
+            break;
+        case AST_TRY:
+            compile_named_functions(gen, node->as.try_stmt.try_block, 0);
+            compile_named_function_list(gen, node->as.try_stmt.catches, 0);
+            compile_named_functions(gen, node->as.try_stmt.finally_block, 0);
+            break;
+        case AST_CATCH:
+            compile_named_functions(gen, node->as.catch_stmt.body, 0);
+            break;
+        default:
+            break;
+    }
+}
+
 int pc_codegen_program(const pc_ast *program, pmodule *module,
                        pc_codegen_error *error) {
     generator gen;
@@ -2282,22 +2996,10 @@ int pc_codegen_program(const pc_ast *program, pmodule *module,
     gen.module = module;
     gen.proto = entry;
     gen.error = error;
+    compile_named_functions(&gen, program, 0);
     statement = program->as.list.items;
     while (statement != NULL && !gen.failed) {
-        if (statement->kind == AST_FUNCTION) {
-            size_t i;
-            for (i = 1U; i < module->count; i++) {
-                if (token_equal(statement->as.function.name, module->protos[i]->name)) {
-                    fail(&gen, statement->line, "function %.*s is already defined",
-                         (int)statement->as.function.name.length,
-                         statement->as.function.name.start);
-                    break;
-                }
-            }
-            if (!gen.failed) {
-                (void)compile_function(&gen, statement);
-            }
-        } else if (statement->kind == AST_CLASS) {
+        if (statement->kind == AST_CLASS) {
             const pc_ast *member = statement->as.class_decl.members;
             while (member != NULL && !gen.failed) {
                 if (member->kind == AST_FUNCTION) {

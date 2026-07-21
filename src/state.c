@@ -128,17 +128,40 @@ void pphp_close(pphp_state *state) {
         ps_destroy(state->native_functions[i].name);
     }
     pphp_free(state->native_functions);
+    pphp_free(state->runtime_functions);
     psymbol_destroy(&state->symbols);
     pphp_gc_set_state(NULL);
     pphp_free(state);
 }
 
+static int function_name_equal(const pstring *left, const pstring *right) {
+    size_t i;
+    if (left->length != right->length) return 0;
+    for (i = 0U; i < left->length; i++) {
+        unsigned char a = (unsigned char)left->data[i];
+        unsigned char b = (unsigned char)right->data[i];
+        if (a >= 'A' && a <= 'Z') a = (unsigned char)(a + ('a' - 'A'));
+        if (b >= 'A' && b <= 'Z') b = (unsigned char)(b + ('a' - 'A'));
+        if (a != b) return 0;
+    }
+    return 1;
+}
+
 const pproto *pphp_find_function(const pphp_state *state, const pstring *name,
                                  const pmodule **owner) {
+    const pphp_state *root;
     const pproto *proto;
     size_t i;
     if (owner != NULL) *owner = NULL;
     if (state == NULL || name == NULL) return NULL;
+    root = state->root_state == NULL ? state : state->root_state;
+    for (i = root->runtime_function_count; i > 0U; i--) {
+        const pruntime_function *entry = &root->runtime_functions[i - 1U];
+        if (function_name_equal(entry->proto->name, name)) {
+            if (owner != NULL) *owner = entry->module;
+            return entry->proto;
+        }
+    }
     if (state->module != NULL &&
         (proto = pmodule_find(state->module, name)) != NULL) {
         if (owner != NULL) *owner = state->module;
@@ -154,6 +177,45 @@ const pproto *pphp_find_function(const pphp_state *state, const pstring *name,
         }
     }
     return NULL;
+}
+
+int pphp_register_runtime_function(pphp_state *state, const pproto *proto,
+                                   const pmodule *module) {
+    pphp_state *root;
+    pruntime_function *resized;
+    size_t capacity;
+    if (state == NULL || proto == NULL || module == NULL) return 0;
+    root = state->root_state == NULL ? state : state->root_state;
+    if (root->runtime_function_count >= 512U) return 0;
+    if (root->runtime_function_count == root->runtime_function_capacity) {
+        capacity = root->runtime_function_capacity == 0U
+                       ? 8U : root->runtime_function_capacity * 2U;
+        resized = pphp_realloc(root->runtime_functions,
+                               capacity * sizeof(*resized));
+        if (resized == NULL) return 0;
+        root->runtime_functions = resized;
+        root->runtime_function_capacity = capacity;
+    }
+    root->runtime_functions[root->runtime_function_count].proto = proto;
+    root->runtime_functions[root->runtime_function_count].module = module;
+    root->runtime_function_count++;
+    return 1;
+}
+
+void pphp_remove_module_functions(pphp_state *state, const pmodule *module) {
+    pphp_state *root;
+    size_t read_index;
+    size_t write_index = 0U;
+    if (state == NULL || module == NULL) return;
+    root = state->root_state == NULL ? state : state->root_state;
+    for (read_index = 0U; read_index < root->runtime_function_count;
+         read_index++) {
+        if (root->runtime_functions[read_index].module != module) {
+            root->runtime_functions[write_index++] =
+                root->runtime_functions[read_index];
+        }
+    }
+    root->runtime_function_count = write_index;
 }
 
 static int retain_repl_module(pphp_state *state, pmodule *module,
@@ -185,7 +247,8 @@ static int validate_repl_functions(pphp_state *state, const pmodule *module) {
     size_t i;
     for (i = 1U; i < module->count; i++) {
         const pproto *proto = module->protos[i];
-        if (proto->is_method || proto->name->length == 0U ||
+        if (proto->is_method || proto->conditional ||
+            proto->name->length == 0U ||
             proto->name->data[0] == '{' ||
             strstr(proto->name->data, "::") != NULL) continue;
         if (pphp_find_function(state, proto->name, NULL) != NULL) {
@@ -557,6 +620,7 @@ int pphp_exec_source_mode(pphp_state *state, const char *source, size_t length,
     }
     result = pphp_vm_execute(state, execution_module);
     if (!repl) {
+        pphp_remove_module_functions(state, execution_module);
         pphp_clear_user_classes(state);
         pmodule_destroy(&module);
         state->module = NULL;
@@ -588,6 +652,7 @@ int pphp_exec_pbc(pphp_state *state, const void *pbc, size_t length) {
         return result == PPHP_E_NOMEM ? PPHP_E_RUNTIME : PPHP_E_PARSE;
     }
     result = pphp_vm_execute(state, &module);
+    pphp_remove_module_functions(state, &module);
     pphp_clear_user_classes(state);
     pmodule_destroy(&module);
     return result;

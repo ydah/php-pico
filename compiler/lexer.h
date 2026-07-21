@@ -181,6 +181,7 @@ typedef struct pc_lexer {
     const char *current;
     const char *end;
     const char *interp_end;
+    const char *interp_expr_end;
     const char *error_start;
     uint32_t line;
     uint32_t column;

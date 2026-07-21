@@ -32,6 +32,11 @@ typedef struct pnative_function {
     int maximum_arguments;
 } pnative_function;
 
+typedef struct pruntime_function {
+    const pproto *proto;
+    const pmodule *module;
+} pruntime_function;
+
 struct pphp_ctx {
     pphp_state *state;
     pobject *this_object;
@@ -66,6 +71,9 @@ struct pphp_state {
     pnative_function *native_functions;
     size_t native_function_count;
     size_t native_function_capacity;
+    pruntime_function *runtime_functions;
+    size_t runtime_function_count;
+    size_t runtime_function_capacity;
     pobject *oom_exception;
     pphp_output_fn output;
     void *output_context;
@@ -97,6 +105,9 @@ void pphp_clear_classes(pphp_state *state);
 void pphp_clear_user_classes(pphp_state *state);
 const pproto *pphp_find_function(const pphp_state *state, const pstring *name,
                                  const pmodule **owner);
+int pphp_register_runtime_function(pphp_state *state, const pproto *proto,
+                                   const pmodule *module);
+void pphp_remove_module_functions(pphp_state *state, const pmodule *module);
 int pphp_native_function_exists(const pphp_state *state,
                                 const pstring *name);
 int pphp_call_native_function(pphp_state *state, const pstring *name,

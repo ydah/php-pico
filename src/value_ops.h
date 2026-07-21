@@ -22,6 +22,7 @@ typedef enum pv_operation {
 } pv_operation;
 
 int pv_to_number(pvalue value, pphp_float *number, int *is_integer);
+int pv_to_number_prefix(pvalue value, pphp_float *number, int *is_integer);
 int pv_binary_operation(pv_operation operation, pvalue left, pvalue right,
                         pvalue *result, const char **error);
 int pv_compare(pvalue left, pvalue right, int strict, int *result,

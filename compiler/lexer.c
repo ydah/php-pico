@@ -338,15 +338,8 @@ static pc_token scan_heredoc(pc_lexer *lexer, const char *start) {
             memcmp(candidate, label, label_length) == 0 &&
             (candidate + label_length == lexer->end ||
              candidate[label_length] == ';' || is_line_end(candidate[label_length]))) {
-            while (!at_end(lexer) && !is_line_end(peek(lexer))) {
-                advance(lexer);
-            }
-            if (peek(lexer) == '\r') {
-                advance(lexer);
-            }
-            if (peek(lexer) == '\n') {
-                advance(lexer);
-            }
+            lexer->current = candidate + label_length;
+            lexer->column += (uint32_t)label_length;
             return make_token(lexer, nowdoc ? T_NOWDOC : T_HEREDOC, start);
         }
         lexer->current = line_start;
@@ -430,6 +423,33 @@ static pc_token lex_interpolation(pc_lexer *lexer) {
     }
     if (peek(lexer) == '$' && lexer->current + 1 < lexer->interp_end &&
         is_identifier_start((unsigned char)lexer->current[1])) {
+        const char *cursor = lexer->current + 2;
+        const char *tail_end = NULL;
+        while (cursor < lexer->interp_end &&
+               is_identifier_part((unsigned char)*cursor)) {
+            cursor++;
+        }
+        if (cursor < lexer->interp_end && *cursor == '[') {
+            const char *closing = cursor + 1;
+            while (closing < lexer->interp_end && *closing != ']') {
+                closing++;
+            }
+            if (closing < lexer->interp_end) tail_end = closing + 1;
+        } else if (cursor + 2 < lexer->interp_end && cursor[0] == '-' &&
+                   cursor[1] == '>' &&
+                   is_identifier_start((unsigned char)cursor[2])) {
+            cursor += 3;
+            while (cursor < lexer->interp_end &&
+                   is_identifier_part((unsigned char)*cursor)) {
+                cursor++;
+            }
+            tail_end = cursor;
+        }
+        if (tail_end != NULL) {
+            lexer->interp_expr_end = tail_end;
+            lexer->mode = PC_LEX_INTERPOLATION_EXPR;
+            return make_token(lexer, T_INTERP_EXPR_START, start);
+        }
         advance(lexer);
         while (lexer->current < lexer->interp_end &&
                is_identifier_part((unsigned char)peek(lexer))) {
@@ -559,6 +579,16 @@ pc_token pc_lexer_next(pc_lexer *lexer) {
 
     if (lexer->mode == PC_LEX_INTERPOLATION) {
         return lex_interpolation(lexer);
+    }
+    if (lexer->mode == PC_LEX_INTERPOLATION_EXPR &&
+        lexer->interp_expr_end != NULL &&
+        lexer->current >= lexer->interp_expr_end) {
+        const char *expression_end = lexer->current;
+        lexer->mode = PC_LEX_INTERPOLATION;
+        lexer->interp_expr_end = NULL;
+        lexer->token_line = lexer->line;
+        lexer->token_column = lexer->column;
+        return make_token(lexer, T_INTERP_EXPR_END, expression_end);
     }
     if (!lexer->in_php && !at_end(lexer)) {
         if (!(peek(lexer) == '<' && starts_open_tag(lexer))) {

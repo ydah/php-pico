@@ -26,10 +26,13 @@ static size_t operand_size(uint8_t opcode) {
         case OP_ECHO:
         case OP_CALL_VALUE:
         case OP_INCLUDE:
+        case OP_CAST:
+        case OP_NEW_OBJ_DYNAMIC:
             return 1U;
         case OP_LOAD_CONST:
         case OP_LOAD_NAMED_CONST:
         case OP_DEF_CONST:
+        case OP_DEF_FUNC:
         case OP_CALL_ARRAY:
         case OP_MCALL_ARRAY:
         case OP_NEW_OBJ_ARRAY:
@@ -41,6 +44,7 @@ static size_t operand_size(uint8_t opcode) {
         case OP_JMP_IF_KEEP:
         case OP_JMP_UNLESS_KEEP:
         case OP_JMP_NOTNULL_KEEP:
+        case OP_JMP_IFNULL_KEEP:
         case OP_LINE:
         case OP_NEW_ARRAY:
             return 2U;
@@ -59,6 +63,7 @@ static size_t operand_size(uint8_t opcode) {
         case OP_SCALL:
             return 5U;
         case OP_PROP_GET:
+        case OP_PROP_GET_QUIET:
         case OP_PROP_SET:
         case OP_INSTANCEOF:
             return 2U;
@@ -120,6 +125,8 @@ static int disassemble_proto(FILE *stream, const pproto *proto, size_t index) {
             case OP_ECHO:
             case OP_CALL_VALUE:
             case OP_INCLUDE:
+            case OP_CAST:
+            case OP_NEW_OBJ_DYNAMIC:
                 fprintf(stream, " %u", proto->code[pc]);
                 break;
             case OP_LOAD_I32:
@@ -138,6 +145,9 @@ static int disassemble_proto(FILE *stream, const pproto *proto, size_t index) {
                 print_constant(stream, proto, constant);
                 break;
             }
+            case OP_DEF_FUNC:
+                fprintf(stream, " proto=%u", code_u16(proto->code, pc));
+                break;
             case OP_DEF_CCONST: {
                 uint16_t constant = code_u16(proto->code, pc);
                 fprintf(stream, " name=%u", constant);
@@ -149,7 +159,8 @@ static int disassemble_proto(FILE *stream, const pproto *proto, size_t index) {
             case OP_JMP_UNLESS:
             case OP_JMP_IF_KEEP:
             case OP_JMP_UNLESS_KEEP:
-            case OP_JMP_NOTNULL_KEEP: {
+            case OP_JMP_NOTNULL_KEEP:
+            case OP_JMP_IFNULL_KEEP: {
                 int16_t relative = (int16_t)code_u16(proto->code, pc);
                 fprintf(stream, " %+d -> %td", relative,
                         (ptrdiff_t)(pc + 2U) + relative);
@@ -183,6 +194,7 @@ static int disassemble_proto(FILE *stream, const pproto *proto, size_t index) {
                 break;
             }
             case OP_PROP_GET:
+            case OP_PROP_GET_QUIET:
             case OP_PROP_SET:
             case OP_INSTANCEOF: {
                 uint16_t constant = code_u16(proto->code, pc);

@@ -180,6 +180,7 @@ static int is_lvalue(const pc_ast *node) {
 }
 
 static pc_ast *parse_expression_precedence(pc_parser *parser, int minimum);
+static pc_ast *parse_expression(pc_parser *parser);
 static pc_ast *parse_call(pc_parser *parser, pc_ast *callee, uint32_t line);
 static pc_ast *parse_block(pc_parser *parser, uint32_t line);
 static void parse_optional_type(pc_parser *parser);
@@ -211,8 +212,7 @@ static pc_ast *parse_match(pc_parser *parser, pc_token keyword) {
             saw_default = 1;
         } else {
             do {
-                pc_ast *condition = parse_expression_precedence(
-                    parser, PREC_ASSIGN + 1);
+                pc_ast *condition = parse_expression(parser);
                 pc_ast_append(&conditions, &condition_tail, condition);
                 if (!match(parser, T_COMMA)) break;
             } while (!check(parser, T_DOUBLE_ARROW) && !parser->failed);
@@ -220,8 +220,7 @@ static pc_ast *parse_match(pc_parser *parser, pc_token keyword) {
         (void)consume(parser, T_DOUBLE_ARROW, "expected '=>' in match arm");
         if (arm != NULL) {
             arm->as.match_arm.conditions = conditions;
-            arm->as.match_arm.result = parse_expression_precedence(
-                parser, PREC_ASSIGN + 1);
+            arm->as.match_arm.result = parse_expression(parser);
             pc_ast_append(&arms, &arm_tail, arm);
         }
         if (!match(parser, T_COMMA) && !check(parser, T_RBRACE)) {
@@ -316,6 +315,171 @@ static pc_ast *literal_node(pc_parser *parser, pc_ast_kind kind, pc_token token)
     return node;
 }
 
+static int heredoc_content(pc_parser *parser, pc_token token,
+                           const char **content, size_t *content_length) {
+    const char *source = token.start;
+    const char *end = token.start + token.length;
+    const char *label;
+    const char *header_end;
+    const char *closing_line;
+    const char *closing_label;
+    const char *body_end;
+    const char *cursor;
+    char quote = '\0';
+    size_t label_length;
+    size_t indentation;
+    char *output;
+    size_t used = 0U;
+    if (token.length < 4U || memcmp(source, "<<<", 3U) != 0) return 0;
+    cursor = source + 3U;
+    if (cursor < end && (*cursor == '\'' || *cursor == '"')) {
+        quote = *cursor++;
+    }
+    label = cursor;
+    while (cursor < end &&
+           ((*cursor >= 'a' && *cursor <= 'z') ||
+            (*cursor >= 'A' && *cursor <= 'Z') ||
+            (*cursor >= '0' && *cursor <= '9') || *cursor == '_')) {
+        cursor++;
+    }
+    label_length = (size_t)(cursor - label);
+    if (quote != '\0' && cursor < end && *cursor == quote) cursor++;
+    while (cursor < end && *cursor != '\n') cursor++;
+    if (cursor >= end || label_length == 0U) return 0;
+    header_end = cursor + 1U;
+    closing_label = end - label_length;
+    if (closing_label < header_end ||
+        memcmp(closing_label, label, label_length) != 0) {
+        return 0;
+    }
+    closing_line = closing_label;
+    while (closing_line > header_end && closing_line[-1] != '\n') {
+        closing_line--;
+    }
+    indentation = (size_t)(closing_label - closing_line);
+    for (cursor = closing_line; cursor < closing_label; cursor++) {
+        if (*cursor != ' ' && *cursor != '\t') return 0;
+    }
+    body_end = closing_line;
+    if (body_end > header_end && body_end[-1] == '\n') body_end--;
+    if (body_end > header_end && body_end[-1] == '\r') body_end--;
+    output = pc_arena_alloc(parser->arena,
+                            (size_t)(body_end - header_end) + 1U);
+    if (output == NULL) return 0;
+    cursor = header_end;
+    while (cursor < body_end) {
+        const char *line_end = cursor;
+        size_t remove = 0U;
+        while (line_end < body_end && *line_end != '\n') line_end++;
+        while (remove < indentation && cursor + remove < line_end &&
+               cursor[remove] == closing_line[remove]) {
+            remove++;
+        }
+        if (remove != indentation && cursor + remove < line_end) {
+            fail_at(parser, token,
+                    "heredoc body indentation is smaller than closing indentation");
+            return 0;
+        }
+        if (line_end > cursor + remove) {
+            size_t line_length = (size_t)(line_end - cursor) - remove;
+            memcpy(output + used, cursor + remove, line_length);
+            used += line_length;
+        }
+        if (line_end < body_end) {
+            output[used++] = '\n';
+            cursor = line_end + 1U;
+        } else {
+            cursor = line_end;
+        }
+    }
+    output[used] = '\0';
+    *content = output;
+    *content_length = used;
+    return 1;
+}
+
+static int content_has_interpolation(const char *content, size_t length) {
+    size_t i;
+    for (i = 0U; i + 1U < length; i++) {
+        if (content[i] == '\\') {
+            i++;
+            continue;
+        }
+        if (content[i] == '$' &&
+            ((content[i + 1U] >= 'a' && content[i + 1U] <= 'z') ||
+             (content[i + 1U] >= 'A' && content[i + 1U] <= 'Z') ||
+             content[i + 1U] == '_')) {
+            return 1;
+        }
+        if (i + 2U < length && content[i] == '{' &&
+            content[i + 1U] == '$') {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static pc_ast *parse_heredoc_value(pc_parser *parser, pc_token token) {
+    const char *content;
+    size_t length;
+    pc_token raw = token;
+    if (!heredoc_content(parser, token, &content, &length)) {
+        if (!parser->failed) {
+            fail_at(parser, token, "invalid heredoc token");
+        }
+        return NULL;
+    }
+    raw.start = content;
+    raw.length = length;
+    if (token.type == T_NOWDOC) {
+        raw.type = T_INLINE_HTML;
+        return literal_node(parser, AST_STRING, raw);
+    }
+    if (!content_has_interpolation(content, length)) {
+        raw.type = T_INTERP_PART;
+        return literal_node(parser, AST_STRING, raw);
+    }
+    {
+        char *quoted = pc_arena_alloc(parser->arena, length * 2U + 3U);
+        size_t source_index;
+        size_t output_index = 0U;
+        pc_parser nested;
+        pc_ast *expression;
+        if (quoted == NULL) {
+            fail_at(parser, token, "out of memory expanding heredoc");
+            return NULL;
+        }
+        quoted[output_index++] = '"';
+        for (source_index = 0U; source_index < length; source_index++) {
+            if (content[source_index] == '"') quoted[output_index++] = '\\';
+            quoted[output_index++] = content[source_index];
+        }
+        quoted[output_index++] = '"';
+        pc_parser_init(&nested, parser->arena, quoted, output_index, 1);
+        expression = parse_expression(&nested);
+        if (nested.failed || nested.current.type != T_EOF) {
+            fail_at(parser, token, "%s",
+                    nested.error[0] == '\0'
+                        ? "invalid interpolated heredoc"
+                        : nested.error);
+            return NULL;
+        }
+        return expression;
+    }
+}
+
+static void normalize_interpolation_keys(pc_ast *node) {
+    if (node == NULL) return;
+    if (node->kind == AST_INDEX) {
+        normalize_interpolation_keys(node->as.index.base);
+        if (node->as.index.key != NULL &&
+            node->as.index.key->kind == AST_IDENTIFIER) {
+            node->as.index.key->kind = AST_STRING;
+            node->as.index.key->as.literal.token.type = T_INTERP_PART;
+        }
+    }
+}
+
 static pc_ast *parse_interpolation(pc_parser *parser, pc_token opening) {
     pc_ast *result = NULL;
     (void)opening;
@@ -331,6 +495,7 @@ static pc_ast *parse_interpolation(pc_parser *parser, pc_token opening) {
             part = literal_node(parser, AST_VARIABLE, token);
         } else if (match(parser, T_INTERP_EXPR_START)) {
             part = parse_expression_precedence(parser, PREC_NONE + 1);
+            normalize_interpolation_keys(part);
             (void)consume(parser, T_INTERP_EXPR_END,
                           "expected '}' after interpolated expression");
         } else {
@@ -359,7 +524,8 @@ static pc_ast *parse_interpolation(pc_parser *parser, pc_token opening) {
     return result;
 }
 
-static pc_ast *parse_array(pc_parser *parser, uint32_t line) {
+static pc_ast *parse_array(pc_parser *parser, uint32_t line,
+                           pc_token_type closing) {
     pc_ast *array = new_node(parser, AST_ARRAY, line);
     pc_ast *head = NULL;
     pc_ast *tail = NULL;
@@ -367,9 +533,9 @@ static pc_ast *parse_array(pc_parser *parser, uint32_t line) {
     if (array == NULL) {
         return NULL;
     }
-    while (!check(parser, T_RBRACKET) && !check(parser, T_EOF) && !parser->failed) {
+    while (!check(parser, closing) && !check(parser, T_EOF) && !parser->failed) {
         int spread = match(parser, T_ELLIPSIS);
-        pc_ast *first = parse_expression_precedence(parser, PREC_ASSIGN + 1);
+        pc_ast *first = parse_expression(parser);
         pc_ast *key = NULL;
         pc_ast *value = first;
         pc_ast *item;
@@ -378,7 +544,7 @@ static pc_ast *parse_array(pc_parser *parser, uint32_t line) {
                 fail_at(parser, parser->previous, "spread array item cannot have a key");
             }
             key = first;
-            value = parse_expression_precedence(parser, PREC_ASSIGN + 1);
+            value = parse_expression(parser);
         }
         item = new_node(parser, AST_ARRAY_ITEM, first != NULL ? first->line : line);
         if (item == NULL) {
@@ -393,10 +559,32 @@ static pc_ast *parse_array(pc_parser *parser, uint32_t line) {
             break;
         }
     }
-    (void)consume(parser, T_RBRACKET, "expected ']' after array literal");
+    (void)consume(parser, closing,
+                  closing == T_RBRACKET
+                      ? "expected ']' after array literal"
+                      : "expected ')' after array literal");
     array->as.list.items = head;
     array->as.list.count = count;
     return array;
+}
+
+static pc_token_type cast_type(const pc_token *token) {
+    if (token->type == T_INT_TYPE || token->type == T_FLOAT_TYPE ||
+        token->type == T_STRING_TYPE || token->type == T_BOOL_TYPE ||
+        token->type == T_ARRAY) {
+        return token->type;
+    }
+    if (token->type != T_IDENTIFIER) return T_EOF;
+    if ((token->length == 7U && memcmp(token->start, "integer", 7U) == 0)) {
+        return T_INT_TYPE;
+    }
+    if (token->length == 6U && memcmp(token->start, "double", 6U) == 0) {
+        return T_FLOAT_TYPE;
+    }
+    if (token->length == 7U && memcmp(token->start, "boolean", 7U) == 0) {
+        return T_BOOL_TYPE;
+    }
+    return T_EOF;
 }
 
 static pc_ast *parse_prefix(pc_parser *parser) {
@@ -411,9 +599,10 @@ static pc_ast *parse_prefix(pc_parser *parser) {
         case T_FLOAT: return literal_node(parser, AST_FLOAT, token);
         case T_SINGLE_QUOTED:
         case T_DOUBLE_QUOTED:
+            return literal_node(parser, AST_STRING, token);
         case T_HEREDOC:
         case T_NOWDOC:
-            return literal_node(parser, AST_STRING, token);
+            return parse_heredoc_value(parser, token);
         case T_INTERP_START:
             return parse_interpolation(parser, token);
         case T_VARIABLE:
@@ -431,6 +620,23 @@ static pc_ast *parse_prefix(pc_parser *parser) {
             }
             return literal_node(parser, AST_IDENTIFIER, token);
         case T_LPAREN:
+            {
+                pc_token_type target = cast_type(&parser->current);
+                pc_lexer lookahead = parser->lexer;
+                pc_token after_type = pc_lexer_next(&lookahead);
+                if (target != T_EOF && after_type.type == T_RPAREN) {
+                    advance_token(parser);
+                    (void)consume(parser, T_RPAREN,
+                                  "expected ')' after cast type");
+                    node = new_node(parser, AST_UNARY, token.line);
+                    if (node != NULL) {
+                        node->as.unary.op = target;
+                        node->as.unary.operand = parse_expression_precedence(
+                            parser, PREC_UNARY);
+                    }
+                    return node;
+                }
+            }
             if (!enter_depth(parser)) {
                 return NULL;
             }
@@ -439,7 +645,10 @@ static pc_ast *parse_prefix(pc_parser *parser) {
             leave_depth(parser);
             return node;
         case T_LBRACKET:
-            return parse_array(parser, token.line);
+            return parse_array(parser, token.line, T_RBRACKET);
+        case T_ARRAY:
+            (void)consume(parser, T_LPAREN, "expected '(' after array");
+            return parse_array(parser, token.line, T_RPAREN);
         case T_MATCH:
             return parse_match(parser, token);
         case T_FUNCTION:
@@ -451,13 +660,18 @@ static pc_ast *parse_prefix(pc_parser *parser) {
             pc_ast *class_name;
             pc_ast *call;
             pc_ast *created;
-            if (class_token.type != T_IDENTIFIER && class_token.type != T_SELF &&
-                class_token.type != T_PARENT && class_token.type != T_STATIC) {
+            if (class_token.type != T_IDENTIFIER &&
+                class_token.type != T_VARIABLE &&
+                class_token.type != T_SELF && class_token.type != T_PARENT &&
+                class_token.type != T_STATIC) {
                 fail_at(parser, class_token, "expected class name after new");
                 return NULL;
             }
             advance_token(parser);
-            class_name = literal_node(parser, AST_IDENTIFIER, class_token);
+            class_name = literal_node(
+                parser,
+                class_token.type == T_VARIABLE ? AST_VARIABLE : AST_IDENTIFIER,
+                class_token);
             (void)consume(parser, T_LPAREN, "expected '(' after class name");
             call = parse_call(parser, class_name, token.line);
             created = new_node(parser, AST_NEW, token.line);
@@ -491,15 +705,43 @@ static pc_ast *parse_prefix(pc_parser *parser) {
                 node->as.expression.expression = parse_expression_precedence(parser, PREC_ASSIGN);
             }
             return node;
-        case T_ISSET:
+        case T_ISSET: {
+            pc_ast *result = NULL;
+            (void)consume(parser, T_LPAREN,
+                          "expected '(' after language construct");
+            do {
+                pc_ast *operand = parse_expression(parser);
+                pc_ast *check_node = new_node(parser, AST_ISSET, token.line);
+                if (!is_lvalue(operand)) {
+                    fail_at(parser, token,
+                            "isset operand must be an assignable value");
+                }
+                if (check_node != NULL) {
+                    check_node->as.unary.operand = operand;
+                }
+                if (result == NULL) {
+                    result = check_node;
+                } else {
+                    pc_ast *both = new_node(parser, AST_BINARY, token.line);
+                    if (both != NULL) {
+                        both->as.binary.op = T_BOOL_AND;
+                        both->as.binary.left = result;
+                        both->as.binary.right = check_node;
+                        result = both;
+                    }
+                }
+            } while (match(parser, T_COMMA));
+            (void)consume(parser, T_RPAREN,
+                          "expected ')' after expression");
+            return result;
+        }
         case T_EMPTY:
         case T_UNSET: {
-            pc_ast_kind kind = token.type == T_ISSET ? AST_ISSET :
-                               (token.type == T_EMPTY ? AST_EMPTY : AST_UNSET);
+            pc_ast_kind kind = token.type == T_EMPTY ? AST_EMPTY : AST_UNSET;
             node = new_node(parser, kind, token.line);
             (void)consume(parser, T_LPAREN, "expected '(' after language construct");
             if (node != NULL) {
-                node->as.unary.operand = parse_expression_precedence(parser, PREC_NONE + 1);
+                node->as.unary.operand = parse_expression(parser);
             }
             (void)consume(parser, T_RPAREN, "expected ')' after expression");
             return node;
@@ -530,7 +772,7 @@ static pc_ast *parse_call(pc_parser *parser, pc_ast *callee, uint32_t line) {
     while (!check(parser, T_RPAREN) && !check(parser, T_EOF) && !parser->failed) {
         pc_ast *argument;
         int spread = match(parser, T_ELLIPSIS);
-        argument = parse_expression_precedence(parser, PREC_ASSIGN + 1);
+        argument = parse_expression(parser);
         if (spread && argument != NULL) {
             pc_ast *spread_node = new_node(parser, AST_UNARY, argument->line);
             if (spread_node != NULL) {
@@ -841,7 +1083,7 @@ static pc_ast *parse_echo(pc_parser *parser, pc_token keyword) {
     pc_ast *tail = NULL;
     size_t count = 0U;
     do {
-        pc_ast *expression = parse_expression_precedence(parser, PREC_ASSIGN + 1);
+        pc_ast *expression = parse_expression(parser);
         pc_ast_append(&head, &tail, expression);
         count++;
     } while (match(parser, T_COMMA));
@@ -1137,6 +1379,26 @@ static pc_ast *parse_statement(pc_parser *parser) {
     pc_ast *node;
     if (match(parser, T_SEMICOLON) || match(parser, T_OPEN_TAG) ||
         match(parser, T_CLOSE_TAG)) {
+        return NULL;
+    }
+    if (match(parser, T_DECLARE)) {
+        pc_token directive;
+        pc_token value;
+        (void)consume(parser, T_LPAREN, "expected '(' after declare");
+        directive = consume(parser, T_IDENTIFIER,
+                            "expected declare directive");
+        (void)consume(parser, T_EQUAL, "expected '=' in declare directive");
+        value = consume(parser, T_INTEGER,
+                        "expected integer declare value");
+        if (directive.length != 12U ||
+            memcmp(directive.start, "strict_types", 12U) != 0 ||
+            value.length != 1U || value.start[0] != '1') {
+            fail_at(parser, directive,
+                    "only declare(strict_types=1) is supported");
+        }
+        (void)consume(parser, T_RPAREN,
+                      "expected ')' after declare directive");
+        consume_statement_end(parser);
         return NULL;
     }
     if (match(parser, T_INLINE_HTML)) {

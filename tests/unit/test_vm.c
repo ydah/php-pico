@@ -160,7 +160,9 @@ TEST(pbc_serialization_round_trips_through_loader) {
         "$offset = 1; $calculate = fn($x = 20) => twice(...[$x]) + $offset;"
         "try { echo $calculate(...[]), ':' , 1.25; throw new Exception('ok'); }"
         "catch (Exception $error) { echo ':', $error->getMessage(); }"
-        "finally { echo '!'; }";
+        "finally { echo '!'; }"
+        "if (true) { function loadedConditionally() { return 5; } }"
+        "echo ':', loadedConditionally();";
     const char *path = "build/host/test_roundtrip.pbc";
     pphp_state *state = pphp_open(vm_pool, sizeof(vm_pool));
     pc_arena arena;
@@ -195,7 +197,7 @@ TEST(pbc_serialization_round_trips_through_loader) {
     memset(&output, 0, sizeof(output));
     pphp_set_output(state, capture_output, &output);
     ASSERT_EQ(PPHP_OK, pphp_vm_execute(state, &loaded));
-    ASSERT_STR("41:1.25:ok!", output.bytes);
+    ASSERT_STR("41:1.25:ok!:5", output.bytes);
     pmodule_destroy(&loaded);
     pphp_close(state);
     ASSERT_EQ(0, remove(path));
@@ -208,6 +210,37 @@ TEST(arrays_use_copy_on_write_and_normalized_keys) {
     output_buffer output;
     ASSERT_EQ(PPHP_OK, execute(source, &output, NULL, 0U));
     ASSERT_STR("2:3:2:20:24", output.bytes);
+}
+
+TEST(language_conformance_covers_casts_lvalues_nullsafe_and_interpolation) {
+    const char *source =
+        "declare(strict_types=1);"
+        "$source = array('node' => array('value' => 1)); $copy = $source;"
+        "$copy['node']['value'] += 2; $copy['node']['next'] ?" "?= 4;"
+        "$key = 'value'; $object = null;"
+        "echo (int)'1.9', ':', '12tail' + 1, ':',"
+        " $source['node']['value'], ':', $copy['node']['value'], ':',"
+        " ++$copy['node']['next'], ':', $object?->missing(), ':',"
+        " \"{$copy['node'][$key]}\";";
+    output_buffer output;
+    ASSERT_EQ(PPHP_OK, execute(source, &output, NULL, 0U));
+    ASSERT_STR("1:13:1:3:5::3", output.bytes);
+}
+
+TEST(conditional_functions_register_only_when_their_declaration_executes) {
+    const char *source =
+        "if (false) { function skippedFunction() { return 1; } }"
+        "if (true) { function selectedFunction() { return 7; } }"
+        "function outerDeclaration() {"
+        " function nestedDeclaration() { return 9; }"
+        "}"
+        "echo function_exists('skippedFunction') ? 1 : 0, ':',"
+        " selectedFunction(), ':',"
+        " function_exists('nestedDeclaration') ? 1 : 0;"
+        "outerDeclaration(); echo ':', nestedDeclaration();";
+    output_buffer output;
+    ASSERT_EQ(PPHP_OK, execute(source, &output, NULL, 0U));
+    ASSERT_STR("0:7:0:9", output.bytes);
 }
 
 TEST(foreach_preserves_insertion_order_and_supports_break_continue) {
@@ -1084,6 +1117,8 @@ int main(void) {
         {"argument validation", argument_count_and_stack_limits_are_checked},
         {"PBC round trip", pbc_serialization_round_trips_through_loader},
         {"array COW runtime", arrays_use_copy_on_write_and_normalized_keys},
+        {"language conformance", language_conformance_covers_casts_lvalues_nullsafe_and_interpolation},
+        {"conditional functions", conditional_functions_register_only_when_their_declaration_executes},
         {"foreach runtime", foreach_preserves_insertion_order_and_supports_break_continue},
         {"foreach snapshot", foreach_uses_snapshot_when_array_is_modified},
         {"object methods", classes_construct_objects_and_dispatch_methods},

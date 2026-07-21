@@ -2,6 +2,7 @@
 
 #include "pstring.h"
 #include "parray.h"
+#include "pclass.h"
 #include "pphp/pphp.h"
 
 #include <math.h>
@@ -9,7 +10,7 @@
 #include <string.h>
 
 static int string_number(const char *text, size_t length, pphp_float *number,
-                         int *is_integer) {
+                         int *is_integer, int require_complete) {
     size_t i = 0U;
     int sign = 1;
     pphp_float value = 0;
@@ -61,12 +62,13 @@ static int string_number(const char *text, size_t length, pphp_float *number,
             fraction = 1;
         }
     }
-    while (i < length && (text[i] == ' ' || text[i] == '\t' || text[i] == '\n' ||
-                          text[i] == '\r')) {
-        i++;
-    }
-    if (i != length) {
-        return 0;
+    if (require_complete) {
+        while (i < length &&
+               (text[i] == ' ' || text[i] == '\t' || text[i] == '\n' ||
+                text[i] == '\r')) {
+            i++;
+        }
+        if (i != length) return 0;
     }
     if (exponent != 0) {
         value *= (pphp_float)pow(10.0, (double)(exponent * exponent_sign));
@@ -97,11 +99,21 @@ int pv_to_number(pvalue value, pphp_float *number, int *is_integer) {
             return 1;
         case PT_STRING: {
             const pstring *string = (const pstring *)value.as.gc;
-            return string_number(string->data, string->length, number, is_integer);
+            return string_number(string->data, string->length, number,
+                                 is_integer, 1);
         }
         default:
             return 0;
     }
+}
+
+int pv_to_number_prefix(pvalue value, pphp_float *number, int *is_integer) {
+    if (value.type == PT_STRING) {
+        const pstring *string = (const pstring *)value.as.gc;
+        return string_number(string->data, string->length, number,
+                             is_integer, 0);
+    }
+    return pv_to_number(value, number, is_integer);
 }
 
 static pvalue numeric_result(pphp_float number, int integers) {
@@ -186,7 +198,8 @@ int pv_binary_operation(pv_operation operation, pvalue left, pvalue right,
         *result = pv_heap(PT_STRING, &joined->header);
         return 1;
     }
-    if (!pv_to_number(left, &a, &ai) || !pv_to_number(right, &b, &bi)) {
+    if (!pv_to_number_prefix(left, &a, &ai) ||
+        !pv_to_number_prefix(right, &b, &bi)) {
         *error = "unsupported operand types";
         return 0;
     }
@@ -245,6 +258,37 @@ int pv_compare(pvalue left, pvalue right, int strict, int *result,
             *result = left_array->size > right_array->size ? 1 : -1;
             return 1;
         }
+        if (!strict) {
+            while (left_position < left_array->used) {
+                pvalue left_key;
+                pvalue left_value;
+                pvalue right_value = pv_null();
+                size_t left_next;
+                int value_result;
+                if (!pa_entry_at(left_array, left_position, &left_key,
+                                 &left_value, &left_next)) {
+                    break;
+                }
+                if (!pa_get(right_array, left_key, &right_value)) {
+                    pv_release(left_key);
+                    pv_release(left_value);
+                    *result = 1;
+                    return 1;
+                }
+                (void)pv_compare(left_value, right_value, 0, &value_result,
+                                 error);
+                pv_release(left_key);
+                pv_release(left_value);
+                pv_release(right_value);
+                if (value_result != 0) {
+                    *result = value_result;
+                    return 1;
+                }
+                left_position = left_next;
+            }
+            *result = 0;
+            return 1;
+        }
         while (left_position < left_array->used && right_position < right_array->used) {
             pvalue left_key;
             pvalue left_value;
@@ -272,6 +316,29 @@ int pv_compare(pvalue left, pvalue right, int strict, int *result,
             }
             left_position = left_next;
             right_position = right_next;
+        }
+        *result = 0;
+        return 1;
+    }
+    if (left.type == PT_OBJECT && right.type == PT_OBJECT) {
+        const pobject *left_object = (const pobject *)left.as.gc;
+        const pobject *right_object = (const pobject *)right.as.gc;
+        size_t i;
+        if (left_object->class_entry != right_object->class_entry) {
+            *result = (uintptr_t)left_object->class_entry >
+                              (uintptr_t)right_object->class_entry
+                          ? 1
+                          : -1;
+            return 1;
+        }
+        for (i = 0U; i < left_object->class_entry->property_count; i++) {
+            int property_result;
+            (void)pv_compare(left_object->slots[i], right_object->slots[i],
+                             0, &property_result, error);
+            if (property_result != 0) {
+                *result = property_result;
+                return 1;
+            }
         }
         *result = 0;
         return 1;

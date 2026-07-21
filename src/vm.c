@@ -357,6 +357,18 @@ static int execute_array_set(pphp_state *state, int append) {
     int ok;
     if (!append) key = pop(state);
     array_value = pop(state);
+    if (array_value.type == PT_NULL) {
+        array = pa_new(4U);
+        pv_release(array_value);
+        if (array == NULL) {
+            pv_release(key);
+            pv_release(value);
+            pphp_runtime_error(state, 0U,
+                               "out of memory creating array");
+            return 0;
+        }
+        array_value = pv_heap(PT_ARRAY, &array->header);
+    }
     if (array_value.type != PT_ARRAY) {
         pv_release(array_value);
         pv_release(key);
@@ -390,6 +402,115 @@ static int execute_array_set(pphp_state *state, int append) {
         return 0;
     }
     return push(state, value);
+}
+
+static int execute_array_unset(pphp_state *state) {
+    pvalue key = pop(state);
+    pvalue array_value = pop(state);
+    parray *array;
+    parray *writable;
+    if (array_value.type != PT_ARRAY) {
+        pv_release(array_value);
+        pv_release(key);
+        pphp_runtime_error(state, 0U,
+                           "Cannot use a non-array value as an array");
+        return 0;
+    }
+    array = (parray *)array_value.as.gc;
+    writable = array_for_write(array_value);
+    if (writable == NULL) {
+        pv_release(array_value);
+        pv_release(key);
+        pphp_runtime_error(state, 0U,
+                           "out of memory separating array");
+        return 0;
+    }
+    if (writable != array) {
+        pv_release(array_value);
+        array_value = pv_heap(PT_ARRAY, &writable->header);
+    }
+    (void)pa_remove(writable, key);
+    pv_release(key);
+    return push(state, array_value);
+}
+
+static int execute_index_get(pphp_state *state, int quiet) {
+    pvalue key = pop(state);
+    pvalue base = pop(state);
+    pvalue value = pv_null();
+    if (base.type == PT_ARRAY) {
+        (void)pa_get((const parray *)base.as.gc, key, &value);
+    } else if (base.type == PT_STRING) {
+        pphp_float offset_number;
+        int integer;
+        const pstring *string = (const pstring *)base.as.gc;
+        if (pv_to_number(key, &offset_number, &integer)) {
+            pphp_int offset = (pphp_int)offset_number;
+            if (offset < 0) offset += (pphp_int)string->length;
+            if (offset >= 0 && (size_t)offset < string->length) {
+                pstring *character = ps_new(string->data + offset, 1U);
+                if (character == NULL) {
+                    pphp_runtime_error(state, 0U,
+                                       "out of memory reading string offset");
+                } else {
+                    value = pv_heap(PT_STRING, &character->header);
+                }
+            }
+        }
+    } else if (!quiet && base.type != PT_NULL) {
+        pphp_runtime_error(state, 0U,
+                           "Cannot use a non-array value as an array");
+    }
+    pv_release(base);
+    pv_release(key);
+    return state->error[0] == '\0' && push(state, value);
+}
+
+static int execute_cast(pphp_state *state, uint8_t target) {
+    pvalue value = pop(state);
+    pvalue result = pv_null();
+    if (target == PT_TRUE) {
+        result = pv_bool(pv_is_truthy(value));
+    } else if (target == PT_INT || target == PT_FLOAT) {
+        pphp_float number = 0;
+        int integer = 0;
+        (void)pv_to_number_prefix(value, &number, &integer);
+        result = target == PT_INT ? pv_int((pphp_int)number)
+                                  : pv_float(number);
+    } else if (target == PT_STRING) {
+        pstring *string = pv_to_string(value);
+        if (string == NULL) {
+            pv_release(value);
+            pphp_runtime_error(state, 0U,
+                               "value cannot be converted to string");
+            return 0;
+        }
+        result = pv_heap(PT_STRING, &string->header);
+    } else if (target == PT_ARRAY) {
+        if (value.type == PT_ARRAY) {
+            result = value;
+            pv_retain(result);
+        } else {
+            parray *array = pa_new(value.type == PT_NULL ? 0U : 1U);
+            if (array == NULL ||
+                (value.type != PT_NULL && !pa_push(array, value))) {
+                if (array != NULL) {
+                    pv_release(pv_heap(PT_ARRAY, &array->header));
+                }
+                pv_release(value);
+                pphp_runtime_error(state, 0U,
+                                   "out of memory casting to array");
+                return 0;
+            }
+            result = pv_heap(PT_ARRAY, &array->header);
+        }
+    } else {
+        pv_release(value);
+        pphp_runtime_error(state, 0U, "invalid cast target");
+        return 0;
+    }
+    pv_release(value);
+    return push(state, result);
 }
 
 static void release_range(pphp_state *state, size_t begin, size_t end) {
@@ -1136,8 +1257,7 @@ static int invoke_static_method(pphp_state *state, pframe *frame,
 }
 
 static int construct_object(pphp_state *state, pframe *frame,
-                            uint16_t name_index, uint8_t argument_count) {
-    const pstring *name = constant_string(state, frame, name_index);
+                            const pstring *name, uint8_t argument_count) {
     pclass *class_entry;
     pobject *object;
     const pmethod *constructor;
@@ -1437,7 +1557,7 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                 pvalue value = pop(state);
                 pphp_float number;
                 int integer;
-                if (!pv_to_number(value, &number, &integer)) {
+                if (!pv_to_number_prefix(value, &number, &integer)) {
                     pphp_runtime_error(state, frame->line, "unsupported operand type for unary -");
                 } else {
                     (void)push(state, integer ? pv_int(-(pphp_int)number) : pv_float(-number));
@@ -1449,7 +1569,7 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                 pvalue value = pop(state);
                 pphp_float number;
                 int integer;
-                if (!pv_to_number(value, &number, &integer)) {
+                if (!pv_to_number_prefix(value, &number, &integer)) {
                     pphp_runtime_error(state, frame->line, "unsupported operand type for ~");
                 } else {
                     (void)push(state, pv_int(~(pphp_int)number));
@@ -1468,6 +1588,9 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                 (void)push(state, pv_bool(truth));
                 break;
             }
+            case OP_CAST:
+                (void)execute_cast(state, read_u8(state, frame));
+                break;
             case OP_JMP:
                 (void)jump_relative(state, frame, read_i16(state, frame));
                 break;
@@ -1501,6 +1624,17 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                     (void)jump_relative(state, frame, relative);
                 } else {
                     pv_release(pop(state));
+                }
+                break;
+            }
+            case OP_JMP_IFNULL_KEEP: {
+                int16_t relative = read_i16(state, frame);
+                if (state->stack_count == 0U) {
+                    pphp_runtime_error(state, frame->line,
+                                       "conditional jump on empty stack");
+                } else if (state->stack[state->stack_count - 1U].type ==
+                           PT_NULL) {
+                    (void)jump_relative(state, frame, relative);
                 }
                 break;
             }
@@ -1675,35 +1809,70 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                 }
                 break;
             }
-            case OP_IDX_GET: {
-                pvalue key = pop(state);
-                pvalue base = pop(state);
-                pvalue value = pv_null();
-                if (base.type != PT_ARRAY) {
-                    pphp_runtime_error(state, frame->line, "Cannot use a non-array value as an array");
-                } else {
-                    (void)pa_get((const parray *)base.as.gc, key, &value);
-                    (void)push(state, value);
-                }
-                pv_release(base);
-                pv_release(key);
+            case OP_IDX_GET:
+                (void)execute_index_get(state, 0);
                 break;
-            }
+            case OP_IDX_GET_QUIET:
+                (void)execute_index_get(state, 1);
+                break;
             case OP_IDX_SET:
                 (void)execute_array_set(state, 0);
                 break;
             case OP_IDX_APPEND:
                 (void)execute_array_set(state, 1);
                 break;
+            case OP_IDX_UNSET:
+                (void)execute_array_unset(state);
+                break;
             case OP_FE_INIT: {
                 pvalue iterable = pop(state);
                 parray_iterator *iterator;
-                if (iterable.type != PT_ARRAY) {
+                parray *iteration_array = NULL;
+                if (iterable.type == PT_ARRAY) {
+                    iteration_array = (parray *)iterable.as.gc;
+                } else if (iterable.type == PT_OBJECT) {
+                    pobject *object = (pobject *)iterable.as.gc;
+                    size_t property_index;
+                    iteration_array = pa_new(
+                        object->class_entry->property_count);
+                    if (iteration_array != NULL) {
+                        for (property_index = 0U;
+                             property_index <
+                                 object->class_entry->property_count;
+                             property_index++) {
+                            const pproperty *property =
+                                &object->class_entry
+                                     ->properties[property_index];
+                            pvalue key;
+                            if ((property->flags &
+                                 (PC_STATIC | PC_PRIVATE | PC_PROTECTED)) !=
+                                0U) {
+                                continue;
+                            }
+                            key = pv_heap(PT_STRING,
+                                          &property->name->header);
+                            if (!pa_set(iteration_array, key,
+                                        object->slots[property->slot])) {
+                                pv_release(pv_heap(
+                                    PT_ARRAY,
+                                    &iteration_array->header));
+                                iteration_array = NULL;
+                                break;
+                            }
+                        }
+                    }
+                } else {
                     pv_release(iterable);
-                    pphp_runtime_error(state, frame->line, "foreach argument must be array");
+                    pphp_runtime_error(
+                        state, frame->line,
+                        "foreach argument must be array or object");
                     break;
                 }
-                iterator = pa_iterator_new((parray *)iterable.as.gc);
+                iterator = pa_iterator_new(iteration_array);
+                if (iterable.type == PT_OBJECT && iteration_array != NULL) {
+                    pv_release(pv_heap(PT_ARRAY,
+                                       &iteration_array->header));
+                }
                 pv_release(iterable);
                 if (iterator == NULL) {
                     pphp_runtime_error(state, frame->line, "out of memory creating iterator");
@@ -1745,6 +1914,30 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                     pv_release(pop(state));
                 }
                 break;
+            case OP_DEF_FUNC: {
+                uint16_t proto_index = read_u16(state, frame);
+                const pproto *proto =
+                    frame->module != NULL && proto_index < frame->module->count
+                        ? frame->module->protos[proto_index] : NULL;
+                if (proto == NULL || !proto->conditional) {
+                    pphp_runtime_error(state, frame->line,
+                                       "invalid conditional function definition");
+                } else if (pphp_builtin_exists(proto->name) ||
+                           pphp_native_function_exists(state, proto->name) ||
+                           pphp_find_function(state, proto->name, NULL) != NULL) {
+                    pphp_runtime_error(state, frame->line,
+                                       "function %.*s is already defined",
+                                       (int)proto->name->length,
+                                       proto->name->data);
+                } else if (!pphp_register_runtime_function(
+                               state, proto, frame->module)) {
+                    pphp_runtime_error(state, frame->line,
+                                       "cannot register function %.*s",
+                                       (int)proto->name->length,
+                                       proto->name->data);
+                }
+                break;
+            }
             case OP_DEF_CLASS: {
                 uint16_t name_index = read_u16(state, frame);
                 uint16_t parent_index = read_u16(state, frame);
@@ -1892,6 +2085,8 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
             case OP_NEW_OBJ:
             case OP_NEW_OBJ_ARRAY: {
                 uint16_t name_index = read_u16(state, frame);
+                const pstring *name = constant_string(state, frame,
+                                                       name_index);
                 uint8_t argument_count;
                 if (opcode == OP_NEW_OBJ_ARRAY) {
                     if (!expand_argument_array(state, frame->line,
@@ -1901,7 +2096,64 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                 } else {
                     argument_count = read_u8(state, frame);
                 }
-                (void)construct_object(state, frame, name_index, argument_count);
+                (void)construct_object(state, frame, name, argument_count);
+                break;
+            }
+            case OP_NEW_OBJ_DYNAMIC:
+            case OP_NEW_OBJ_DYNAMIC_ARRAY: {
+                uint8_t argument_count;
+                size_t class_position;
+                pvalue class_value;
+                const pstring *name;
+                if (opcode == OP_NEW_OBJ_DYNAMIC_ARRAY) {
+                    if (!expand_argument_array(state, frame->line,
+                                               &argument_count)) {
+                        break;
+                    }
+                } else {
+                    argument_count = read_u8(state, frame);
+                }
+                if (state->stack_count < (size_t)argument_count + 1U) {
+                    pphp_runtime_error(state, frame->line,
+                                       "invalid dynamic class operands");
+                    break;
+                }
+                class_position = state->stack_count - argument_count - 1U;
+                class_value = state->stack[class_position];
+                if (class_value.type != PT_STRING) {
+                    pphp_runtime_error(state, frame->line,
+                                       "dynamic class name must be a string");
+                    break;
+                }
+                name = (const pstring *)class_value.as.gc;
+                memmove(state->stack + class_position,
+                        state->stack + class_position + 1U,
+                        (size_t)argument_count * sizeof(*state->stack));
+                state->stack_count--;
+                (void)construct_object(state, frame, name, argument_count);
+                pv_release(class_value);
+                break;
+            }
+            case OP_PROP_GET_QUIET: {
+                uint16_t name_index = read_u16(state, frame);
+                const pstring *name = constant_string(state, frame,
+                                                       name_index);
+                pvalue object_value = pop(state);
+                pvalue value = pv_null();
+                if (name != NULL && object_value.type == PT_OBJECT) {
+                    pobject *object = (pobject *)object_value.as.gc;
+                    const pproperty *property = pclass_find_property(
+                        object->class_entry, name->data, name->length);
+                    if (property != NULL &&
+                        pclass_member_visible(property->flags,
+                                              property->owner,
+                                              frame->called_scope)) {
+                        value = object->slots[property->slot];
+                        pv_retain(value);
+                    }
+                }
+                pv_release(object_value);
+                (void)push(state, value);
                 break;
             }
             case OP_PROP_GET: {
@@ -2145,6 +2397,25 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                     matches = expected != NULL &&
                               pclass_is_a(((pobject *)value.as.gc)->class_entry, expected);
                 }
+                pv_release(value);
+                (void)push(state, pv_bool(matches));
+                break;
+            }
+            case OP_INSTANCEOF_DYNAMIC: {
+                pvalue class_value = pop(state);
+                pvalue value = pop(state);
+                int matches = 0;
+                if (class_value.type == PT_STRING && value.type == PT_OBJECT) {
+                    const pstring *name =
+                        (const pstring *)class_value.as.gc;
+                    pclass *expected = pphp_find_class(
+                        state, name->data, name->length);
+                    matches = expected != NULL &&
+                              pclass_is_a(
+                                  ((pobject *)value.as.gc)->class_entry,
+                                  expected);
+                }
+                pv_release(class_value);
                 pv_release(value);
                 (void)push(state, pv_bool(matches));
                 break;

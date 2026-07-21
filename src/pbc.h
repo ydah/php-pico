@@ -18,10 +18,12 @@ typedef struct pcatch {
 
 typedef struct pproto {
     pstring *name;
+    const void *declaration;
     uint8_t n_params;
     uint8_t n_required;
     uint8_t variadic;
     uint8_t is_method;
+    uint8_t conditional;
     uint8_t n_locals;
     uint16_t max_stack;
     uint8_t *code;

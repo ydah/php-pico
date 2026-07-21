@@ -93,7 +93,9 @@ TEST(strings_and_interpolation_are_tokenized) {
 }
 
 TEST(heredoc_and_nowdoc_terminate_on_indented_label) {
-    static const pc_token_type expected[] = {T_HEREDOC, T_NOWDOC, T_EOF};
+    static const pc_token_type expected[] = {
+        T_HEREDOC, T_SEMICOLON, T_NOWDOC, T_EOF
+    };
     const char *source = "<<<TXT\nhello\n  TXT;\n<<<'RAW'\n$x\nRAW\n";
     assert_sequence(source, 1, expected, sizeof(expected) / sizeof(expected[0]));
 }

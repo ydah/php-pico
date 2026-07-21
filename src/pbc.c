@@ -191,6 +191,7 @@ const pproto *pmodule_find(const pmodule *module, const pstring *name) {
     size_t j;
     for (i = 1U; i < module->count; i++) {
         const pstring *candidate = module->protos[i]->name;
+        if (module->protos[i]->conditional) continue;
         int equal = candidate->length == name->length;
         for (j = 0U; equal && j < name->length; j++) {
             unsigned char left = (unsigned char)candidate->data[j];
@@ -379,7 +380,8 @@ int pphp_pbc_write_file(const pmodule *module, const char *path) {
         bytes[offset] = proto->n_params;
         bytes[offset + 1U] = proto->n_required;
         bytes[offset + 2U] = (uint8_t)((proto->variadic ? 1U : 0U) |
-                                        (proto->is_method ? 2U : 0U));
+                                        (proto->is_method ? 2U : 0U) |
+                                        (proto->conditional ? 8U : 0U));
         bytes[offset + 3U] = proto->n_locals;
         put_u16(bytes, offset + 6U, proto->max_stack);
         put_u16(bytes, offset + 8U, (uint16_t)proto->code_length);
@@ -564,6 +566,7 @@ int pphp_pbc_load(const void *data, size_t length, pmodule *module) {
         proto->n_required = bytes[offset + 1U];
         proto->variadic = (uint8_t)(bytes[offset + 2U] & 1U);
         proto->is_method = (uint8_t)((bytes[offset + 2U] & 2U) != 0U);
+        proto->conditional = (uint8_t)((bytes[offset + 2U] & 8U) != 0U);
         local_count = bytes[offset + 3U];
         proto->max_stack = get_u16(bytes, offset + 6U);
         proto->code = pphp_alloc(code_length);
@@ -712,12 +715,15 @@ const char *pphp_opcode_name(uint8_t opcode) {
         case OP_GE: return "GE";
         case OP_CMP: return "CMP";
         case OP_NOT: return "NOT";
+        case OP_CAST: return "CAST";
+        case OP_INSTANCEOF_DYNAMIC: return "INSTANCEOF_DYNAMIC";
         case OP_JMP: return "JMP";
         case OP_JMP_IF: return "JMP_IF";
         case OP_JMP_UNLESS: return "JMP_UNLESS";
         case OP_JMP_IF_KEEP: return "JMP_IF_KEEP";
         case OP_JMP_UNLESS_KEEP: return "JMP_UNLESS_KEEP";
         case OP_JMP_NOTNULL_KEEP: return "JMP_NOTNULL_KEEP";
+        case OP_JMP_IFNULL_KEEP: return "JMP_IFNULL_KEEP";
         case OP_CALL: return "CALL";
         case OP_CALL_VALUE: return "CALL_VALUE";
         case OP_RET: return "RET";
@@ -737,6 +743,8 @@ const char *pphp_opcode_name(uint8_t opcode) {
         case OP_FE_FREE: return "FE_FREE";
         case OP_ARR_EXTEND: return "ARR_EXTEND";
         case OP_ARR_SEPARATE: return "ARR_SEPARATE";
+        case OP_IDX_UNSET: return "IDX_UNSET";
+        case OP_IDX_GET_QUIET: return "IDX_GET_QUIET";
         case OP_NEW_OBJ: return "NEW_OBJ";
         case OP_PROP_GET: return "PROP_GET";
         case OP_PROP_SET: return "PROP_SET";
@@ -749,9 +757,13 @@ const char *pphp_opcode_name(uint8_t opcode) {
         case OP_SPROP_GET: return "SPROP_GET";
         case OP_SPROP_SET: return "SPROP_SET";
         case OP_CLSCONST: return "CLSCONST";
+        case OP_PROP_GET_QUIET: return "PROP_GET_QUIET";
+        case OP_NEW_OBJ_DYNAMIC: return "NEW_OBJ_DYNAMIC";
+        case OP_NEW_OBJ_DYNAMIC_ARRAY: return "NEW_OBJ_DYNAMIC_ARRAY";
         case OP_CLOSURE: return "CLOSURE";
         case OP_THROW: return "THROW";
         case OP_CLONE: return "CLONE";
+        case OP_DEF_FUNC: return "DEF_FUNC";
         case OP_DEF_CCONST: return "DEF_CCONST";
         case OP_DEF_CLASS: return "DEF_CLASS";
         case OP_DEF_METHOD: return "DEF_METHOD";
