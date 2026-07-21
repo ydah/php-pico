@@ -6,6 +6,7 @@
 #include "pclass.h"
 #include "parray.h"
 #include "pphp/hal.h"
+#include "pphp/fs.h"
 #include "gc.h"
 #include "files.h"
 #include "pgems.h"
@@ -196,6 +197,64 @@ static int validate_repl_functions(pphp_state *state, const pmodule *module) {
     return 1;
 }
 
+static int include_candidate(const char *prefix, const char *path,
+                             const char *suffix, char *resolved) {
+    char candidate[PPHP_FS_PATH_MAX];
+    size_t prefix_length = prefix == NULL ? 0U : strlen(prefix);
+    size_t path_length = strlen(path);
+    size_t suffix_length = suffix == NULL ? 0U : strlen(suffix);
+    if (prefix_length + path_length + suffix_length + 1U >
+        sizeof(candidate)) return 0;
+    if (prefix_length != 0U) memcpy(candidate, prefix, prefix_length);
+    memcpy(candidate + prefix_length, path, path_length);
+    if (suffix_length != 0U) {
+        memcpy(candidate + prefix_length + path_length, suffix, suffix_length);
+    }
+    candidate[prefix_length + path_length + suffix_length] = '\0';
+    if (!pphp_fs_exists(candidate)) return 0;
+    if (pphp_fs_canonicalize(candidate, resolved, PPHP_FS_PATH_MAX)) return 1;
+    memcpy(resolved, candidate,
+           prefix_length + path_length + suffix_length + 1U);
+    return 1;
+}
+
+static int has_php_extension(const char *path) {
+    size_t length = strlen(path);
+    return (length >= 4U && strcmp(path + length - 4U, ".php") == 0) ||
+           (length >= 4U && strcmp(path + length - 4U, ".pbc") == 0);
+}
+
+static int resolve_include_path(const char *path, char *resolved) {
+    static const char *const prefixes[] = {"/lib/", "/home/"};
+    static const char *const suffixes[] = {".pbc", ".php"};
+    size_t i;
+    size_t j;
+    int extension;
+    if (path == NULL || *path == '\0' || strlen(path) >= PPHP_FS_PATH_MAX) {
+        return 0;
+    }
+    if (include_candidate(NULL, path, NULL, resolved)) return 1;
+    extension = has_php_extension(path);
+    if (!extension) {
+        for (j = 0U; j < sizeof(suffixes) / sizeof(suffixes[0]); j++) {
+            if (include_candidate(NULL, path, suffixes[j], resolved)) return 1;
+        }
+    }
+    if (*path == '/') return 0;
+    for (i = 0U; i < sizeof(prefixes) / sizeof(prefixes[0]); i++) {
+        if (extension && include_candidate(prefixes[i], path, NULL, resolved)) {
+            return 1;
+        }
+        if (!extension) {
+            for (j = 0U; j < sizeof(suffixes) / sizeof(suffixes[0]); j++) {
+                if (include_candidate(prefixes[i], path, suffixes[j],
+                                      resolved)) return 1;
+            }
+        }
+    }
+    return 0;
+}
+
 int pphp_exec_include(pphp_state *state, const char *path, uint8_t mode,
                       pvalue *result) {
     pphp_state *owner;
@@ -216,9 +275,18 @@ int pphp_exec_include(pphp_state *state, const char *path, uint8_t mode,
     int required = mode == (uint8_t)T_REQUIRE ||
                    mode == (uint8_t)T_REQUIRE_ONCE;
     int status;
+    char resolved[PPHP_FS_PATH_MAX];
     if (state == NULL || path == NULL || result == NULL) return PPHP_E_RUNTIME;
     *result = pv_bool(0);
     owner = state->root_state == NULL ? state : state->root_state;
+    if (!resolve_include_path(path, resolved)) {
+        if (required) {
+            pphp_runtime_error(state, 0U,
+                               "required file %s could not be opened", path);
+        }
+        return required ? PPHP_E_RUNTIME : PPHP_OK;
+    }
+    path = resolved;
     path_string = ps_new(path, strlen(path));
     if (path_string == NULL) {
         pphp_runtime_error(state, 0U, "out of memory resolving include path");

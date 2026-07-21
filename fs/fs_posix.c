@@ -7,9 +7,14 @@
 #include <dirent.h>
 #include <limits.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
 
 struct pphp_file {
     FILE *handle;
@@ -118,6 +123,17 @@ int pphp_fs_rmdir(const char *path) {
 int pphp_fs_rename(const char *old_path, const char *new_path) {
     return old_path != NULL && new_path != NULL &&
            rename(old_path, new_path) == 0;
+}
+
+int pphp_fs_canonicalize(const char *path, char *resolved, size_t capacity) {
+    char absolute[PATH_MAX];
+    size_t length;
+    if (path == NULL || resolved == NULL || capacity == 0U ||
+        realpath(path, absolute) == NULL) return 0;
+    length = strlen(absolute);
+    if (length + 1U > capacity) return 0;
+    memcpy(resolved, absolute, length + 1U);
+    return 1;
 }
 
 pphp_dir *pphp_fs_dir_open(const char *path) {

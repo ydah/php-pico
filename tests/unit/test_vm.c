@@ -907,25 +907,36 @@ TEST(file_builtins_cover_whole_file_stream_and_path_operations) {
 
 TEST(include_once_loads_definitions_and_require_reports_missing_files) {
     const char *path = "build/host/php_pico_include_test.php";
+    const char *searched_path = "build/host/php_pico_include_search.php";
     const char *included =
         "<?php function included_twice($value) { return $value * 2; }"
         "class IncludedValue { public function get() { return 7; } }"
         "$included_global = 5; echo 'I';";
+    const char *searched_source = "<?php echo 'S';";
     const char *source =
         "include_once 'build/host/php_pico_include_test.php';"
-        "include_once 'build/host/php_pico_include_test.php';"
+        "include_once './build/host/php_pico_include_test.php';"
+        "include 'build/host/php_pico_include_search';"
         "$object = new IncludedValue();"
         "echo ':', included_twice($included_global), ':', $object->get();";
     FILE *file = fopen(path, "wb");
+    FILE *searched;
     output_buffer output;
     char error[256];
     ASSERT_TRUE(file != NULL);
     ASSERT_EQ((long)strlen(included),
               (long)fwrite(included, 1U, strlen(included), file));
     ASSERT_EQ(0, fclose(file));
+    searched = fopen(searched_path, "wb");
+    ASSERT_TRUE(searched != NULL);
+    ASSERT_EQ((long)strlen(searched_source),
+              (long)fwrite(searched_source, 1U, strlen(searched_source),
+                           searched));
+    ASSERT_EQ(0, fclose(searched));
     ASSERT_EQ(PPHP_OK, execute(source, &output, error, sizeof(error)));
-    ASSERT_STR("I:10:7", output.bytes);
+    ASSERT_STR("IS:10:7", output.bytes);
     ASSERT_EQ(0, remove(path));
+    ASSERT_EQ(0, remove(searched_path));
     ASSERT_EQ(PPHP_E_RUNTIME,
               execute("require 'build/host/does_not_exist.php';", &output,
                       error, sizeof(error)));

@@ -7,6 +7,8 @@
 typedef struct pphp_file pphp_file;
 typedef struct pphp_dir pphp_dir;
 
+#define PPHP_FS_PATH_MAX 512U
+
 enum {
     PPHP_FS_SEEK_SET = 0,
     PPHP_FS_SEEK_CUR = 1,
@@ -32,6 +34,7 @@ int pphp_fs_remove(const char *path);
 int pphp_fs_mkdir(const char *path, unsigned mode);
 int pphp_fs_rmdir(const char *path);
 int pphp_fs_rename(const char *old_path, const char *new_path);
+int pphp_fs_canonicalize(const char *path, char *resolved, size_t capacity);
 
 pphp_dir *pphp_fs_dir_open(const char *path);
 int pphp_fs_dir_read(pphp_dir *directory, char *name, size_t capacity,

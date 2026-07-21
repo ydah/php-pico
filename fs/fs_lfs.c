@@ -249,6 +249,50 @@ int pphp_fs_rename(const char *old_path, const char *new_path) {
            lfs_rename(&filesystem, old_normalized, new_normalized) == LFS_ERR_OK;
 }
 
+int pphp_fs_canonicalize(const char *path, char *resolved, size_t capacity) {
+    const char *cursor;
+    size_t length = 5U;
+    if (path == NULL || resolved == NULL || capacity < 6U) return 0;
+    memcpy(resolved, "/home", 6U);
+    if (strncmp(path, "/home", 5U) == 0 &&
+        (path[5] == '\0' || path[5] == '/')) {
+        cursor = path + 5U;
+    } else if (*path == '/') {
+        cursor = path;
+        length = 0U;
+        resolved[0] = '\0';
+    } else {
+        cursor = path;
+    }
+    while (*cursor != '\0') {
+        const char *component;
+        size_t component_length;
+        while (*cursor == '/') cursor++;
+        component = cursor;
+        while (*cursor != '\0' && *cursor != '/') cursor++;
+        component_length = (size_t)(cursor - component);
+        if (component_length == 0U ||
+            (component_length == 1U && component[0] == '.')) continue;
+        if (component_length == 2U && component[0] == '.' &&
+            component[1] == '.') {
+            if (length > 5U) {
+                while (length > 5U && resolved[length - 1U] != '/') length--;
+                if (length > 5U) length--;
+                resolved[length] = '\0';
+            }
+            continue;
+        }
+        if (length + component_length + 2U > capacity) return 0;
+        if (length == 0U || resolved[length - 1U] != '/') {
+            resolved[length++] = '/';
+        }
+        memcpy(resolved + length, component, component_length);
+        length += component_length;
+        resolved[length] = '\0';
+    }
+    return 1;
+}
+
 pphp_dir *pphp_fs_dir_open(const char *path) {
     const char *normalized = lfs_path(path);
     pphp_dir *directory;
