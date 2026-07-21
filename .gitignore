@@ -1,0 +1,7 @@
+/build/
+*.dSYM/
+*.gcda
+*.gcno
+*.gcov
+compile_commands.json
+
