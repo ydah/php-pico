@@ -107,10 +107,21 @@ int pphp_exec_source(pphp_state *state, const char *source, size_t length,
 }
 
 int pphp_exec_pbc(pphp_state *state, const void *pbc, size_t length) {
-    (void)pbc;
-    (void)length;
-    pphp_runtime_error(state, 0U, "PBC loading is not implemented yet");
-    return PPHP_E_RUNTIME;
+    pmodule module;
+    int result;
+    if (state == NULL) {
+        return PPHP_E_RUNTIME;
+    }
+    state->error[0] = '\0';
+    state->error_line = 0U;
+    result = pphp_pbc_load(pbc, length, &module);
+    if (result != PPHP_OK) {
+        pphp_runtime_error(state, 0U, "invalid or incompatible PBC image");
+        return result == PPHP_E_NOMEM ? PPHP_E_RUNTIME : PPHP_E_PARSE;
+    }
+    result = pphp_vm_execute(state, &module);
+    pmodule_destroy(&module);
+    return result;
 }
 
 void pphp_tick(pphp_state *state) {

@@ -47,6 +47,6 @@ const pproto *pmodule_find(const pmodule *module, const pstring *name);
 
 int pphp_pbc_write_file(const pmodule *module, const char *path);
 int pphp_pbc_read_file(const char *path, pmodule *module);
+int pphp_pbc_load(const void *bytes, size_t length, pmodule *module);
 
 #endif
-

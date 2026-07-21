@@ -2,6 +2,10 @@
 
 #include "pphp/pphp.h"
 #include "state.h"
+#include "codegen.h"
+#include "parser.h"
+#include "pbc.h"
+#include "vm.h"
 
 #include <stdint.h>
 
@@ -106,6 +110,37 @@ TEST(argument_count_and_stack_limits_are_checked) {
     ASSERT_TRUE(strstr(error, "Too few arguments") != NULL);
 }
 
+TEST(pbc_serialization_round_trips_through_loader) {
+    const char *source =
+        "function twice($x) { return $x * 2; } echo twice(21), ':' , 1.25;";
+    const char *path = "build/host/test_roundtrip.pbc";
+    pphp_state *state = pphp_open(vm_pool, sizeof(vm_pool));
+    pc_arena arena;
+    pc_parser parser;
+    pc_codegen_error error;
+    pc_ast *program;
+    pmodule original;
+    pmodule loaded;
+    output_buffer output;
+    ASSERT_TRUE(state != NULL);
+    pc_arena_init(&arena, 2048U);
+    pc_parser_init(&parser, &arena, source, strlen(source), 1);
+    program = pc_parse_program(&parser);
+    ASSERT_TRUE(program != NULL);
+    ASSERT_TRUE(pc_codegen_program(program, &original, &error));
+    pc_arena_destroy(&arena);
+    ASSERT_EQ(PPHP_OK, pphp_pbc_write_file(&original, path));
+    pmodule_destroy(&original);
+    ASSERT_EQ(PPHP_OK, pphp_pbc_read_file(path, &loaded));
+    memset(&output, 0, sizeof(output));
+    pphp_set_output(state, capture_output, &output);
+    ASSERT_EQ(PPHP_OK, pphp_vm_execute(state, &loaded));
+    ASSERT_STR("42:1.25", output.bytes);
+    pmodule_destroy(&loaded);
+    pphp_close(state);
+    ASSERT_EQ(0, remove(path));
+}
+
 int main(void) {
     static const test_case tests[] = {
         {"arithmetic VM", arithmetic_runs_through_compiler_and_vm},
@@ -114,7 +149,8 @@ int main(void) {
         {"short circuit", short_circuit_and_ternary_preserve_values},
         {"strings and builtins", strings_and_initial_builtins_execute},
         {"runtime errors", runtime_errors_stop_execution_cleanly},
-        {"argument validation", argument_count_and_stack_limits_are_checked}
+        {"argument validation", argument_count_and_stack_limits_are_checked},
+        {"PBC round trip", pbc_serialization_round_trips_through_loader}
     };
     return run_tests(tests, sizeof(tests) / sizeof(tests[0]));
 }

@@ -4,6 +4,7 @@
 #include "pphp/pphp.h"
 
 #include <limits.h>
+#include <stdio.h>
 #include <string.h>
 
 static int grow_array(void **array, size_t element_size, size_t *capacity,
@@ -47,8 +48,10 @@ void pproto_destroy(pproto *proto) {
     for (i = 0U; i < proto->constant_count; i++) {
         pv_release(proto->constants[i]);
     }
-    for (i = 0U; i < proto->n_locals; i++) {
-        ps_destroy(proto->locals[i]);
+    if (proto->locals != NULL) {
+        for (i = 0U; i < proto->n_locals; i++) {
+            ps_destroy(proto->locals[i]);
+        }
     }
     ps_destroy(proto->name);
     pphp_free(proto->locals);
@@ -182,16 +185,374 @@ const pproto *pmodule_find(const pmodule *module, const pstring *name) {
     return NULL;
 }
 
+typedef struct string_list {
+    pstring **items;
+    size_t count;
+    size_t capacity;
+} string_list;
+
+static size_t align4(size_t value) {
+    return (value + 3U) & ~(size_t)3U;
+}
+
+static void put_u16(uint8_t *bytes, size_t offset, uint16_t value) {
+    bytes[offset] = (uint8_t)(value & 0xffU);
+    bytes[offset + 1U] = (uint8_t)(value >> 8U);
+}
+
+static void put_u32(uint8_t *bytes, size_t offset, uint32_t value) {
+    bytes[offset] = (uint8_t)(value & 0xffU);
+    bytes[offset + 1U] = (uint8_t)((value >> 8U) & 0xffU);
+    bytes[offset + 2U] = (uint8_t)((value >> 16U) & 0xffU);
+    bytes[offset + 3U] = (uint8_t)((value >> 24U) & 0xffU);
+}
+
+static uint16_t get_u16(const uint8_t *bytes, size_t offset) {
+    return (uint16_t)((uint16_t)bytes[offset] |
+                      (uint16_t)((uint16_t)bytes[offset + 1U] << 8U));
+}
+
+static uint32_t get_u32(const uint8_t *bytes, size_t offset) {
+    return (uint32_t)bytes[offset] |
+           ((uint32_t)bytes[offset + 1U] << 8U) |
+           ((uint32_t)bytes[offset + 2U] << 16U) |
+           ((uint32_t)bytes[offset + 3U] << 24U);
+}
+
+static int strings_add(string_list *list, pstring *string, uint16_t *index) {
+    size_t i;
+    for (i = 0U; i < list->count; i++) {
+        if (ps_equal(list->items[i], string)) {
+            *index = (uint16_t)i;
+            return 1;
+        }
+    }
+    if (list->count >= UINT16_MAX) {
+        return 0;
+    }
+    if (list->count == list->capacity &&
+        !grow_array((void **)&list->items, sizeof(*list->items), &list->capacity,
+                    list->count + 1U)) {
+        return 0;
+    }
+    list->items[list->count] = string;
+    *index = (uint16_t)list->count;
+    list->count++;
+    return 1;
+}
+
+static int collect_strings(const pmodule *module, string_list *strings) {
+    size_t i;
+    memset(strings, 0, sizeof(*strings));
+    for (i = 0U; i < module->count; i++) {
+        size_t j;
+        uint16_t ignored;
+        if (!strings_add(strings, module->protos[i]->name, &ignored)) {
+            return 0;
+        }
+        for (j = 0U; j < module->protos[i]->constant_count; j++) {
+            pvalue value = module->protos[i]->constants[j];
+            if (value.type == PT_STRING &&
+                !strings_add(strings, (pstring *)value.as.gc, &ignored)) {
+                return 0;
+            }
+        }
+    }
+    return 1;
+}
+
+static size_t serialized_constant_size(pvalue value) {
+    return value.type == PT_FLOAT && sizeof(pphp_float) == 8U ? 16U : 8U;
+}
+
+static int string_index(const string_list *strings, const pstring *string,
+                        uint16_t *index) {
+    size_t i;
+    for (i = 0U; i < strings->count; i++) {
+        if (ps_equal(strings->items[i], string)) {
+            *index = (uint16_t)i;
+            return 1;
+        }
+    }
+    return 0;
+}
+
 int pphp_pbc_write_file(const pmodule *module, const char *path) {
-    (void)module;
-    (void)path;
-    return PPHP_E_IO;
+    string_list strings;
+    uint32_t *string_offsets = NULL;
+    uint32_t *proto_offsets = NULL;
+    size_t total;
+    size_t offset;
+    size_t i;
+    uint8_t *bytes = NULL;
+    FILE *file = NULL;
+    int result = PPHP_E_NOMEM;
+    if (module == NULL || module->count == 0U || module->count > UINT16_MAX ||
+        path == NULL || !collect_strings(module, &strings)) {
+        return PPHP_E_NOMEM;
+    }
+    string_offsets = pphp_alloc(strings.count * sizeof(*string_offsets));
+    proto_offsets = pphp_alloc(module->count * sizeof(*proto_offsets));
+    if ((strings.count != 0U && string_offsets == NULL) || proto_offsets == NULL) {
+        goto done;
+    }
+    total = align4(16U + strings.count * 4U + module->count * 4U);
+    for (i = 0U; i < strings.count; i++) {
+        if (total > UINT32_MAX) goto done;
+        string_offsets[i] = (uint32_t)total;
+        total = align4(total + 2U + strings.items[i]->length + 1U);
+    }
+    for (i = 0U; i < module->count; i++) {
+        size_t j;
+        const pproto *proto = module->protos[i];
+        if (proto->code_length > UINT16_MAX || proto->constant_count > UINT16_MAX ||
+            total > UINT32_MAX) goto done;
+        proto_offsets[i] = (uint32_t)total;
+        total += 16U + align4(proto->code_length);
+        for (j = 0U; j < proto->constant_count; j++) {
+            total += serialized_constant_size(proto->constants[j]);
+        }
+        total = align4(total);
+    }
+    if (total > UINT32_MAX) goto done;
+    bytes = pphp_alloc(total);
+    if (bytes == NULL) goto done;
+    memset(bytes, 0, total);
+    memcpy(bytes, "PPBC", 4U);
+    put_u16(bytes, 4U, 1U);
+    put_u16(bytes, 6U, (uint16_t)((PPHP_INT64 ? 1U : 0U) |
+                                  (PPHP_USE_DOUBLE ? 2U : 0U)));
+    put_u32(bytes, 8U, (uint32_t)total);
+    put_u16(bytes, 12U, (uint16_t)module->count);
+    put_u16(bytes, 14U, (uint16_t)strings.count);
+    offset = 16U;
+    for (i = 0U; i < strings.count; i++, offset += 4U) {
+        put_u32(bytes, offset, string_offsets[i]);
+    }
+    for (i = 0U; i < module->count; i++, offset += 4U) {
+        put_u32(bytes, offset, proto_offsets[i]);
+    }
+    for (i = 0U; i < strings.count; i++) {
+        offset = string_offsets[i];
+        put_u16(bytes, offset, strings.items[i]->length);
+        memcpy(bytes + offset + 2U, strings.items[i]->data, strings.items[i]->length);
+    }
+    for (i = 0U; i < module->count; i++) {
+        const pproto *proto = module->protos[i];
+        uint16_t name_sid;
+        size_t j;
+        offset = proto_offsets[i];
+        if (!string_index(&strings, proto->name, &name_sid)) goto done;
+        bytes[offset] = proto->n_params;
+        bytes[offset + 1U] = proto->n_required;
+        bytes[offset + 2U] = proto->variadic;
+        bytes[offset + 3U] = proto->n_locals;
+        put_u16(bytes, offset + 6U, proto->max_stack);
+        put_u16(bytes, offset + 8U, (uint16_t)proto->code_length);
+        put_u16(bytes, offset + 10U, (uint16_t)proto->constant_count);
+        put_u16(bytes, offset + 12U, 0U);
+        put_u16(bytes, offset + 14U, name_sid);
+        offset += 16U;
+        memcpy(bytes + offset, proto->code, proto->code_length);
+        offset += align4(proto->code_length);
+        for (j = 0U; j < proto->constant_count; j++) {
+            pvalue value = proto->constants[j];
+            if (value.type == PT_INT) {
+                bytes[offset] = 0U;
+                put_u32(bytes, offset + 4U, (uint32_t)(int32_t)value.as.i);
+                offset += 8U;
+            } else if (value.type == PT_FLOAT && sizeof(pphp_float) == 4U) {
+                uint32_t bits;
+                float number = (float)value.as.f;
+                memcpy(&bits, &number, sizeof(bits));
+                bytes[offset] = 1U;
+                put_u32(bytes, offset + 4U, bits);
+                offset += 8U;
+            } else if (value.type == PT_STRING) {
+                uint16_t sid;
+                if (!string_index(&strings, (pstring *)value.as.gc, &sid)) goto done;
+                bytes[offset] = 2U;
+                put_u32(bytes, offset + 4U, sid);
+                offset += 8U;
+            } else if (value.type == PT_FLOAT) {
+                uint64_t bits;
+                double number = (double)value.as.f;
+                memcpy(&bits, &number, sizeof(bits));
+                bytes[offset] = 3U;
+                put_u32(bytes, offset + 8U, (uint32_t)(bits & UINT32_MAX));
+                put_u32(bytes, offset + 12U, (uint32_t)(bits >> 32U));
+                offset += 16U;
+            } else {
+                goto done;
+            }
+        }
+    }
+    file = fopen(path, "wb");
+    if (file == NULL) {
+        result = PPHP_E_IO;
+        goto done;
+    }
+    result = fwrite(bytes, 1U, total, file) == total ? PPHP_OK : PPHP_E_IO;
+done:
+    if (file != NULL && fclose(file) != 0 && result == PPHP_OK) {
+        result = PPHP_E_IO;
+    }
+    pphp_free(bytes);
+    pphp_free(string_offsets);
+    pphp_free(proto_offsets);
+    pphp_free(strings.items);
+    return result;
 }
 
 int pphp_pbc_read_file(const char *path, pmodule *module) {
-    (void)path;
-    (void)module;
-    return PPHP_E_IO;
+    FILE *file = fopen(path, "rb");
+    long file_size;
+    uint8_t *bytes;
+    size_t read_count;
+    int result;
+    if (file == NULL) return PPHP_E_IO;
+    if (fseek(file, 0L, SEEK_END) != 0 || (file_size = ftell(file)) < 0L ||
+        fseek(file, 0L, SEEK_SET) != 0) {
+        (void)fclose(file);
+        return PPHP_E_IO;
+    }
+    bytes = pphp_alloc((size_t)file_size);
+    if (bytes == NULL) {
+        (void)fclose(file);
+        return PPHP_E_NOMEM;
+    }
+    read_count = fread(bytes, 1U, (size_t)file_size, file);
+    (void)fclose(file);
+    if (read_count != (size_t)file_size) {
+        pphp_free(bytes);
+        return PPHP_E_IO;
+    }
+    result = pphp_pbc_load(bytes, read_count, module);
+    pphp_free(bytes);
+    return result;
+}
+
+int pphp_pbc_load(const void *data, size_t length, pmodule *module) {
+    const uint8_t *bytes = data;
+    uint16_t n_protos;
+    uint16_t n_strings;
+    size_t table_end;
+    pstring **strings = NULL;
+    size_t i;
+    int result = PPHP_E_PARSE;
+    if (bytes == NULL || length < 16U || memcmp(bytes, "PPBC", 4U) != 0 ||
+        get_u16(bytes, 4U) != 1U || get_u32(bytes, 8U) != length) {
+        return PPHP_E_PARSE;
+    }
+    n_protos = get_u16(bytes, 12U);
+    n_strings = get_u16(bytes, 14U);
+    table_end = 16U + (size_t)n_strings * 4U + (size_t)n_protos * 4U;
+    if (n_protos == 0U || table_end > length) return PPHP_E_PARSE;
+    strings = pphp_alloc((size_t)n_strings * sizeof(*strings));
+    if (n_strings != 0U && strings == NULL) return PPHP_E_NOMEM;
+    if (n_strings != 0U) {
+        memset(strings, 0, (size_t)n_strings * sizeof(*strings));
+    }
+    if (!pmodule_init(module)) {
+        result = PPHP_E_NOMEM;
+        goto done;
+    }
+    for (i = 0U; i < n_strings; i++) {
+        size_t offset = get_u32(bytes, 16U + i * 4U);
+        uint16_t string_length;
+        if (offset + 2U > length) goto failed_module;
+        string_length = get_u16(bytes, offset);
+        if (offset + 2U + string_length + 1U > length) goto failed_module;
+        strings[i] = ps_new((const char *)bytes + offset + 2U, string_length);
+        if (strings[i] == NULL) {
+            result = PPHP_E_NOMEM;
+            goto failed_module;
+        }
+    }
+    for (i = 0U; i < n_protos; i++) {
+        size_t offset = get_u32(bytes, 16U + (size_t)n_strings * 4U + i * 4U);
+        uint16_t code_length;
+        uint16_t constant_count;
+        uint16_t name_sid;
+        pproto *proto;
+        size_t j;
+        if (offset + 16U > length) goto failed_module;
+        code_length = get_u16(bytes, offset + 8U);
+        constant_count = get_u16(bytes, offset + 10U);
+        name_sid = get_u16(bytes, offset + 14U);
+        if (name_sid >= n_strings || offset + 16U + align4(code_length) > length) {
+            goto failed_module;
+        }
+        proto = pproto_new(strings[name_sid]->data, strings[name_sid]->length);
+        if (proto == NULL || !pmodule_add(module, proto)) {
+            pproto_destroy(proto);
+            result = PPHP_E_NOMEM;
+            goto failed_module;
+        }
+        proto->n_params = bytes[offset];
+        proto->n_required = bytes[offset + 1U];
+        proto->variadic = bytes[offset + 2U];
+        proto->n_locals = bytes[offset + 3U];
+        proto->max_stack = get_u16(bytes, offset + 6U);
+        proto->code = pphp_alloc(code_length);
+        if (code_length != 0U && proto->code == NULL) {
+            result = PPHP_E_NOMEM;
+            goto failed_module;
+        }
+        memcpy(proto->code, bytes + offset + 16U, code_length);
+        proto->code_length = code_length;
+        proto->code_capacity = code_length;
+        offset += 16U + align4(code_length);
+        for (j = 0U; j < constant_count; j++) {
+            pvalue value;
+            uint16_t ignored;
+            uint8_t tag;
+            if (offset + 8U > length) goto failed_module;
+            tag = bytes[offset];
+            if (tag == 0U) {
+                value = pv_int((pphp_int)(int32_t)get_u32(bytes, offset + 4U));
+                offset += 8U;
+            } else if (tag == 1U) {
+                uint32_t bits = get_u32(bytes, offset + 4U);
+                float number;
+                memcpy(&number, &bits, sizeof(number));
+                value = pv_float((pphp_float)number);
+                offset += 8U;
+            } else if (tag == 2U) {
+                uint32_t sid = get_u32(bytes, offset + 4U);
+                if (sid >= n_strings) goto failed_module;
+                value = pv_heap(PT_STRING, &strings[sid]->header);
+                offset += 8U;
+            } else if (tag == 3U) {
+                uint64_t bits;
+                double number;
+                if (offset + 16U > length) goto failed_module;
+                bits = get_u32(bytes, offset + 8U);
+                bits |= (uint64_t)get_u32(bytes, offset + 12U) << 32U;
+                memcpy(&number, &bits, sizeof(number));
+                value = pv_float((pphp_float)number);
+                offset += 16U;
+            } else {
+                goto failed_module;
+            }
+            if (!pproto_add_constant(proto, value, &ignored)) {
+                result = PPHP_E_NOMEM;
+                goto failed_module;
+            }
+        }
+    }
+    result = PPHP_OK;
+    goto done;
+failed_module:
+    pmodule_destroy(module);
+done:
+    for (i = 0U; i < n_strings; i++) {
+        if (strings[i] != NULL) {
+            pv_release(pv_heap(PT_STRING, &strings[i]->header));
+        }
+    }
+    pphp_free(strings);
+    return result;
 }
 
 const char *pphp_opcode_name(uint8_t opcode) {

@@ -3,6 +3,9 @@
 #include "lexer.h"
 #include "parser.h"
 #include "state.h"
+#include "codegen.h"
+#include "disasm.h"
+#include "pbc.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -15,6 +18,8 @@ static void print_usage(FILE *stream) {
             "Usage: php-pico [--version]\n"
             "       php-pico --tokens file.php\n"
             "       php-pico --ast file.php\n"
+            "       php-pico -c input.php -o output.pbc\n"
+            "       php-pico -d file.pbc\n"
             "       php-pico -r 'code'\n"
             "       php-pico file.php\n");
 }
@@ -136,6 +141,89 @@ static int execute_source(const char *source, size_t length, const char *name,
     return result == PPHP_OK ? 0 : (result == PPHP_E_PARSE ? 1 : 255);
 }
 
+static int compile_module(const char *source, size_t length, const char *name,
+                          pmodule *module) {
+    pc_arena arena;
+    pc_parser parser;
+    pc_codegen_error error;
+    pc_ast *program;
+    int result = PPHP_E_PARSE;
+    pc_arena_init(&arena, 4096U);
+    pc_parser_init(&parser, &arena, source, length, 0);
+    program = pc_parse_program(&parser);
+    if (program == NULL) {
+        fprintf(stderr, "Parse error: %s in %s on line %u\n",
+                pc_parser_error(&parser), name, pc_parser_error_line(&parser));
+    } else if (!pc_codegen_program(program, module, &error)) {
+        fprintf(stderr, "Compile error: %s in %s on line %u\n",
+                error.message, name, error.line);
+    } else {
+        result = PPHP_OK;
+    }
+    pc_arena_destroy(&arena);
+    return result;
+}
+
+static int compile_file_to_pbc(const char *input, const char *output) {
+    size_t length = 0U;
+    char *source = read_file(input, &length);
+    pmodule module;
+    int result;
+    if (source == NULL) {
+        return PPHP_E_IO;
+    }
+    result = compile_module(source, length, input, &module);
+    if (result == PPHP_OK) {
+        result = pphp_pbc_write_file(&module, output);
+        if (result != PPHP_OK) {
+            fprintf(stderr, "php-pico: cannot write %s\n", output);
+        }
+        pmodule_destroy(&module);
+    }
+    pphp_free(source);
+    return result;
+}
+
+static int disassemble_file(const char *path) {
+    size_t length = 0U;
+    char *contents = read_file(path, &length);
+    pmodule module;
+    int result;
+    if (contents == NULL) {
+        return PPHP_E_IO;
+    }
+    if (length >= 4U && memcmp(contents, "PPBC", 4U) == 0) {
+        result = pphp_pbc_load(contents, length, &module);
+    } else {
+        result = compile_module(contents, length, path, &module);
+    }
+    if (result == PPHP_OK) {
+        if (!pphp_disassemble_module(stdout, &module)) {
+            result = PPHP_E_PARSE;
+        }
+        pmodule_destroy(&module);
+    } else {
+        fprintf(stderr, "php-pico: invalid bytecode file %s\n", path);
+    }
+    pphp_free(contents);
+    return result;
+}
+
+static int execute_pbc(const void *bytes, size_t length) {
+    pphp_state *state = pphp_open(NULL, 0U);
+    int result;
+    if (state == NULL) {
+        return 255;
+    }
+    pphp_set_output(state, write_stdout, stdout);
+    result = pphp_exec_pbc(state, bytes, length);
+    if (result != PPHP_OK) {
+        fprintf(stderr, "%s\n", pphp_last_error(state));
+    }
+    pphp_close(state);
+    return result == PPHP_OK ? 0 : (result == PPHP_E_PARSE ? 1 : 255);
+}
+
 int main(int argc, char **argv) {
     pphp_pool_init(host_pool, sizeof(host_pool));
     if (argc == 2 && strcmp(argv[1], "--version") == 0) {
@@ -159,6 +247,12 @@ int main(int argc, char **argv) {
     if (argc == 3 && strcmp(argv[1], "-r") == 0) {
         return execute_source(argv[2], strlen(argv[2]), "Command line code", 1);
     }
+    if (argc == 5 && strcmp(argv[1], "-c") == 0 && strcmp(argv[3], "-o") == 0) {
+        return compile_file_to_pbc(argv[2], argv[4]);
+    }
+    if (argc == 3 && strcmp(argv[1], "-d") == 0) {
+        return disassemble_file(argv[2]);
+    }
     if (argc == 2) {
         size_t length = 0U;
         char *source = read_file(argv[1], &length);
@@ -166,7 +260,9 @@ int main(int argc, char **argv) {
         if (source == NULL) {
             return PPHP_E_IO;
         }
-        result = execute_source(source, length, argv[1], 0);
+        result = length >= 4U && memcmp(source, "PPBC", 4U) == 0
+                     ? execute_pbc(source, length)
+                     : execute_source(source, length, argv[1], 0);
         pphp_free(source);
         return result;
     }
