@@ -685,7 +685,7 @@ const char *pphp_opcode_name(uint8_t opcode) {
         case OP_INSTANCEOF: return "INSTANCEOF";
         case OP_CLOSURE: return "CLOSURE";
         case OP_THROW: return "THROW";
-        case OP_RETHROW: return "RETHROW";
+        case OP_CLONE: return "CLONE";
         case OP_DEF_CLASS: return "DEF_CLASS";
         case OP_DEF_METHOD: return "DEF_METHOD";
         case OP_DEF_PROP: return "DEF_PROP";

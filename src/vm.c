@@ -230,11 +230,10 @@ static int throw_exception(pphp_state *state, pvalue exception,
                     pv_release(state->stack[frame->base + entry->variable_slot]);
                     state->stack[frame->base + entry->variable_slot] = exception;
                 } else {
-                    if (state->has_pending_exception) {
-                        pv_release(state->pending_exception);
-                    }
-                    state->pending_exception = exception;
-                    state->has_pending_exception = 1;
+                    pv_release(exception);
+                    pphp_runtime_error(state, frame->line,
+                                       "finally handler has no pending exception slot");
+                    return 0;
                 }
             } else if (entry->variable_slot != UINT8_MAX &&
                        entry->variable_slot < frame->proto->n_locals) {
@@ -1320,18 +1319,31 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                 }
                 break;
             }
-            case OP_RETHROW:
-                if (!state->has_pending_exception) {
+            case OP_CLONE: {
+                pvalue source = pop(state);
+                pobject *copy;
+                const pmethod *clone_method;
+                if (source.type != PT_OBJECT) {
+                    pv_release(source);
                     pphp_runtime_error(state, frame->line,
-                                       "RETHROW without pending exception");
-                } else {
-                    pvalue exception = state->pending_exception;
-                    state->pending_exception = pv_null();
-                    state->has_pending_exception = 0;
-                    (void)throw_exception(state, exception, instruction_pc);
-                    exception_processed = 1;
+                                       "__clone method called on non-object");
+                    break;
+                }
+                copy = pobject_clone((const pobject *)source.as.gc);
+                pv_release(source);
+                if (copy == NULL) {
+                    pphp_runtime_error(state, frame->line,
+                                       "out of memory cloning object");
+                    break;
+                }
+                (void)push(state, pv_heap(PT_OBJECT, &copy->header));
+                clone_method = pclass_find_method(copy->class_entry,
+                                                  "__clone", 7U);
+                if (clone_method != NULL) {
+                    (void)enter_method(state, frame, clone_method, 0U, 1);
                 }
                 break;
+            }
             case OP_LINE:
                 frame->line = read_u16(state, frame);
                 break;
@@ -1353,11 +1365,6 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
         release_range(state, 0U, state->stack_count);
         state->stack_count = 0U;
         state->frame_count = 0U;
-        if (state->has_pending_exception) {
-            pv_release(state->pending_exception);
-            state->pending_exception = pv_null();
-            state->has_pending_exception = 0;
-        }
         return PPHP_E_RUNTIME;
     }
     return PPHP_OK;

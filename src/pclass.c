@@ -161,6 +161,26 @@ pobject *pobject_new(pclass *class_entry) {
     return object;
 }
 
+pobject *pobject_clone(const pobject *source) {
+    pobject *copy;
+    size_t i;
+    uint8_t *written;
+    const uint8_t *source_written;
+    if (source == NULL) return NULL;
+    copy = pobject_new(source->class_entry);
+    if (copy == NULL) return NULL;
+    for (i = 0U; i < source->class_entry->property_count; i++) {
+        pv_release(copy->slots[i]);
+        copy->slots[i] = source->slots[i];
+        pv_retain(copy->slots[i]);
+    }
+    written = (uint8_t *)(copy->slots + source->class_entry->property_count);
+    source_written = (const uint8_t *)(
+        source->slots + source->class_entry->property_count);
+    memcpy(written, source_written, source->class_entry->property_count);
+    return copy;
+}
+
 int pclass_is_a(const pclass *class_entry, const pclass *expected) {
     while (class_entry != NULL) {
         if (class_entry == expected) return 1;

@@ -440,6 +440,24 @@ TEST(static_closures_reject_this_binding) {
     ASSERT_TRUE(strstr(error, "cannot use $this") != NULL);
 }
 
+TEST(clone_copies_property_slots_and_invokes_clone_hook) {
+    const char *source =
+        "class Copyable {"
+        " public $value = 1;"
+        " public function __clone() { $this->value = $this->value + 1; }"
+        "}"
+        "$original = new Copyable(); $copy = clone $original;"
+        "echo $original->value, ':', $copy->value, ':',"
+        " (($original === $copy) ? 1 : 0);";
+    output_buffer output;
+    ASSERT_EQ(PPHP_OK, execute(source, &output, NULL, 0U));
+    ASSERT_STR("1:2:0", output.bytes);
+    ASSERT_EQ(PPHP_OK,
+              execute("try { clone 1; } catch (Error) { echo 'caught'; }",
+                      &output, NULL, 0U));
+    ASSERT_STR("caught", output.bytes);
+}
+
 int main(void) {
     static const test_case tests[] = {
         {"arithmetic VM", arithmetic_runs_through_compiler_and_vm},
@@ -471,7 +489,8 @@ int main(void) {
         {"nested arrow captures", nested_arrows_retain_transitive_captures},
         {"bound this closures", method_closures_bind_this_by_value},
         {"callable values", call_value_supports_strings_method_arrays_and_invokable_objects},
-        {"static closure this", static_closures_reject_this_binding}
+        {"static closure this", static_closures_reject_this_binding},
+        {"object clone", clone_copies_property_slots_and_invokes_clone_hook}
     };
     return run_tests(tests, sizeof(tests) / sizeof(tests[0]));
 }

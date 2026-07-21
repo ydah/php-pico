@@ -63,6 +63,7 @@ const pproperty *pclass_find_property(const pclass *class_entry,
 const pmethod *pclass_find_method(const pclass *class_entry,
                                   const char *name, size_t length);
 pobject *pobject_new(pclass *class_entry);
+pobject *pobject_clone(const pobject *source);
 void pobject_destroy(pobject *object);
 int pclass_is_a(const pclass *class_entry, const pclass *expected);
 int pclass_member_visible(uint8_t flags, const pclass *owner,

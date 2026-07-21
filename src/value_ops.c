@@ -227,6 +227,11 @@ int pv_compare(pvalue left, pvalue right, int strict, int *result,
         *result = left.type < right.type ? -1 : 1;
         return 1;
     }
+    if (strict && (left.type == PT_OBJECT || left.type == PT_CLOSURE ||
+                   left.type == PT_RESOURCE)) {
+        *result = left.as.gc == right.as.gc ? 0 : 1;
+        return 1;
+    }
     if (left.type == PT_ARRAY && right.type == PT_ARRAY) {
         const parray *left_array = (const parray *)left.as.gc;
         const parray *right_array = (const parray *)right.as.gc;

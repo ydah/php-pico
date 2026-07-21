@@ -889,6 +889,7 @@ static void compile_expression(generator *gen, const pc_ast *node) {
             if (node->as.unary.op == T_MINUS) emit_byte(gen, OP_NEG, node->line);
             else if (node->as.unary.op == T_BANG) emit_byte(gen, OP_NOT, node->line);
             else if (node->as.unary.op == T_TILDE) emit_byte(gen, OP_BNOT, node->line);
+            else if (node->as.unary.op == T_CLONE) emit_byte(gen, OP_CLONE, node->line);
             else if (node->as.unary.op != T_PLUS) {
                 fail(gen, node->line, "unsupported unary operator");
             }
