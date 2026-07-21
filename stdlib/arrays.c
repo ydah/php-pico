@@ -571,8 +571,10 @@ static void release_array_storage(parray *array) {
 
 static void replace_array_storage(parray *target, parray *replacement) {
     uint16_t references = target->header.refcnt;
+    uint8_t runtime_flags = target->header.flags & (uint8_t)~PARRAY_PACKED;
     release_array_storage(target);
-    target->header.flags = replacement->header.flags;
+    target->header.flags = runtime_flags |
+                           (replacement->header.flags & PARRAY_PACKED);
     target->size = replacement->size;
     target->used = replacement->used;
     target->capacity = replacement->capacity;

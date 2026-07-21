@@ -1,5 +1,7 @@
 #include "parray.h"
 
+#include "gc.h"
+
 #include "pphp/pphp.h"
 #include "pstring.h"
 
@@ -191,7 +193,7 @@ parray *pa_clone(const parray *array) {
     parray *copy = pa_new(array->capacity);
     size_t i;
     if (copy == NULL) return NULL;
-    copy->header.flags = array->header.flags;
+    copy->header.flags = array->header.flags & PARRAY_PACKED;
     copy->size = array->size;
     copy->used = array->used;
     copy->next_index = array->next_index;
@@ -213,6 +215,7 @@ parray *pa_clone(const parray *array) {
 void pa_destroy(parray *array) {
     size_t i;
     if (array == NULL) return;
+    pphp_gc_unbuffer(&array->header);
     for (i = 0U; i < array->used; i++) {
         if (array->entries[i].key.type != PT_NULL) {
             pv_release(array->entries[i].key);

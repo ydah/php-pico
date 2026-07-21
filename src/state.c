@@ -103,6 +103,7 @@ pphp_state *pphp_open(void *pool, size_t pool_size) {
         pphp_close(state);
         return NULL;
     }
+    pphp_gc_set_state(state);
     return state;
 }
 
@@ -127,6 +128,7 @@ void pphp_close(pphp_state *state) {
     }
     pphp_free(state->native_functions);
     psymbol_destroy(&state->symbols);
+    pphp_gc_set_state(NULL);
     pphp_free(state);
 }
 

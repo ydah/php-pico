@@ -9,6 +9,7 @@
 #include "closure.h"
 #include "value_ops.h"
 #include "pgems.h"
+#include "gc.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -1244,6 +1245,7 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
         size_t instruction_pc = frame->pc;
         int exception_processed = 0;
         uint8_t opcode = read_u8(state, frame);
+        pphp_gc_maybe_collect(state);
         if (state->processed_ticks != state->ticks) {
             state->processed_ticks = state->ticks;
             if (hal_interrupt_requested()) {

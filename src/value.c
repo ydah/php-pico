@@ -5,6 +5,7 @@
 #include "resource.h"
 #include "pclass.h"
 #include "closure.h"
+#include "gc.h"
 
 #include <string.h>
 
@@ -91,6 +92,7 @@ void pv_release(pvalue value) {
     }
     header->refcnt--;
     if (header->refcnt != 0U) {
+        pphp_gc_buffer(header);
         return;
     }
     switch ((pvalue_type)value.type) {

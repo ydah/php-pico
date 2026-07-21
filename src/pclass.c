@@ -1,5 +1,6 @@
 #include "pclass.h"
 
+#include "gc.h"
 #include "pphp/pphp.h"
 #include "state.h"
 
@@ -422,6 +423,7 @@ void pobject_mark_property_written(pobject *object, uint8_t slot) {
 void pobject_destroy(pobject *object) {
     size_t i;
     if (object == NULL) return;
+    pphp_gc_unbuffer(&object->header);
     if (object->owner_state != NULL &&
         (object->header.flags & UINT8_C(0xc0)) == 0U) {
         const pmethod *destructor = pclass_find_method(

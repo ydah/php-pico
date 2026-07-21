@@ -874,6 +874,17 @@ TEST(cycle_collector_reclaims_self_and_mutual_object_cycles) {
     ASSERT_STR("1:2:0", output.bytes);
 }
 
+TEST(cycle_collector_traverses_closure_captures) {
+    const char *source =
+        "class Holder { public $callback; }"
+        "$holder = new Holder();"
+        "$holder->callback = function () use ($holder) { return $holder; };"
+        "unset($holder); echo gc_collect_cycles(), ':', gc_collect_cycles();";
+    output_buffer output;
+    ASSERT_EQ(PPHP_OK, execute(source, &output, NULL, 0U));
+    ASSERT_STR("2:0", output.bytes);
+}
+
 TEST(file_builtins_cover_whole_file_stream_and_path_operations) {
     const char *source =
         "$path = 'build/host/php_pico_file_test.txt';"
@@ -1047,6 +1058,7 @@ int main(void) {
         {"static and magic class features", static_class_members_promotion_and_magic_methods_execute},
         {"interface, abstract, and final contracts", interfaces_and_abstract_final_contracts_are_enforced},
         {"object cycle collection", cycle_collector_reclaims_self_and_mutual_object_cycles},
+        {"mixed container cycle collection", cycle_collector_traverses_closure_captures},
         {"file builtins", file_builtins_cover_whole_file_stream_and_path_operations},
         {"include and require", include_once_loads_definitions_and_require_reports_missing_files},
         {"public native extension API", public_c_api_registers_functions_classes_methods_and_native_data},

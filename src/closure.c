@@ -1,6 +1,7 @@
 #include "closure.h"
 
 #include "pphp/pphp.h"
+#include "gc.h"
 
 pclosure *pclosure_new(const pproto *proto, const pmodule *module,
                        struct pclass *called_scope,
@@ -30,6 +31,7 @@ pclosure *pclosure_new(const pproto *proto, const pmodule *module,
 void pclosure_destroy(pclosure *closure) {
     size_t i;
     if (closure == NULL) return;
+    pphp_gc_unbuffer(&closure->header);
     for (i = 0U; i < closure->capture_count; i++) {
         pv_release(closure->captures[i]);
     }
