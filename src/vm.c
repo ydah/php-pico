@@ -13,7 +13,45 @@
 
 #include <stdarg.h>
 #include <stdio.h>
+#if defined(PPHP_HOST)
+#include <stdlib.h>
+#endif
 #include <string.h>
+
+static int trace_enabled(void) {
+#if PPHP_TRACE
+    return 1;
+#elif defined(PPHP_HOST)
+    static int cached = -1;
+    if (cached < 0) {
+        const char *enabled = getenv("PPHP_TRACE");
+        cached = enabled != NULL && enabled[0] != '\0' &&
+                 !(enabled[0] == '0' && enabled[1] == '\0');
+    }
+    return cached;
+#else
+    return 0;
+#endif
+}
+
+static void trace_instruction(const pphp_state *state, const pframe *frame,
+                              size_t pc, uint8_t opcode) {
+    char line[112];
+    int length;
+    if (!trace_enabled()) return;
+    length = snprintf(line, sizeof(line),
+                      "TRACE %.*s pc=%04zu op=%s stack=%zu\n",
+                      (int)frame->proto->name->length,
+                      frame->proto->name->data, pc,
+                      pphp_opcode_name(opcode), state->stack_count);
+    if (length <= 0) return;
+    if ((size_t)length >= sizeof(line)) length = (int)sizeof(line) - 1;
+#if defined(PPHP_HOST)
+    (void)fwrite(line, 1U, (size_t)length, stderr);
+#else
+    hal_console_write(line, (size_t)length);
+#endif
+}
 
 static int push(pphp_state *state, pvalue value) {
     if (state->stack_count >= PPHP_STACK_SLOTS) {
@@ -433,13 +471,14 @@ static int throw_exception(pphp_state *state, pvalue exception,
                             ? (uint32_t)line_value->as.i
                             : 0U;
         pphp_runtime_error(state, line,
-                           "PHP Fatal error: Uncaught %.*s: %.*s in %.*s:%u",
+                           "PHP Fatal error: Uncaught %.*s: %.*s in %.*s:%lu",
                            (int)object->class_entry->name->length,
                            object->class_entry->name->data,
                            message == NULL ? 0 : (int)message->length,
                            message == NULL ? "" : message->data,
                            file == NULL ? 8 : (int)file->length,
-                           file == NULL ? "<source>" : file->data, line);
+                           file == NULL ? "<source>" : file->data,
+                           (unsigned long)line);
     } else {
         pphp_runtime_error(state, 0U, "Uncaught non-object exception");
     }
@@ -1245,6 +1284,7 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
         size_t instruction_pc = frame->pc;
         int exception_processed = 0;
         uint8_t opcode = read_u8(state, frame);
+        trace_instruction(state, frame, instruction_pc, opcode);
         pphp_gc_maybe_collect(state);
         if (state->processed_ticks != state->ticks) {
             state->processed_ticks = state->ticks;

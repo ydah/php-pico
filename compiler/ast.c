@@ -173,7 +173,7 @@ static void dump_node(FILE *stream, const pc_ast *node, unsigned depth) {
         default:
             break;
     }
-    fprintf(stream, " @%u\n", node->line);
+    fprintf(stream, " @%lu\n", (unsigned long)node->line);
     switch (node->kind) {
         case AST_PROGRAM:
         case AST_BLOCK:

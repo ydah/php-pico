@@ -351,9 +351,10 @@ int pphp_pbc_write_file(const pmodule *module, const char *path) {
     if (bytes == NULL) goto done;
     memset(bytes, 0, total);
     memcpy(bytes, "PPBC", 4U);
-    put_u16(bytes, 4U, 2U);
+    put_u16(bytes, 4U, (uint16_t)PPHP_PBC_FORMAT_VERSION);
     put_u16(bytes, 6U, (uint16_t)((PPHP_INT64 ? 1U : 0U) |
-                                  (PPHP_USE_DOUBLE ? 2U : 0U)));
+                                  (PPHP_USE_DOUBLE ? 2U : 0U) |
+                                  (PPHP_LINE_INFO ? 4U : 0U)));
     put_u32(bytes, 8U, (uint32_t)total);
     put_u16(bytes, 12U, (uint16_t)module->count);
     put_u16(bytes, 14U, (uint16_t)strings.count);
@@ -495,6 +496,10 @@ int pphp_pbc_read_file(const char *path, pmodule *module) {
 
 int pphp_pbc_load(const void *data, size_t length, pmodule *module) {
     const uint8_t *bytes = data;
+    const uint16_t expected_flags =
+        (uint16_t)((PPHP_INT64 ? 1U : 0U) |
+                   (PPHP_USE_DOUBLE ? 2U : 0U) |
+                   (PPHP_LINE_INFO ? 4U : 0U));
     uint16_t n_protos;
     uint16_t n_strings;
     size_t table_end;
@@ -502,7 +507,9 @@ int pphp_pbc_load(const void *data, size_t length, pmodule *module) {
     size_t i;
     int result = PPHP_E_PARSE;
     if (bytes == NULL || length < 16U || memcmp(bytes, "PPBC", 4U) != 0 ||
-        get_u16(bytes, 4U) != 2U || get_u32(bytes, 8U) != length) {
+        get_u16(bytes, 4U) != (uint16_t)PPHP_PBC_FORMAT_VERSION ||
+        get_u16(bytes, 6U) != expected_flags ||
+        get_u32(bytes, 8U) != length) {
         return PPHP_E_PARSE;
     }
     n_protos = get_u16(bytes, 12U);

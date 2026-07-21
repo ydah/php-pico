@@ -4,6 +4,7 @@
 #include "p2sh_device.h"
 #include "state.h"
 
+#include "hardware/sync.h"
 #include "pico/stdlib.h"
 
 #include <stdio.h>

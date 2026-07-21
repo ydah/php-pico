@@ -161,12 +161,13 @@ void pphp_exception_capture_trace(pphp_state *state, pobject *object) {
     for (depth = state->frame_count; depth > 0U && length < sizeof(buffer); depth--) {
         const pframe *frame = &state->frames[depth - 1U];
         int written = snprintf(buffer + length, sizeof(buffer) - length,
-                               "#%zu %.*s:%u %.*s()\n",
+                               "#%zu %.*s:%lu %.*s()\n",
                                state->frame_count - depth,
                                (int)strlen(state->chunk_name == NULL
                                                ? "<source>" : state->chunk_name),
                                state->chunk_name == NULL ? "<source>" : state->chunk_name,
-                               frame->line, (int)frame->proto->name->length,
+                               (unsigned long)frame->line,
+                               (int)frame->proto->name->length,
                                frame->proto->name->data);
         if (written < 0) break;
         if ((size_t)written >= sizeof(buffer) - length) {

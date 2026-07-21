@@ -178,6 +178,18 @@ TEST(pbc_serialization_round_trips_through_loader) {
     ASSERT_TRUE(pc_codegen_program(program, &original, &error));
     pc_arena_destroy(&arena);
     ASSERT_EQ(PPHP_OK, pphp_pbc_write_file(&original, path));
+    {
+        FILE *file = fopen(path, "r+b");
+        int flags = (PPHP_INT64 ? 1 : 0) |
+                    (PPHP_USE_DOUBLE ? 2 : 0) |
+                    (PPHP_LINE_INFO ? 4 : 0);
+        ASSERT_TRUE(file != NULL);
+        ASSERT_EQ(0, fseek(file, 6L, SEEK_SET));
+        ASSERT_EQ(flags ^ 1, fputc(flags ^ 1, file));
+        ASSERT_EQ(0, fclose(file));
+        ASSERT_EQ(PPHP_E_PARSE, pphp_pbc_read_file(path, &loaded));
+        ASSERT_EQ(PPHP_OK, pphp_pbc_write_file(&original, path));
+    }
     pmodule_destroy(&original);
     ASSERT_EQ(PPHP_OK, pphp_pbc_read_file(path, &loaded));
     memset(&output, 0, sizeof(output));
@@ -752,14 +764,18 @@ TEST(json_builtins_round_trip_ordered_arrays_and_pretty_output) {
         " 'name' => 'pico', 'values' => [1, true, null], 'slash' => 'a/b'"
         "]);"
         "$decoded = json_decode($json);"
+        "$numbers = json_decode('[-12,1.25,2e3,2147483648,1e999999999999999999]');"
         "$pretty = json_encode(['a' => 1, 'b' => [true, null]],"
         " JSON_PRETTY_PRINT);"
         "echo $json, ':', $decoded['name'], ':', $decoded['values'][1], ':',"
         " str_replace(\"\\n\", '|', $pretty), ':',"
-        " (json_decode('{bad') === null ? 1 : 0);";
+        " (json_decode('{bad') === null ? 1 : 0), ':',"
+        " $numbers[0], ':', $numbers[1], ':', $numbers[2], ':',"
+        " (is_float($numbers[3]) ? 1 : 0), ':',"
+        " (is_float($numbers[4]) ? 1 : 0);";
     output_buffer output;
     ASSERT_EQ(PPHP_OK, execute(source, &output, NULL, 0U));
-    ASSERT_STR("{\"name\":\"pico\",\"values\":[1,true,null],\"slash\":\"a\\/b\"}:pico:1:{|    \"a\": 1,|    \"b\": [|        true,|        null|    ]|}:1",
+    ASSERT_STR("{\"name\":\"pico\",\"values\":[1,true,null],\"slash\":\"a\\/b\"}:pico:1:{|    \"a\": 1,|    \"b\": [|        true,|        null|    ]|}:1:-12:1.25:2000:1:1",
                output.bytes);
 }
 

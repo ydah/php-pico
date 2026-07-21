@@ -2,10 +2,10 @@
 
 #include "parray.h"
 #include "pclass.h"
+#include "value_ops.h"
 
 #include <math.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
 typedef struct json_buffer {
@@ -437,8 +437,6 @@ static pvalue parse_number(json_parser *parser) {
     size_t start = parser->position;
     size_t length;
     int floating = 0;
-    char bytes[96];
-    char *end;
     if (parser->bytes[parser->position] == '-') parser->position++;
     if (parser->position >= parser->length) goto invalid;
     if (parser->bytes[parser->position] == '0') {
@@ -478,19 +476,22 @@ static pvalue parse_number(json_parser *parser) {
                parser->bytes[parser->position] <= '9') parser->position++;
     }
     length = parser->position - start;
-    if (length >= sizeof(bytes)) goto invalid;
-    memcpy(bytes, parser->bytes + start, length);
-    bytes[length] = '\0';
-    if (!floating) {
-        long long integer = strtoll(bytes, &end, 10);
-        if (*end == '\0' && integer >= INT32_MIN && integer <= INT32_MAX) {
-            return pv_int((pphp_int)integer);
-        }
-    }
     {
-        double number = strtod(bytes, &end);
-        if (*end != '\0') goto invalid;
-        return pv_float((pphp_float)number);
+        pstring *text = ps_new(parser->bytes + start, length);
+        pphp_float number;
+        int integer;
+        if (text == NULL) goto invalid;
+        if (!pv_to_number(pv_heap(PT_STRING, &text->header),
+                          &number, &integer)) {
+            ps_destroy(text);
+            goto invalid;
+        }
+        ps_destroy(text);
+        if (!floating && integer && number >= (pphp_float)INT32_MIN &&
+            number <= (pphp_float)INT32_MAX) {
+            return pv_int((pphp_int)number);
+        }
+        return pv_float(number);
     }
 invalid:
     parser->failed = 1;

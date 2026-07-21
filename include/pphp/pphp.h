@@ -11,7 +11,8 @@
 extern "C" {
 #endif
 
-#define PPHP_VERSION "0.1.0-dev"
+#define PPHP_VERSION "1.0.0"
+#define PPHP_PBC_FORMAT_VERSION 2U
 
 enum {
     PPHP_OK = 0,

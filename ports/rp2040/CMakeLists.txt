@@ -8,10 +8,15 @@ if(NOT DEFINED PICO_SDK_PATH)
 endif()
 include(${PICO_SDK_PATH}/external/pico_sdk_import.cmake)
 
-project(php_pico C CXX ASM)
-set(CMAKE_C_STANDARD 99)
+project(php_pico VERSION 1.0.0 LANGUAGES C CXX ASM)
+# pico-sdk 2.3 headers use C11 static_assert; php-pico sources remain C99.
+set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
 pico_sdk_init()
+
+# The firmware is C-only and never uses new/delete. Avoid pulling the SDK's
+# C++ allocation shim (and a full target libstdc++) into the release image.
+set_property(TARGET pico_cxx_options PROPERTY INTERFACE_SOURCES "")
 
 get_filename_component(PPHP_ROOT "${CMAKE_CURRENT_LIST_DIR}/../.." ABSOLUTE)
 
@@ -52,9 +57,14 @@ set(PPHP_SOURCES
 )
 
 set_source_files_properties(
+  ${PPHP_SOURCES}
+  PROPERTIES COMPILE_OPTIONS "-Wall;-Wextra;-Werror;-Wpedantic;-Wconversion;-Wshadow"
+)
+
+set_source_files_properties(
   ${PPHP_ROOT}/third_party/littlefs/lfs.c
   ${PPHP_ROOT}/third_party/littlefs/lfs_util.c
-  PROPERTIES COMPILE_OPTIONS "-Wno-conversion;-Wno-shadow"
+  PROPERTIES COMPILE_OPTIONS "-Wall;-Wextra;-Wno-conversion;-Wno-shadow;-Wno-unused-function"
 )
 
 add_executable(php-pico ${PPHP_SOURCES})
@@ -64,14 +74,14 @@ target_include_directories(php-pico PRIVATE
   ${PPHP_ROOT}/compiler
   ${PPHP_ROOT}/stdlib
   ${PPHP_ROOT}/pgems
+  ${PPHP_ROOT}/shell
 )
 target_include_directories(php-pico SYSTEM PRIVATE
   ${PPHP_ROOT}/third_party/littlefs
 )
 target_compile_definitions(php-pico PRIVATE LFS_NO_MALLOC=1)
 target_compile_options(php-pico PRIVATE
-  -Os -ffunction-sections -fdata-sections
-  -Wall -Wextra -Werror -Wpedantic -Wconversion -Wshadow
+  -Os -fmerge-all-constants -ffunction-sections -fdata-sections
 )
 target_link_options(php-pico PRIVATE -Wl,--gc-sections)
 target_link_libraries(php-pico
@@ -89,6 +99,16 @@ target_link_libraries(php-pico
   hardware_uart
   hardware_watchdog
 )
+pico_minimize_runtime(php-pico INCLUDE
+  DEFAULT_ALARM_POOL
+  PRINTF PRINTF_MINIMAL PRINTF_FLOAT PRINTF_EXPONENTIAL PRINTF_LONG_LONG
+  FLOAT DOUBLE
+)
 pico_enable_stdio_usb(php-pico 1)
 pico_enable_stdio_uart(php-pico 1)
 pico_add_extra_outputs(php-pico)
+add_custom_command(TARGET php-pico POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          ${CMAKE_CURRENT_BINARY_DIR}/php-pico.uf2
+          ${CMAKE_CURRENT_BINARY_DIR}/php-pico-${PROJECT_VERSION}.uf2
+)

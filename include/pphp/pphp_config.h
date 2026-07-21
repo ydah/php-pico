@@ -35,6 +35,10 @@
 #define PPHP_LINE_INFO 1
 #endif
 
+#ifndef PPHP_TRACE
+#define PPHP_TRACE 0
+#endif
+
 #ifndef PPHP_TYPECHECK
 #define PPHP_TYPECHECK 0
 #endif

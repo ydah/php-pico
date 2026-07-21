@@ -6,10 +6,14 @@ temporary=$(mktemp -d "${TMPDIR:-/tmp}/php-pico-cli.XXXXXX")
 trap 'rm -rf "$temporary"' EXIT HUP INT TERM
 
 version=$($binary --version)
-test "$version" = "php-pico 0.1.0-dev"
+test "$version" = "php-pico 1.0.0"
 
 inline=$($binary -r "echo 6 * 7;")
 test "$inline" = "42"
+
+trace=$(PPHP_TRACE=1 $binary -r "echo 1;" 2>&1)
+printf '%s\n' "$trace" | grep -q 'op=ECHO'
+printf '%s\n' "$trace" | grep -q '^1$'
 
 repl=$(printf '%s\n' \
     '1 + 2' \
@@ -47,7 +51,7 @@ shell_output=$(printf '%s\n' \
     "php $temporary/shell.pbc" \
     'free' \
     'quit' | $binary --shell)
-printf '%s\n' "$shell_output" | grep -q 'php-pico 0.1.0-dev'
+printf '%s\n' "$shell_output" | grep -q 'php-pico 1.0.0'
 printf '%s\n' "$shell_output" | grep -q 'shell-data'
 printf '%s\n' "$shell_output" | grep -q '81'
 printf '%s\n' "$shell_output" | grep -q 'total='

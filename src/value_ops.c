@@ -48,7 +48,11 @@ static int string_number(const char *text, size_t length, pphp_float *number,
             exponent_sign = text[i++] == '-' ? -1 : 1;
         }
         while (i < length && text[i] >= '0' && text[i] <= '9') {
-            exponent = exponent * 10 + (text[i++] - '0');
+            if (exponent < 10000) {
+                exponent = exponent * 10 + (text[i] - '0');
+                if (exponent > 10000) exponent = 10000;
+            }
+            i++;
             exponent_digits++;
         }
         if (exponent_digits == 0) {

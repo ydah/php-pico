@@ -84,7 +84,7 @@ static int find_bytes(const pstring *haystack, const pstring *needle,
         return 1;
     }
     if (needle->length > haystack->length ||
-        start > haystack->length - needle->length) return 0;
+        start > (size_t)haystack->length - (size_t)needle->length) return 0;
     if (reverse) {
         i = haystack->length - needle->length;
         for (;;) {

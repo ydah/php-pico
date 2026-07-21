@@ -145,7 +145,9 @@ static int gpio_write_level(pphp_ctx *context, int fixed) {
     if (data == NULL) return -1;
     if (hal_failed(context, "GPIO write",
                    hal_gpio_write(data->pin.pin,
-                                  level == 0 ? 0U : 1U)) < 0) return -1;
+                                  (uint8_t)(level == 0 ? 0U : 1U))) < 0) {
+        return -1;
+    }
     pphp_ret_null(context);
     return 0;
 }
