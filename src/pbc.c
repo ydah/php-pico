@@ -1,6 +1,7 @@
 #include "pbc.h"
 
 #include "opcode.h"
+#include "pphp/fs.h"
 #include "pphp/pphp.h"
 
 #include <limits.h>
@@ -314,7 +315,7 @@ int pphp_pbc_write_file(const pmodule *module, const char *path) {
     size_t offset;
     size_t i;
     uint8_t *bytes = NULL;
-    FILE *file = NULL;
+    pphp_file *file = NULL;
     int result = PPHP_E_NOMEM;
     if (module == NULL || module->count == 0U || module->count > UINT16_MAX ||
         path == NULL || !collect_strings(module, &strings)) {
@@ -445,14 +446,15 @@ int pphp_pbc_write_file(const pmodule *module, const char *path) {
             offset += 10U;
         }
     }
-    file = fopen(path, "wb");
+    file = pphp_fs_open(path, "wb");
     if (file == NULL) {
         result = PPHP_E_IO;
         goto done;
     }
-    result = fwrite(bytes, 1U, total, file) == total ? PPHP_OK : PPHP_E_IO;
+    result = pphp_fs_write(file, bytes, total) == (int64_t)total
+                 ? PPHP_OK : PPHP_E_IO;
 done:
-    if (file != NULL && fclose(file) != 0 && result == PPHP_OK) {
+    if (file != NULL && !pphp_fs_close(file) && result == PPHP_OK) {
         result = PPHP_E_IO;
     }
     pphp_free(bytes);
@@ -463,29 +465,30 @@ done:
 }
 
 int pphp_pbc_read_file(const char *path, pmodule *module) {
-    FILE *file = fopen(path, "rb");
-    long file_size;
+    pphp_file *file = pphp_fs_open(path, "rb");
+    int64_t file_size;
     uint8_t *bytes;
-    size_t read_count;
+    int64_t read_count;
     int result;
     if (file == NULL) return PPHP_E_IO;
-    if (fseek(file, 0L, SEEK_END) != 0 || (file_size = ftell(file)) < 0L ||
-        fseek(file, 0L, SEEK_SET) != 0) {
-        (void)fclose(file);
+    file_size = pphp_fs_seek(file, 0, PPHP_FS_SEEK_END);
+    if (file_size < 0 || (uint64_t)file_size > (uint64_t)SIZE_MAX ||
+        pphp_fs_seek(file, 0, PPHP_FS_SEEK_SET) < 0) {
+        (void)pphp_fs_close(file);
         return PPHP_E_IO;
     }
     bytes = pphp_alloc((size_t)file_size);
     if (bytes == NULL) {
-        (void)fclose(file);
+        (void)pphp_fs_close(file);
         return PPHP_E_NOMEM;
     }
-    read_count = fread(bytes, 1U, (size_t)file_size, file);
-    (void)fclose(file);
-    if (read_count != (size_t)file_size) {
+    read_count = pphp_fs_read(file, bytes, (size_t)file_size);
+    (void)pphp_fs_close(file);
+    if (read_count != file_size) {
         pphp_free(bytes);
         return PPHP_E_IO;
     }
-    result = pphp_pbc_load(bytes, read_count, module);
+    result = pphp_pbc_load(bytes, (size_t)read_count, module);
     pphp_free(bytes);
     return result;
 }

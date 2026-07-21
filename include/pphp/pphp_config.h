@@ -63,6 +63,10 @@
 #define PPHP_HEAP_SIZE (128U * 1024U)
 #endif
 
+#ifndef PPHP_FLASH_FS_SIZE
+#define PPHP_FLASH_FS_SIZE (1024U * 1024U)
+#endif
+
 #ifndef PPHP_PARSE_DEPTH_MAX
 #define PPHP_PARSE_DEPTH_MAX 64
 #endif

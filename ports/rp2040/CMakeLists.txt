@@ -40,8 +40,17 @@ set(PPHP_SOURCES
   ${PPHP_ROOT}/stdlib/system.c
   ${PPHP_ROOT}/stdlib/files.c
   ${PPHP_ROOT}/pgems/pgems.c
+  ${PPHP_ROOT}/fs/fs_lfs.c
+  ${PPHP_ROOT}/third_party/littlefs/lfs.c
+  ${PPHP_ROOT}/third_party/littlefs/lfs_util.c
   ${PPHP_ROOT}/hal/rp2040/hal_rp2040.c
   ${CMAKE_CURRENT_LIST_DIR}/main.c
+)
+
+set_source_files_properties(
+  ${PPHP_ROOT}/third_party/littlefs/lfs.c
+  ${PPHP_ROOT}/third_party/littlefs/lfs_util.c
+  PROPERTIES COMPILE_OPTIONS "-Wno-conversion;-Wno-shadow"
 )
 
 add_executable(php-pico ${PPHP_SOURCES})
@@ -52,6 +61,10 @@ target_include_directories(php-pico PRIVATE
   ${PPHP_ROOT}/stdlib
   ${PPHP_ROOT}/pgems
 )
+target_include_directories(php-pico SYSTEM PRIVATE
+  ${PPHP_ROOT}/third_party/littlefs
+)
+target_compile_definitions(php-pico PRIVATE LFS_NO_MALLOC=1)
 target_compile_options(php-pico PRIVATE
   -Os -ffunction-sections -fdata-sections
   -Wall -Wextra -Werror -Wpedantic -Wconversion -Wshadow
