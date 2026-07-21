@@ -1,0 +1,177 @@
+#ifndef PPHP_AST_H
+#define PPHP_AST_H
+
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+
+#include "lexer.h"
+
+typedef enum pc_ast_kind {
+    AST_PROGRAM = 0,
+    AST_BLOCK,
+    AST_NULL,
+    AST_BOOL,
+    AST_INT,
+    AST_FLOAT,
+    AST_STRING,
+    AST_VARIABLE,
+    AST_IDENTIFIER,
+    AST_UNARY,
+    AST_BINARY,
+    AST_ASSIGN,
+    AST_TERNARY,
+    AST_CALL,
+    AST_INDEX,
+    AST_MEMBER,
+    AST_ARRAY,
+    AST_ARRAY_ITEM,
+    AST_EXPR_STMT,
+    AST_ECHO,
+    AST_IF,
+    AST_WHILE,
+    AST_DO_WHILE,
+    AST_FOR,
+    AST_FOREACH,
+    AST_SWITCH,
+    AST_CASE,
+    AST_BREAK,
+    AST_CONTINUE,
+    AST_RETURN,
+    AST_THROW,
+    AST_GLOBAL,
+    AST_STATIC,
+    AST_CONST,
+    AST_FUNCTION,
+    AST_PARAM,
+    AST_INCLUDE,
+    AST_UNSET,
+    AST_ISSET,
+    AST_EMPTY
+} pc_ast_kind;
+
+typedef struct pc_ast pc_ast;
+
+struct pc_ast {
+    pc_ast_kind kind;
+    uint32_t line;
+    pc_ast *next;
+    union {
+        struct {
+            pc_token token;
+        } literal;
+        struct {
+            pc_token name;
+        } named;
+        struct {
+            pc_token_type op;
+            pc_ast *operand;
+            int postfix;
+        } unary;
+        struct {
+            pc_token_type op;
+            pc_ast *left;
+            pc_ast *right;
+        } binary;
+        struct {
+            pc_ast *condition;
+            pc_ast *then_expr;
+            pc_ast *else_expr;
+        } ternary;
+        struct {
+            pc_ast *callee;
+            pc_ast *arguments;
+            size_t count;
+        } call;
+        struct {
+            pc_ast *base;
+            pc_ast *key;
+        } index;
+        struct {
+            pc_ast *base;
+            pc_token name;
+            pc_token_type op;
+        } member;
+        struct {
+            pc_ast *items;
+            size_t count;
+        } list;
+        struct {
+            pc_ast *key;
+            pc_ast *value;
+            int spread;
+        } array_item;
+        struct {
+            pc_ast *expression;
+        } expression;
+        struct {
+            pc_ast *condition;
+            pc_ast *then_branch;
+            pc_ast *else_branch;
+        } if_stmt;
+        struct {
+            pc_ast *condition;
+            pc_ast *body;
+        } loop;
+        struct {
+            pc_ast *initializers;
+            pc_ast *conditions;
+            pc_ast *increments;
+            pc_ast *body;
+        } for_stmt;
+        struct {
+            pc_ast *iterable;
+            pc_ast *key;
+            pc_ast *value;
+            pc_ast *body;
+        } foreach_stmt;
+        struct {
+            pc_ast *subject;
+            pc_ast *cases;
+        } switch_stmt;
+        struct {
+            pc_ast *condition;
+            pc_ast *body;
+        } case_stmt;
+        struct {
+            unsigned level;
+        } jump;
+        struct {
+            pc_token name;
+            pc_ast *value;
+        } binding;
+        struct {
+            pc_token name;
+            pc_ast *parameters;
+            pc_ast *body;
+            size_t parameter_count;
+        } function;
+        struct {
+            pc_token name;
+            pc_ast *default_value;
+            int variadic;
+        } parameter;
+        struct {
+            pc_token_type mode;
+            pc_ast *path;
+        } include_stmt;
+    } as;
+};
+
+typedef struct pc_arena_block pc_arena_block;
+
+typedef struct pc_arena {
+    pc_arena_block *blocks;
+    size_t block_size;
+} pc_arena;
+
+void pc_arena_init(pc_arena *arena, size_t block_size);
+void pc_arena_destroy(pc_arena *arena);
+void *pc_arena_alloc(pc_arena *arena, size_t size);
+pc_ast *pc_ast_new(pc_arena *arena, pc_ast_kind kind, uint32_t line);
+void pc_ast_append(pc_ast **head, pc_ast **tail, pc_ast *node);
+const char *pc_ast_kind_name(pc_ast_kind kind);
+void pc_ast_dump(FILE *stream, const pc_ast *node);
+
+#endif
+

@@ -1,5 +1,7 @@
 #include "pphp/pphp.h"
+#include "ast.h"
 #include "lexer.h"
+#include "parser.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -10,7 +12,8 @@ static uint8_t host_pool[PPHP_HEAP_SIZE];
 static void print_usage(FILE *stream) {
     fprintf(stream,
             "Usage: php-pico [--version]\n"
-            "       php-pico --tokens file.php\n");
+            "       php-pico --tokens file.php\n"
+            "       php-pico --ast file.php\n");
 }
 
 static char *read_file(const char *path, size_t *length) {
@@ -89,20 +92,41 @@ static int dump_tokens(const char *source, size_t length) {
     return PPHP_OK;
 }
 
+static int dump_ast(const char *source, size_t length, const char *path) {
+    pc_arena arena;
+    pc_parser parser;
+    pc_ast *program;
+    pc_arena_init(&arena, 4096U);
+    pc_parser_init(&parser, &arena, source, length, 0);
+    program = pc_parse_program(&parser);
+    if (program == NULL) {
+        fprintf(stderr, "Parse error: %s in %s on line %u\n",
+                pc_parser_error(&parser), path, pc_parser_error_line(&parser));
+        pc_arena_destroy(&arena);
+        return PPHP_E_PARSE;
+    }
+    pc_ast_dump(stdout, program);
+    pc_arena_destroy(&arena);
+    return PPHP_OK;
+}
+
 int main(int argc, char **argv) {
     pphp_pool_init(host_pool, sizeof(host_pool));
     if (argc == 2 && strcmp(argv[1], "--version") == 0) {
         printf("php-pico %s\n", PPHP_VERSION);
         return 0;
     }
-    if (argc == 3 && strcmp(argv[1], "--tokens") == 0) {
+    if (argc == 3 && (strcmp(argv[1], "--tokens") == 0 ||
+                      strcmp(argv[1], "--ast") == 0)) {
         size_t length = 0U;
         char *source = read_file(argv[2], &length);
         int result;
         if (source == NULL) {
             return PPHP_E_IO;
         }
-        result = dump_tokens(source, length);
+        result = strcmp(argv[1], "--tokens") == 0
+                     ? dump_tokens(source, length)
+                     : dump_ast(source, length, argv[2]);
         pphp_free(source);
         return result;
     }
