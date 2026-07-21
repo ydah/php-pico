@@ -92,7 +92,7 @@ const char *pc_ast_kind_name(pc_ast_kind kind) {
         "MATCH", "MATCH_ARM", "CALL", "INDEX", "MEMBER", "ARRAY", "ARRAY_ITEM", "EXPR_STMT",
         "ECHO", "IF", "WHILE", "DO_WHILE", "FOR", "FOREACH", "SWITCH",
         "CASE", "BREAK", "CONTINUE", "RETURN", "THROW", "GLOBAL", "STATIC",
-        "CONST", "FUNCTION", "PARAM", "INCLUDE", "UNSET", "ISSET", "EMPTY",
+        "CONST", "FUNCTION", "CLOSURE", "PARAM", "INCLUDE", "UNSET", "ISSET", "EMPTY",
         "CLASS", "PROPERTY", "NEW", "TRY", "CATCH"
     };
     if ((size_t)kind >= sizeof(names) / sizeof(names[0])) {
@@ -261,6 +261,11 @@ static void dump_node(FILE *stream, const pc_ast *node, unsigned depth) {
         case AST_FUNCTION:
             dump_list(stream, node->as.function.parameters, depth + 1U);
             dump_node(stream, node->as.function.body, depth + 1U);
+            break;
+        case AST_CLOSURE:
+            dump_list(stream, node->as.closure.parameters, depth + 1U);
+            dump_list(stream, node->as.closure.captures, depth + 1U);
+            dump_node(stream, node->as.closure.body, depth + 1U);
             break;
         case AST_PARAM:
             dump_node(stream, node->as.parameter.default_value, depth + 1U);

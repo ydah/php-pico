@@ -4,7 +4,7 @@ CFLAGS := -std=c99 -Wall -Wextra -Werror -Wpedantic -Wconversion -Wshadow -O2
 LDFLAGS :=
 LDLIBS := -lm
 
-CORE_SOURCES := src/alloc.c src/value.c src/pstring.c src/symbol.c src/parray.c src/resource.c src/pclass.c
+CORE_SOURCES := src/alloc.c src/value.c src/pstring.c src/symbol.c src/parray.c src/resource.c src/pclass.c src/closure.c
 COMPILER_SOURCES := compiler/lexer.c compiler/ast.c compiler/parser.c
 RUNTIME_SOURCES := $(CORE_SOURCES) src/exception.c src/value_ops.c src/pbc.c src/state.c src/vm.c stdlib/builtins.c
 HOST_SOURCES := $(RUNTIME_SOURCES) $(COMPILER_SOURCES) compiler/codegen.c tools/disasm.c ports/host/main.c

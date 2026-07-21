@@ -249,6 +249,33 @@ TEST(match_parses_multiple_conditions_default_and_trailing_comma) {
     pc_arena_destroy(&arena);
 }
 
+TEST(closures_and_arrow_functions_parse_capture_modes) {
+    const char *source =
+        "$first = function (int $x) use ($offset): int { return $x + $offset; };"
+        "$second = static fn($x) => $x * 2;";
+    pc_arena arena;
+    pc_parser parser;
+    pc_ast *program = parse_source(source, &arena, &parser);
+    pc_ast *first;
+    pc_ast *second;
+    ASSERT_TRUE(program != NULL);
+    first = program->as.list.items->as.expression.expression->as.binary.right;
+    second = program->as.list.items->next->as.expression.expression->as.binary.right;
+    ASSERT_EQ(AST_CLOSURE, first->kind);
+    ASSERT_TRUE(!first->as.closure.is_arrow);
+    ASSERT_EQ(AST_VARIABLE, first->as.closure.captures->kind);
+    ASSERT_EQ(AST_BLOCK, first->as.closure.body->kind);
+    ASSERT_EQ(AST_CLOSURE, second->kind);
+    ASSERT_TRUE(second->as.closure.is_arrow);
+    ASSERT_TRUE(second->as.closure.is_static);
+    pc_arena_destroy(&arena);
+
+    program = parse_source("function () use (&$value) {};", &arena, &parser);
+    ASSERT_TRUE(program == NULL);
+    ASSERT_TRUE(strstr(pc_parser_error(&parser), "by reference") != NULL);
+    pc_arena_destroy(&arena);
+}
+
 int main(void) {
     static const test_case tests[] = {
         {"operator precedence", operator_precedence_matches_php_8},
@@ -262,7 +289,8 @@ int main(void) {
         {"class syntax", classes_properties_methods_and_new_parse},
         {"exception syntax", try_catch_union_and_finally_build_exception_ast},
         {"switch syntax", switch_cases_and_default_preserve_statement_groups},
-        {"match syntax", match_parses_multiple_conditions_default_and_trailing_comma}
+        {"match syntax", match_parses_multiple_conditions_default_and_trailing_comma},
+        {"closure syntax", closures_and_arrow_functions_parse_capture_modes}
     };
     return run_tests(tests, sizeof(tests) / sizeof(tests[0]));
 }

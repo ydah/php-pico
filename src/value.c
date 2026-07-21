@@ -4,6 +4,7 @@
 #include "parray.h"
 #include "resource.h"
 #include "pclass.h"
+#include "closure.h"
 
 #include <string.h>
 
@@ -101,6 +102,9 @@ void pv_release(pvalue value) {
             break;
         case PT_OBJECT:
             pobject_destroy((pobject *)header);
+            break;
+        case PT_CLOSURE:
+            pclosure_destroy((pclosure *)header);
             break;
         case PT_RESOURCE:
             presource_destroy((presource *)header);

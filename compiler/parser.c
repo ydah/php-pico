@@ -181,6 +181,10 @@ static int is_lvalue(const pc_ast *node) {
 
 static pc_ast *parse_expression_precedence(pc_parser *parser, int minimum);
 static pc_ast *parse_call(pc_parser *parser, pc_ast *callee, uint32_t line);
+static pc_ast *parse_block(pc_parser *parser, uint32_t line);
+static void parse_optional_type(pc_parser *parser);
+static pc_ast *literal_node(pc_parser *parser, pc_ast_kind kind,
+                            pc_token token);
 
 static pc_ast *parse_match(pc_parser *parser, pc_token keyword) {
     pc_ast *node = new_node(parser, AST_MATCH, keyword.line);
@@ -229,6 +233,79 @@ static pc_ast *parse_match(pc_parser *parser, pc_token keyword) {
     leave_depth(parser);
     if (node != NULL) node->as.match_expr.arms = arms;
     return node;
+}
+
+static pc_ast *parse_closure(pc_parser *parser, pc_token keyword,
+                             int is_arrow, int is_static) {
+    pc_ast *closure = new_node(parser, AST_CLOSURE, keyword.line);
+    pc_ast *parameters = NULL;
+    pc_ast *parameter_tail = NULL;
+    pc_ast *captures = NULL;
+    pc_ast *capture_tail = NULL;
+    size_t parameter_count = 0U;
+    (void)consume(parser, T_LPAREN, "expected '(' after closure keyword");
+    while (!check(parser, T_RPAREN) && !check(parser, T_EOF) && !parser->failed) {
+        pc_ast *parameter;
+        int variadic;
+        if (!check(parser, T_VARIABLE) && !check(parser, T_ELLIPSIS)) {
+            parse_optional_type(parser);
+        }
+        variadic = match(parser, T_ELLIPSIS);
+        parameter = new_node(parser, AST_PARAM, parser->current.line);
+        if (parameter != NULL) {
+            parameter->as.parameter.name = consume(
+                parser, T_VARIABLE, "expected closure parameter variable");
+            parameter->as.parameter.variadic = variadic;
+            if (match(parser, T_EQUAL)) {
+                parameter->as.parameter.default_value = parse_expression_precedence(
+                    parser, PREC_ASSIGN + 1);
+            }
+            pc_ast_append(&parameters, &parameter_tail, parameter);
+            parameter_count++;
+        }
+        if (!match(parser, T_COMMA)) break;
+    }
+    (void)consume(parser, T_RPAREN, "expected ')' after closure parameters");
+    if (!is_arrow && match(parser, T_USE)) {
+        (void)consume(parser, T_LPAREN, "expected '(' after use");
+        while (!check(parser, T_RPAREN) && !check(parser, T_EOF) &&
+               !parser->failed) {
+            pc_token variable;
+            if (match(parser, T_AMP)) {
+                fail_at(parser, parser->previous,
+                        "closure captures by reference are not supported");
+            }
+            variable = consume(parser, T_VARIABLE,
+                               "expected captured variable");
+            if (variable.length == 5U &&
+                memcmp(variable.start, "$this", 5U) == 0) {
+                fail_at(parser, variable, "$this cannot be listed in use");
+            }
+            pc_ast_append(&captures, &capture_tail,
+                          literal_node(parser, AST_VARIABLE, variable));
+            if (!match(parser, T_COMMA)) break;
+        }
+        (void)consume(parser, T_RPAREN, "expected ')' after closure captures");
+    }
+    if (match(parser, T_COLON)) parse_optional_type(parser);
+    if (closure != NULL) {
+        closure->as.closure.parameters = parameters;
+        closure->as.closure.captures = captures;
+        closure->as.closure.parameter_count = parameter_count;
+        closure->as.closure.is_arrow = is_arrow;
+        closure->as.closure.is_static = is_static;
+    }
+    if (is_arrow) {
+        (void)consume(parser, T_DOUBLE_ARROW, "expected '=>' after arrow function");
+        if (closure != NULL) {
+            closure->as.closure.body = parse_expression_precedence(
+                parser, PREC_ASSIGN);
+        }
+    } else {
+        (void)consume(parser, T_LBRACE, "expected closure body");
+        if (closure != NULL) closure->as.closure.body = parse_block(parser, keyword.line);
+    }
+    return closure;
 }
 
 static pc_ast *literal_node(pc_parser *parser, pc_ast_kind kind, pc_token token) {
@@ -344,7 +421,14 @@ static pc_ast *parse_prefix(pc_parser *parser) {
         case T_IDENTIFIER:
         case T_SELF:
         case T_PARENT:
+            return literal_node(parser, AST_IDENTIFIER, token);
         case T_STATIC:
+            if (check(parser, T_FUNCTION) || check(parser, T_FN)) {
+                pc_token closure_keyword = parser->current;
+                int is_arrow = closure_keyword.type == T_FN;
+                advance_token(parser);
+                return parse_closure(parser, closure_keyword, is_arrow, 1);
+            }
             return literal_node(parser, AST_IDENTIFIER, token);
         case T_LPAREN:
             if (!enter_depth(parser)) {
@@ -358,6 +442,10 @@ static pc_ast *parse_prefix(pc_parser *parser) {
             return parse_array(parser, token.line);
         case T_MATCH:
             return parse_match(parser, token);
+        case T_FUNCTION:
+            return parse_closure(parser, token, 0, 0);
+        case T_FN:
+            return parse_closure(parser, token, 1, 0);
         case T_NEW: {
             pc_token class_token = parser->current;
             pc_ast *class_name;
@@ -1091,8 +1179,17 @@ static pc_ast *parse_statement(pc_parser *parser) {
         consume_statement_end(parser);
         return node;
     }
-    if (match(parser, T_FUNCTION)) {
-        return parse_function(parser, token);
+    if (check(parser, T_FUNCTION)) {
+        advance_token(parser);
+        if (check(parser, T_IDENTIFIER)) {
+            return parse_function(parser, token);
+        }
+        node = new_node(parser, AST_EXPR_STMT, token.line);
+        if (node != NULL) {
+            node->as.expression.expression = parse_closure(parser, token, 0, 0);
+        }
+        consume_statement_end(parser);
+        return node;
     }
     if (match(parser, T_TRY)) {
         return parse_try_statement(parser, token);
@@ -1126,7 +1223,20 @@ static pc_ast *parse_statement(pc_parser *parser) {
         }
         return global;
     }
-    if (match(parser, T_STATIC)) {
+    if (check(parser, T_STATIC)) {
+        advance_token(parser);
+        if (check(parser, T_FUNCTION) || check(parser, T_FN)) {
+            pc_token closure_keyword = parser->current;
+            int is_arrow = closure_keyword.type == T_FN;
+            advance_token(parser);
+            node = new_node(parser, AST_EXPR_STMT, token.line);
+            if (node != NULL) {
+                node->as.expression.expression = parse_closure(
+                    parser, closure_keyword, is_arrow, 1);
+            }
+            consume_statement_end(parser);
+            return node;
+        }
         return parse_binding_statement(parser, token, AST_STATIC);
     }
     if (match(parser, T_CONST)) {
@@ -1142,8 +1252,7 @@ static pc_ast *parse_statement(pc_parser *parser) {
         consume_statement_end(parser);
         return node;
     }
-    if (check(parser, T_NEW) ||
-        check(parser, T_FN)) {
+    if (check(parser, T_NEW)) {
         fail_at(parser, parser->current, "syntax %.*s is reserved for a later runtime milestone",
                 (int)parser->current.length, parser->current.start);
         return NULL;

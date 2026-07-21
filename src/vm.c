@@ -5,6 +5,7 @@
 #include "parray.h"
 #include "resource.h"
 #include "pclass.h"
+#include "closure.h"
 #include "value_ops.h"
 
 #include <stdarg.h>
@@ -323,6 +324,10 @@ static void convert_runtime_error(pphp_state *state, size_t throw_pc) {
     (void)throw_exception(state, pv_heap(PT_OBJECT, &exception->header), throw_pc);
 }
 
+static int enter_method(pphp_state *state, pframe *caller,
+                        const pmethod *method, uint8_t argument_count,
+                        int constructor);
+
 static int call_function(pphp_state *state, pframe *caller, uint16_t name_index,
                          uint8_t argument_count) {
     const pvalue *name_value;
@@ -391,6 +396,176 @@ static int call_function(pphp_state *state, pframe *caller, uint16_t name_index,
     state->frames[state->frame_count].has_return_override = 0;
     state->frames[state->frame_count].return_override = pv_null();
     state->frames[state->frame_count].called_scope = NULL;
+    state->frame_count++;
+    return 1;
+}
+
+static int call_named_value(pphp_state *state, pframe *caller,
+                            const pstring *name, uint8_t argument_count,
+                            size_t base) {
+    pvalue callable = state->stack[base];
+    pvalue result = pv_null();
+    const pproto *callee;
+    size_t supplied;
+    size_t i;
+    int builtin = pphp_call_builtin(state, name, state->stack + base + 1U,
+                                    argument_count, &result);
+    if (builtin != 0) {
+        release_range(state, base, state->stack_count);
+        state->stack_count = base;
+        return builtin > 0 && push(state, result);
+    }
+    callee = pmodule_find(state->module, name);
+    if (callee == NULL) {
+        pphp_runtime_error(state, caller->line,
+                           "Call to undefined function %.*s()",
+                           (int)name->length, name->data);
+        return 0;
+    }
+    if (argument_count < callee->n_required) {
+        pphp_runtime_error(state, caller->line,
+                           "Too few arguments to function %.*s(), %u required, %u given",
+                           (int)name->length, name->data, callee->n_required,
+                           argument_count);
+        return 0;
+    }
+    supplied = argument_count < callee->n_params
+                   ? argument_count
+                   : callee->n_params;
+    if (base + callee->n_locals >= PPHP_STACK_SLOTS ||
+        state->frame_count >= PPHP_FRAME_MAX) {
+        pphp_runtime_error(state, caller->line,
+                           "stack overflow entering callable function");
+        return 0;
+    }
+    if (argument_count > callee->n_params) {
+        release_range(state, base + 1U + callee->n_params, state->stack_count);
+    }
+    memmove(state->stack + base, state->stack + base + 1U,
+            supplied * sizeof(*state->stack));
+    for (i = supplied; i < callee->n_locals; i++) {
+        state->stack[base + i] = pv_null();
+    }
+    pv_release(callable);
+    state->stack_count = base + callee->n_locals;
+    state->frames[state->frame_count].proto = callee;
+    state->frames[state->frame_count].pc = 0U;
+    state->frames[state->frame_count].base = base;
+    state->frames[state->frame_count].line = 1U;
+    state->frames[state->frame_count].has_return_override = 0;
+    state->frames[state->frame_count].return_override = pv_null();
+    state->frames[state->frame_count].called_scope = NULL;
+    state->frame_count++;
+    return 1;
+}
+
+static int call_value(pphp_state *state, pframe *caller,
+                      uint8_t argument_count) {
+    size_t base;
+    size_t supplied;
+    size_t i;
+    pvalue callable;
+    pclosure *closure;
+    const pproto *callee;
+    if (state->stack_count < (size_t)argument_count + 1U) {
+        pphp_runtime_error(state, caller->line, "invalid CALL_VALUE instruction");
+        return 0;
+    }
+    base = state->stack_count - argument_count - 1U;
+    callable = state->stack[base];
+    if (callable.type == PT_STRING) {
+        return call_named_value(state, caller,
+                                (const pstring *)callable.as.gc,
+                                argument_count, base);
+    }
+    if (callable.type == PT_ARRAY) {
+        pvalue target = pv_null();
+        pvalue method_name = pv_null();
+        const pmethod *method;
+        if (!pa_get((const parray *)callable.as.gc, pv_int(0), &target) ||
+            !pa_get((const parray *)callable.as.gc, pv_int(1), &method_name) ||
+            target.type != PT_OBJECT || method_name.type != PT_STRING) {
+            pv_release(target);
+            pv_release(method_name);
+            pphp_runtime_error(state, caller->line, "array is not a valid callable");
+            return 0;
+        }
+        method = pclass_find_method(
+            ((pobject *)target.as.gc)->class_entry,
+            ((const pstring *)method_name.as.gc)->data,
+            ((const pstring *)method_name.as.gc)->length);
+        if (method == NULL ||
+            !pclass_member_visible(method->flags, method->owner,
+                                   caller->called_scope)) {
+            pv_release(target);
+            pv_release(method_name);
+            pphp_runtime_error(state, caller->line,
+                               "array callable method is not accessible");
+            return 0;
+        }
+        pv_release(callable);
+        state->stack[base] = target;
+        pv_release(method_name);
+        return enter_method(state, caller, method, argument_count, 0);
+    }
+    if (callable.type == PT_OBJECT) {
+        pobject *object = (pobject *)callable.as.gc;
+        const pmethod *invoke = pclass_find_method(object->class_entry,
+                                                   "__invoke", 8U);
+        if (invoke == NULL ||
+            !pclass_member_visible(invoke->flags, invoke->owner,
+                                   caller->called_scope)) {
+            pphp_runtime_error(state, caller->line, "object is not callable");
+            return 0;
+        }
+        return enter_method(state, caller, invoke, argument_count, 0);
+    }
+    if (callable.type != PT_CLOSURE) {
+        pphp_runtime_error(state, caller->line, "value is not callable");
+        return 0;
+    }
+    closure = (pclosure *)callable.as.gc;
+    callee = closure->proto;
+    if (argument_count < callee->n_required) {
+        pphp_runtime_error(state, caller->line,
+                           "Too few arguments to closure, %u required, %u given",
+                           callee->n_required, argument_count);
+        return 0;
+    }
+    supplied = argument_count < callee->n_params
+                   ? argument_count
+                   : callee->n_params;
+    if (base + callee->n_locals >= PPHP_STACK_SLOTS ||
+        state->frame_count >= PPHP_FRAME_MAX ||
+        (size_t)callee->n_params + closure->capture_count > callee->n_locals) {
+        pphp_runtime_error(state, caller->line, "stack overflow entering closure");
+        return 0;
+    }
+    if (argument_count > callee->n_params) {
+        release_range(state, base + 1U + callee->n_params, state->stack_count);
+    }
+    memmove(state->stack + base, state->stack + base + 1U,
+            supplied * sizeof(*state->stack));
+    for (i = supplied; i < callee->n_params; i++) {
+        state->stack[base + i] = pv_null();
+    }
+    for (i = 0U; i < closure->capture_count; i++) {
+        state->stack[base + callee->n_params + i] = closure->captures[i];
+        pv_retain(closure->captures[i]);
+    }
+    for (i = (size_t)callee->n_params + closure->capture_count;
+         i < callee->n_locals; i++) {
+        state->stack[base + i] = pv_null();
+    }
+    pv_release(callable);
+    state->stack_count = base + callee->n_locals;
+    state->frames[state->frame_count].proto = callee;
+    state->frames[state->frame_count].pc = 0U;
+    state->frames[state->frame_count].base = base;
+    state->frames[state->frame_count].line = 1U;
+    state->frames[state->frame_count].has_return_override = 0;
+    state->frames[state->frame_count].return_override = pv_null();
+    state->frames[state->frame_count].called_scope = caller->called_scope;
     state->frame_count++;
     return 1;
 }
@@ -661,6 +836,11 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                 uint16_t name = read_u16(state, frame);
                 uint8_t count = read_u8(state, frame);
                 (void)call_function(state, frame, name, count);
+                break;
+            }
+            case OP_CALL_VALUE: {
+                uint8_t count = read_u8(state, frame);
+                (void)call_value(state, frame, count);
                 break;
             }
             case OP_RET: {
@@ -1093,6 +1273,38 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                 }
                 pv_release(value);
                 (void)push(state, pv_bool(matches));
+                break;
+            }
+            case OP_CLOSURE: {
+                uint16_t proto_index = read_u16(state, frame);
+                uint8_t capture_count = read_u8(state, frame);
+                pvalue captures[UINT8_MAX];
+                size_t capture;
+                int valid = proto_index < state->module->count;
+                pclosure *closure;
+                for (capture = 0U; capture < capture_count; capture++) {
+                    uint8_t kind = read_u8(state, frame);
+                    uint8_t slot = read_u8(state, frame);
+                    if (kind != 0U || slot >= frame->proto->n_locals) {
+                        valid = 0;
+                        captures[capture] = pv_null();
+                    } else {
+                        captures[capture] = state->stack[frame->base + slot];
+                    }
+                }
+                if (!valid) {
+                    pphp_runtime_error(state, frame->line,
+                                       "invalid CLOSURE instruction");
+                    break;
+                }
+                closure = pclosure_new(state->module->protos[proto_index],
+                                       captures, capture_count);
+                if (closure == NULL) {
+                    pphp_runtime_error(state, frame->line,
+                                       "out of memory creating closure");
+                } else {
+                    (void)push(state, pv_heap(PT_CLOSURE, &closure->header));
+                }
                 break;
             }
             case OP_THROW: {

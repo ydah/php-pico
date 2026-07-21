@@ -316,6 +316,324 @@ static void compile_expression(generator *gen, const pc_ast *node);
 static void compile_statement(generator *gen, const pc_ast *node);
 static void compile_class_definition(generator *gen, const pc_ast *class_node);
 
+typedef struct capture_set {
+    pc_token tokens[64];
+    size_t count;
+    const pc_ast *parameters;
+} capture_set;
+
+static int variable_name_equal(pc_token left, pc_token right) {
+    if (left.length != 0U && left.start[0] == '$') {
+        left.start++;
+        left.length--;
+    }
+    if (right.length != 0U && right.start[0] == '$') {
+        right.start++;
+        right.length--;
+    }
+    return left.length == right.length &&
+           memcmp(left.start, right.start, left.length) == 0;
+}
+
+static int capture_is_parameter(const capture_set *set, pc_token token) {
+    const pc_ast *parameter = set->parameters;
+    while (parameter != NULL) {
+        if (variable_name_equal(parameter->as.parameter.name, token)) return 1;
+        parameter = parameter->next;
+    }
+    return 0;
+}
+
+static int capture_add(capture_set *set, pc_token token) {
+    size_t i;
+    if (capture_is_parameter(set, token)) return 1;
+    for (i = 0U; i < set->count; i++) {
+        if (variable_name_equal(set->tokens[i], token)) return 1;
+    }
+    if (set->count >= sizeof(set->tokens) / sizeof(set->tokens[0])) return 0;
+    set->tokens[set->count++] = token;
+    return 1;
+}
+
+static int collect_captures(capture_set *set, const pc_ast *node);
+
+static int collect_capture_list(capture_set *set, const pc_ast *node) {
+    while (node != NULL) {
+        if (!collect_captures(set, node)) return 0;
+        node = node->next;
+    }
+    return 1;
+}
+
+static int collect_captures(capture_set *set, const pc_ast *node) {
+    if (node == NULL) return 1;
+    switch (node->kind) {
+        case AST_VARIABLE:
+            return capture_add(set, node->as.literal.token);
+        case AST_PROGRAM:
+        case AST_BLOCK:
+        case AST_ARRAY:
+        case AST_ECHO:
+        case AST_GLOBAL:
+            return collect_capture_list(set, node->as.list.items);
+        case AST_UNARY:
+        case AST_UNSET:
+        case AST_ISSET:
+        case AST_EMPTY:
+            return collect_captures(set, node->as.unary.operand);
+        case AST_BINARY:
+        case AST_ASSIGN:
+            return collect_captures(set, node->as.binary.left) &&
+                   collect_captures(set, node->as.binary.right);
+        case AST_TERNARY:
+            return collect_captures(set, node->as.ternary.condition) &&
+                   collect_captures(set, node->as.ternary.then_expr) &&
+                   collect_captures(set, node->as.ternary.else_expr);
+        case AST_MATCH:
+            return collect_captures(set, node->as.match_expr.subject) &&
+                   collect_capture_list(set, node->as.match_expr.arms);
+        case AST_MATCH_ARM:
+            return collect_capture_list(set, node->as.match_arm.conditions) &&
+                   collect_captures(set, node->as.match_arm.result);
+        case AST_CALL:
+            return collect_captures(set, node->as.call.callee) &&
+                   collect_capture_list(set, node->as.call.arguments);
+        case AST_INDEX:
+            return collect_captures(set, node->as.index.base) &&
+                   collect_captures(set, node->as.index.key);
+        case AST_MEMBER:
+            return collect_captures(set, node->as.member.base);
+        case AST_ARRAY_ITEM:
+            return collect_captures(set, node->as.array_item.key) &&
+                   collect_captures(set, node->as.array_item.value);
+        case AST_EXPR_STMT:
+        case AST_RETURN:
+        case AST_THROW:
+            return collect_captures(set, node->as.expression.expression);
+        case AST_IF:
+            return collect_captures(set, node->as.if_stmt.condition) &&
+                   collect_captures(set, node->as.if_stmt.then_branch) &&
+                   collect_captures(set, node->as.if_stmt.else_branch);
+        case AST_WHILE:
+        case AST_DO_WHILE:
+            return collect_captures(set, node->as.loop.condition) &&
+                   collect_captures(set, node->as.loop.body);
+        case AST_FOR:
+            return collect_capture_list(set, node->as.for_stmt.initializers) &&
+                   collect_capture_list(set, node->as.for_stmt.conditions) &&
+                   collect_capture_list(set, node->as.for_stmt.increments) &&
+                   collect_captures(set, node->as.for_stmt.body);
+        case AST_FOREACH:
+            return collect_captures(set, node->as.foreach_stmt.iterable) &&
+                   collect_captures(set, node->as.foreach_stmt.key) &&
+                   collect_captures(set, node->as.foreach_stmt.value) &&
+                   collect_captures(set, node->as.foreach_stmt.body);
+        case AST_SWITCH:
+            return collect_captures(set, node->as.switch_stmt.subject) &&
+                   collect_capture_list(set, node->as.switch_stmt.cases);
+        case AST_CASE:
+            return collect_captures(set, node->as.case_stmt.condition) &&
+                   collect_captures(set, node->as.case_stmt.body);
+        case AST_STATIC:
+        case AST_CONST:
+            return collect_captures(set, node->as.binding.value);
+        case AST_INCLUDE:
+            return collect_captures(set, node->as.include_stmt.path);
+        case AST_NEW:
+            return collect_capture_list(set, node->as.new_expr.arguments);
+        case AST_TRY:
+            return collect_captures(set, node->as.try_stmt.try_block) &&
+                   collect_capture_list(set, node->as.try_stmt.catches) &&
+                   collect_captures(set, node->as.try_stmt.finally_block);
+        case AST_CATCH:
+            return collect_captures(set, node->as.catch_stmt.body);
+        case AST_CLOSURE:
+        {
+            capture_set nested;
+            size_t i;
+            memset(&nested, 0, sizeof(nested));
+            nested.parameters = node->as.closure.parameters;
+            if (node->as.closure.is_arrow) {
+                if (!collect_captures(&nested, node->as.closure.body)) return 0;
+            } else {
+                const pc_ast *capture = node->as.closure.captures;
+                while (capture != NULL) {
+                    if (!capture_add(&nested, capture->as.literal.token)) return 0;
+                    capture = capture->next;
+                }
+                if (!node->as.closure.is_static) {
+                    capture_set referenced;
+                    memset(&referenced, 0, sizeof(referenced));
+                    referenced.parameters = node->as.closure.parameters;
+                    if (!collect_captures(&referenced, node->as.closure.body)) return 0;
+                    for (i = 0U; i < referenced.count; i++) {
+                        pc_token token = referenced.tokens[i];
+                        if (token.length == 5U &&
+                            memcmp(token.start, "$this", 5U) == 0 &&
+                            !capture_add(&nested, token)) return 0;
+                    }
+                }
+            }
+            for (i = 0U; i < nested.count; i++) {
+                if (!capture_add(set, nested.tokens[i])) return 0;
+            }
+            return 1;
+        }
+        default:
+            return 1;
+    }
+}
+
+static void compile_closure_expression(generator *gen, const pc_ast *node) {
+    capture_set captures;
+    const pc_ast *capture;
+    const pc_ast *parameter;
+    pproto *proto;
+    generator child;
+    uint8_t parent_slots[64];
+    uint16_t proto_index;
+    char name[32];
+    int name_length;
+    int saw_default = 0;
+    size_t i;
+    memset(&captures, 0, sizeof(captures));
+    captures.parameters = node->as.closure.parameters;
+    if (node->as.closure.is_arrow) {
+        if (!collect_captures(&captures, node->as.closure.body)) {
+            fail(gen, node->line, "too many variables captured by arrow function");
+            return;
+        }
+        if (node->as.closure.is_static) {
+            for (i = 0U; i < captures.count; i++) {
+                pc_token token = captures.tokens[i];
+                if (token.length == 5U && memcmp(token.start, "$this", 5U) == 0) {
+                    fail(gen, node->line,
+                         "static arrow function cannot use $this");
+                    return;
+                }
+            }
+        }
+    } else {
+        capture = node->as.closure.captures;
+        while (capture != NULL) {
+            if (capture_is_parameter(&captures, capture->as.literal.token)) {
+                fail(gen, capture->line,
+                     "closure cannot capture a parameter with the same name");
+                return;
+            }
+            if (!capture_add(&captures, capture->as.literal.token)) {
+                fail(gen, capture->line, "too many closure captures");
+                return;
+            }
+            capture = capture->next;
+        }
+        {
+            capture_set referenced;
+            memset(&referenced, 0, sizeof(referenced));
+            referenced.parameters = node->as.closure.parameters;
+            if (!collect_captures(&referenced, node->as.closure.body)) {
+                fail(gen, node->line, "too many variables referenced by closure");
+                return;
+            }
+            for (i = 0U; i < referenced.count; i++) {
+                pc_token token = referenced.tokens[i];
+                if (token.length == 5U && memcmp(token.start, "$this", 5U) == 0) {
+                    if (node->as.closure.is_static) {
+                        fail(gen, node->line,
+                             "static closure cannot use $this");
+                        return;
+                    }
+                    if (!capture_add(&captures, token)) {
+                        fail(gen, node->line, "too many closure captures");
+                        return;
+                    }
+                }
+            }
+        }
+    }
+    if (gen->module->count > UINT16_MAX) {
+        fail(gen, node->line, "too many function prototypes");
+        return;
+    }
+    proto_index = (uint16_t)gen->module->count;
+    name_length = snprintf(name, sizeof(name), "{closure#%u}", proto_index);
+    if (name_length <= 0 || (size_t)name_length >= sizeof(name)) {
+        fail(gen, node->line, "cannot create closure name");
+        return;
+    }
+    proto = pproto_new(name, (size_t)name_length);
+    if (proto == NULL || !pmodule_add(gen->module, proto)) {
+        pproto_destroy(proto);
+        fail(gen, node->line, "out of memory creating closure");
+        return;
+    }
+    parameter = node->as.closure.parameters;
+    while (parameter != NULL) {
+        pc_token parameter_name = parameter->as.parameter.name;
+        uint8_t slot;
+        if (parameter_name.length != 0U && parameter_name.start[0] == '$') {
+            parameter_name.start++;
+            parameter_name.length--;
+        }
+        if (!pproto_add_local(proto, parameter_name.start,
+                              parameter_name.length, &slot)) {
+            fail(gen, parameter->line, "too many closure parameters");
+            return;
+        }
+        proto->n_params++;
+        if (parameter->as.parameter.default_value == NULL &&
+            !parameter->as.parameter.variadic) {
+            if (saw_default) {
+                fail(gen, parameter->line,
+                     "required closure parameter follows optional parameter");
+                return;
+            }
+            proto->n_required++;
+        } else {
+            saw_default = 1;
+        }
+        proto->variadic = (uint8_t)parameter->as.parameter.variadic;
+        parameter = parameter->next;
+    }
+    for (i = 0U; i < captures.count; i++) {
+        pc_token capture_name = captures.tokens[i];
+        uint8_t ignored;
+        if (!variable_slot(gen, capture_name, &parent_slots[i])) return;
+        if (capture_name.length != 0U && capture_name.start[0] == '$') {
+            capture_name.start++;
+            capture_name.length--;
+        }
+        if (!pproto_add_local(proto, capture_name.start, capture_name.length,
+                              &ignored)) {
+            fail(gen, node->line, "too many closure captures");
+            return;
+        }
+    }
+    memset(&child, 0, sizeof(child));
+    child.module = gen->module;
+    child.proto = proto;
+    child.error = gen->error;
+    if (node->as.closure.is_arrow) {
+        compile_expression(&child, node->as.closure.body);
+        emit_byte(&child, OP_RET, node->line);
+    } else {
+        compile_statement(&child, node->as.closure.body);
+        emit_byte(&child, OP_RET_NULL, node->line);
+    }
+    proto->max_stack = PPHP_STACK_SLOTS;
+    if (child.failed) {
+        gen->failed = 1;
+        return;
+    }
+    emit_byte(gen, OP_CLOSURE, node->line);
+    emit_u16(gen, proto_index, node->line);
+    emit_byte(gen, (uint8_t)captures.count, node->line);
+    for (i = 0U; i < captures.count; i++) {
+        emit_byte(gen, 0U, node->line);
+        emit_byte(gen, parent_slots[i], node->line);
+    }
+}
+
 static void compile_transfer_finally_blocks(generator *gen,
                                             unsigned preserve_count) {
     unsigned original = gen->finally_count;
@@ -594,6 +912,9 @@ static void compile_expression(generator *gen, const pc_ast *node) {
                 patch_jump(gen, end, gen->proto->code_length, node->line);
             }
             break;
+        case AST_CLOSURE:
+            compile_closure_expression(gen, node);
+            break;
         case AST_MATCH: {
             const pc_ast *arm = node->as.match_expr.arms;
             size_t condition_jumps[256];
@@ -688,8 +1009,18 @@ static void compile_expression(generator *gen, const pc_ast *node) {
                 emit_byte(gen, (uint8_t)node->as.call.count, node->line);
                 break;
             }
-            if (node->as.call.callee->kind != AST_IDENTIFIER || node->as.call.count > 255U) {
-                fail(gen, node->line, "only named function calls are supported");
+            if (node->as.call.count > 255U) {
+                fail(gen, node->line, "too many call arguments");
+                break;
+            }
+            if (node->as.call.callee->kind != AST_IDENTIFIER) {
+                compile_expression(gen, node->as.call.callee);
+                while (argument != NULL) {
+                    compile_expression(gen, argument);
+                    argument = argument->next;
+                }
+                emit_byte(gen, OP_CALL_VALUE, node->line);
+                emit_byte(gen, (uint8_t)node->as.call.count, node->line);
                 break;
             }
             while (argument != NULL) {

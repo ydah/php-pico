@@ -665,6 +665,7 @@ const char *pphp_opcode_name(uint8_t opcode) {
         case OP_JMP_UNLESS_KEEP: return "JMP_UNLESS_KEEP";
         case OP_JMP_NOTNULL_KEEP: return "JMP_NOTNULL_KEEP";
         case OP_CALL: return "CALL";
+        case OP_CALL_VALUE: return "CALL_VALUE";
         case OP_RET: return "RET";
         case OP_RET_NULL: return "RET_NULL";
         case OP_ECHO: return "ECHO";
@@ -682,6 +683,7 @@ const char *pphp_opcode_name(uint8_t opcode) {
         case OP_PROP_SET: return "PROP_SET";
         case OP_MCALL: return "MCALL";
         case OP_INSTANCEOF: return "INSTANCEOF";
+        case OP_CLOSURE: return "CLOSURE";
         case OP_THROW: return "THROW";
         case OP_RETHROW: return "RETHROW";
         case OP_DEF_CLASS: return "DEF_CLASS";

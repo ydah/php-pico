@@ -112,8 +112,9 @@ TEST(argument_count_and_stack_limits_are_checked) {
 
 TEST(pbc_serialization_round_trips_through_loader) {
     const char *source =
-        "function twice($x) { return $x * 2; }"
-        "try { echo twice(21), ':' , 1.25; throw new Exception('ok'); }"
+        "function twice($x) { return $x * 2; } $offset = 1;"
+        "$calculate = fn($x) => twice($x) + $offset;"
+        "try { echo $calculate(20), ':' , 1.25; throw new Exception('ok'); }"
         "catch (Exception $error) { echo ':', $error->getMessage(); }"
         "finally { echo '!'; }";
     const char *path = "build/host/test_roundtrip.pbc";
@@ -138,7 +139,7 @@ TEST(pbc_serialization_round_trips_through_loader) {
     memset(&output, 0, sizeof(output));
     pphp_set_output(state, capture_output, &output);
     ASSERT_EQ(PPHP_OK, pphp_vm_execute(state, &loaded));
-    ASSERT_STR("42:1.25:ok!", output.bytes);
+    ASSERT_STR("41:1.25:ok!", output.bytes);
     pmodule_destroy(&loaded);
     pphp_close(state);
     ASSERT_EQ(0, remove(path));
@@ -378,6 +379,67 @@ TEST(match_without_a_matching_arm_throws_unhandled_match_error) {
     ASSERT_STR("caught:1", output.bytes);
 }
 
+TEST(closures_capture_values_and_arrow_functions_capture_automatically) {
+    const char *source =
+        "$offset = 10;"
+        "$add = function ($value) use ($offset) { return $value + $offset; };"
+        "$multiply = fn($value) => $value * $offset;"
+        "$offset = 99;"
+        "echo $add(5), ':', $multiply(2);";
+    output_buffer output;
+    ASSERT_EQ(PPHP_OK, execute(source, &output, NULL, 0U));
+    ASSERT_STR("15:20", output.bytes);
+}
+
+TEST(nested_arrows_retain_transitive_captures) {
+    const char *source =
+        "$base = 5;"
+        "$factory = fn($left) => fn($right) => $base + $left + $right;"
+        "$sum = $factory(2); $base = 100; echo $sum(3);";
+    output_buffer output;
+    ASSERT_EQ(PPHP_OK, execute(source, &output, NULL, 0U));
+    ASSERT_STR("10", output.bytes);
+}
+
+TEST(method_closures_bind_this_by_value) {
+    const char *source =
+        "class Box {"
+        " public $value = 7;"
+        " public function reader() { return fn() => $this->value; }"
+        " public function classic() { return function () { return $this->value + 1; }; }"
+        "}"
+        "$box = new Box(); $reader = $box->reader(); $classic = $box->classic();"
+        "echo $reader(), ':', $classic();";
+    output_buffer output;
+    ASSERT_EQ(PPHP_OK, execute(source, &output, NULL, 0U));
+    ASSERT_STR("7:8", output.bytes);
+}
+
+TEST(call_value_supports_strings_method_arrays_and_invokable_objects) {
+    const char *source =
+        "function twice($value) { return $value * 2; }"
+        "class Worker {"
+        " public function run($value) { return $value + 1; }"
+        " public function __invoke($value) { return $value + 2; }"
+        "}"
+        "$named = 'twice'; $builtin = 'strlen'; $worker = new Worker();"
+        "$method = [$worker, 'run'];"
+        "echo $named(4), ':', $builtin('pico'), ':',"
+        " $method(5), ':', $worker(5);";
+    output_buffer output;
+    ASSERT_EQ(PPHP_OK, execute(source, &output, NULL, 0U));
+    ASSERT_STR("8:4:6:7", output.bytes);
+}
+
+TEST(static_closures_reject_this_binding) {
+    const char *source =
+        "class Invalid { public function make() { return static fn() => $this; } }";
+    output_buffer output;
+    char error[256];
+    ASSERT_EQ(PPHP_E_PARSE, execute(source, &output, error, sizeof(error)));
+    ASSERT_TRUE(strstr(error, "cannot use $this") != NULL);
+}
+
 int main(void) {
     static const test_case tests[] = {
         {"arithmetic VM", arithmetic_runs_through_compiler_and_vm},
@@ -404,7 +466,12 @@ int main(void) {
         {"switch runtime", switch_uses_loose_cases_fallthrough_and_control_levels},
         {"switch transfers", switch_transfers_interact_with_continue_and_finally},
         {"match runtime", match_is_strict_and_evaluates_its_subject_once},
-        {"match exhaustiveness", match_without_a_matching_arm_throws_unhandled_match_error}
+        {"match exhaustiveness", match_without_a_matching_arm_throws_unhandled_match_error},
+        {"closure captures", closures_capture_values_and_arrow_functions_capture_automatically},
+        {"nested arrow captures", nested_arrows_retain_transitive_captures},
+        {"bound this closures", method_closures_bind_this_by_value},
+        {"callable values", call_value_supports_strings_method_arrays_and_invokable_objects},
+        {"static closure this", static_closures_reject_this_binding}
     };
     return run_tests(tests, sizeof(tests) / sizeof(tests[0]));
 }

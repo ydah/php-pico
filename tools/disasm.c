@@ -23,6 +23,7 @@ static size_t operand_size(uint8_t opcode) {
         case OP_LOAD_LOCAL:
         case OP_STORE_LOCAL:
         case OP_ECHO:
+        case OP_CALL_VALUE:
             return 1U;
         case OP_LOAD_CONST:
         case OP_JMP:
@@ -49,6 +50,8 @@ static size_t operand_size(uint8_t opcode) {
             return 5U;
         case OP_LOAD_I32:
             return 4U;
+        case OP_CLOSURE:
+            return 3U;
         default:
             return 0U;
     }
@@ -97,6 +100,7 @@ static int disassemble_proto(FILE *stream, const pproto *proto, size_t index) {
             case OP_LOAD_LOCAL:
             case OP_STORE_LOCAL:
             case OP_ECHO:
+            case OP_CALL_VALUE:
                 fprintf(stream, " %u", proto->code[pc]);
                 break;
             case OP_LOAD_I32:
@@ -169,6 +173,23 @@ static int disassemble_proto(FILE *stream, const pproto *proto, size_t index) {
                 int16_t relative = (int16_t)code_u16(proto->code, pc);
                 fprintf(stream, " %+d -> %td haskey=%u", relative,
                         (ptrdiff_t)(pc + 3U) + relative, proto->code[pc + 2U]);
+                break;
+            }
+            case OP_CLOSURE: {
+                uint8_t count = proto->code[pc + 2U];
+                size_t extra = (size_t)count * 2U;
+                size_t capture;
+                if (pc + 3U + extra > proto->code_length) {
+                    fputs(" <truncated>\n", stream);
+                    return 0;
+                }
+                fprintf(stream, " proto=%u captures=%u", code_u16(proto->code, pc),
+                        count);
+                for (capture = 0U; capture < count; capture++) {
+                    fprintf(stream, " %u:%u", proto->code[pc + 3U + capture * 2U],
+                            proto->code[pc + 4U + capture * 2U]);
+                }
+                operands += extra;
                 break;
             }
             default:

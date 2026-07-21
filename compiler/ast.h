@@ -56,6 +56,7 @@ typedef enum pc_ast_kind {
     AST_STATIC,
     AST_CONST,
     AST_FUNCTION,
+    AST_CLOSURE,
     AST_PARAM,
     AST_INCLUDE,
     AST_UNSET,
@@ -173,6 +174,14 @@ struct pc_ast {
             size_t parameter_count;
             uint8_t flags;
         } function;
+        struct {
+            pc_ast *parameters;
+            pc_ast *captures;
+            pc_ast *body;
+            size_t parameter_count;
+            int is_arrow;
+            int is_static;
+        } closure;
         struct {
             pc_token name;
             pc_ast *default_value;
