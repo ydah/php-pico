@@ -7,6 +7,7 @@
 #include "pclass.h"
 #include "closure.h"
 #include "value_ops.h"
+#include "pgems.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -1242,6 +1243,11 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
         size_t instruction_pc = frame->pc;
         int exception_processed = 0;
         uint8_t opcode = read_u8(state, frame);
+        if (state->processed_ticks != state->ticks) {
+            state->processed_ticks = state->ticks;
+            pphp_poll_pgems(state);
+            if (state->error[0] != '\0') continue;
+        }
         switch ((pphp_opcode)opcode) {
             case OP_NOP: break;
             case OP_HALT:

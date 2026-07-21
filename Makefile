@@ -23,11 +23,15 @@ ASAN_PARSER_BINARY := build/host/test_parser_asan
 ASAN_VM_BINARY := build/host/test_vm_asan
 ASAN_LEAKS := $(if $(filter Darwin,$(shell uname -s)),0,1)
 
-.PHONY: all host test test-unit test-phpt test-asan test-diff size clean
+.PHONY: all host rp2040 test test-unit test-phpt test-asan test-diff size clean
 
 all: host
 
 host: $(HOST_BINARY)
+
+rp2040:
+	cmake -S ports/rp2040 -B build/rp2040 -DPICO_BOARD=pico
+	cmake --build build/rp2040 --parallel
 
 $(HOST_BINARY): $(HOST_SOURCES)
 	@mkdir -p $(@D)

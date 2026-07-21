@@ -526,7 +526,6 @@ int pphp_exec_pbc(pphp_state *state, const void *pbc, size_t length) {
 void pphp_tick(pphp_state *state) {
     if (state != NULL) {
         state->ticks++;
-        pphp_poll_pgems(state);
     }
 }
 
