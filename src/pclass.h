@@ -69,5 +69,16 @@ int pclass_member_visible(uint8_t flags, const pclass *owner,
                           const pclass *scope);
 int pobject_property_written(const pobject *object, uint8_t slot);
 void pobject_mark_property_written(pobject *object, uint8_t slot);
+int pphp_register_exception_classes(pphp_state *state);
+pobject *pphp_exception_new(pphp_state *state, const char *class_name,
+                            const char *message);
+int pphp_object_is_throwable(const pphp_state *state, const pobject *object);
+const pstring *pphp_exception_message(const pobject *object);
+const pvalue *pphp_exception_field(const pobject *object, const char *name,
+                                   size_t length);
+void pphp_exception_set_location(pobject *object, const char *file,
+                                 uint32_t line);
+void pphp_exception_set_code(pobject *object, pphp_int code);
+void pphp_exception_capture_trace(pphp_state *state, pobject *object);
 
 #endif

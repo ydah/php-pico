@@ -180,7 +180,7 @@ static int execute_array_set(pphp_state *state, int append) {
     if (!ok) {
         pv_release(array_value);
         pv_release(value);
-        pphp_runtime_error(state, 0U, "array update failed");
+        pphp_runtime_error(state, 0U, "out of memory updating array");
         return 0;
     }
     if (!push(state, array_value)) {
@@ -195,6 +195,132 @@ static void release_range(pphp_state *state, size_t begin, size_t end) {
     for (i = begin; i < end; i++) {
         pv_release(state->stack[i]);
     }
+}
+
+static int throw_exception(pphp_state *state, pvalue exception,
+                           size_t throw_pc) {
+    if (exception.type == PT_OBJECT) {
+        pphp_exception_capture_trace(state, (pobject *)exception.as.gc);
+    }
+    while (state->frame_count != 0U) {
+        pframe *frame = &state->frames[state->frame_count - 1U];
+        size_t i;
+        for (i = 0U; i < frame->proto->catch_count; i++) {
+            const pcatch *entry = &frame->proto->catches[i];
+            int matches = 0;
+            if (throw_pc < entry->try_start || throw_pc >= entry->try_end) continue;
+            if (entry->class_constant == UINT16_MAX) {
+                matches = 1;
+            } else if (entry->class_constant < frame->proto->constant_count &&
+                       frame->proto->constants[entry->class_constant].type == PT_STRING) {
+                const pstring *name = (const pstring *)
+                    frame->proto->constants[entry->class_constant].as.gc;
+                pclass *expected = pphp_find_class(state, name->data, name->length);
+                matches = exception.type == PT_OBJECT && expected != NULL &&
+                          pclass_is_a(((pobject *)exception.as.gc)->class_entry, expected);
+            }
+            if (!matches) continue;
+            release_range(state, frame->base + frame->proto->n_locals,
+                          state->stack_count);
+            state->stack_count = frame->base + frame->proto->n_locals;
+            if (entry->class_constant == UINT16_MAX) {
+                if (entry->variable_slot != UINT8_MAX &&
+                    entry->variable_slot < frame->proto->n_locals) {
+                    pv_release(state->stack[frame->base + entry->variable_slot]);
+                    state->stack[frame->base + entry->variable_slot] = exception;
+                } else {
+                    if (state->has_pending_exception) {
+                        pv_release(state->pending_exception);
+                    }
+                    state->pending_exception = exception;
+                    state->has_pending_exception = 1;
+                }
+            } else if (entry->variable_slot != UINT8_MAX &&
+                       entry->variable_slot < frame->proto->n_locals) {
+                pv_release(state->stack[frame->base + entry->variable_slot]);
+                state->stack[frame->base + entry->variable_slot] = exception;
+            } else {
+                pv_release(exception);
+            }
+            frame->pc = entry->handler_pc;
+            return 1;
+        }
+        release_range(state, frame->base, state->stack_count);
+        state->stack_count = frame->base;
+        if (frame->has_return_override) {
+            pv_release(frame->return_override);
+            frame->has_return_override = 0;
+        }
+        state->frame_count--;
+        if (state->frame_count != 0U) {
+            pframe *caller = &state->frames[state->frame_count - 1U];
+            throw_pc = caller->pc == 0U ? 0U : caller->pc - 1U;
+        }
+    }
+    if (exception.type == PT_OBJECT) {
+        pobject *object = (pobject *)exception.as.gc;
+        const pstring *message = pphp_exception_message(object);
+        const pvalue *file_value = pphp_exception_field(object, "file", 4U);
+        const pvalue *line_value = pphp_exception_field(object, "line", 4U);
+        const pstring *file = file_value != NULL && file_value->type == PT_STRING
+                                  ? (const pstring *)file_value->as.gc
+                                  : NULL;
+        uint32_t line = line_value != NULL && line_value->type == PT_INT &&
+                                line_value->as.i >= 0
+                            ? (uint32_t)line_value->as.i
+                            : 0U;
+        pphp_runtime_error(state, line,
+                           "PHP Fatal error: Uncaught %.*s: %.*s in %.*s:%u",
+                           (int)object->class_entry->name->length,
+                           object->class_entry->name->data,
+                           message == NULL ? 0 : (int)message->length,
+                           message == NULL ? "" : message->data,
+                           file == NULL ? 8 : (int)file->length,
+                           file == NULL ? "<source>" : file->data, line);
+    } else {
+        pphp_runtime_error(state, 0U, "Uncaught non-object exception");
+    }
+    pv_release(exception);
+    return 0;
+}
+
+static void convert_runtime_error(pphp_state *state, size_t throw_pc) {
+    char message[sizeof(state->error)];
+    const char *class_name = "Error";
+    pobject *exception;
+    if (state->error[0] == '\0' || state->frame_count == 0U) return;
+    (void)snprintf(message, sizeof(message), "%s", state->error);
+    if (state->error_line == 0U) {
+        state->error_line = state->frames[state->frame_count - 1U].line;
+    }
+    if (strstr(message, "Division by zero") != NULL ||
+        strstr(message, "Modulo by zero") != NULL) {
+        class_name = "DivisionByZeroError";
+    } else if (strstr(message, "out of memory") != NULL ||
+               strstr(message, "Out of memory") != NULL) {
+        class_name = "OutOfMemoryError";
+    } else if (strstr(message, "Too few arguments") != NULL ||
+               strstr(message, "Too many arguments") != NULL ||
+               strstr(message, "expects exactly") != NULL ||
+               strstr(message, "expects at most") != NULL) {
+        class_name = "ArgumentCountError";
+    } else if (strstr(message, "expects") != NULL ||
+               strstr(message, "unsupported operand") != NULL) {
+        class_name = "TypeError";
+    }
+    state->error[0] = '\0';
+    if (strcmp(class_name, "OutOfMemoryError") == 0 &&
+        state->oom_exception != NULL) {
+        exception = state->oom_exception;
+        pv_retain(pv_heap(PT_OBJECT, &exception->header));
+    } else {
+        exception = pphp_exception_new(state, class_name, message);
+    }
+    if (exception == NULL) {
+        (void)snprintf(state->error, sizeof(state->error), "%s", message);
+        return;
+    }
+    (void)throw_exception(state, pv_heap(PT_OBJECT, &exception->header), throw_pc);
 }
 
 static int call_function(pphp_state *state, pframe *caller, uint16_t name_index,
@@ -358,6 +484,11 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
         pphp_runtime_error(state, 0U, "module has no entry point");
         return PPHP_E_RUNTIME;
     }
+    pphp_clear_classes(state);
+    if (!pphp_register_exception_classes(state)) {
+        pphp_runtime_error(state, 0U, "cannot initialize exception classes");
+        return PPHP_E_RUNTIME;
+    }
     state->module = module;
     state->stack_count = module->protos[0]->n_locals;
     state->frame_count = 1U;
@@ -373,6 +504,8 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
     }
     while (state->frame_count != 0U && state->error[0] == '\0') {
         pframe *frame = &state->frames[state->frame_count - 1U];
+        size_t instruction_pc = frame->pc;
+        int exception_processed = 0;
         uint8_t opcode = read_u8(state, frame);
         switch ((pphp_opcode)opcode) {
             case OP_NOP: break;
@@ -757,6 +890,12 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                         argument_count * sizeof(*state->stack));
                 state->stack[base] = pv_heap(PT_OBJECT, &object->header);
                 state->stack_count++;
+                if (pphp_object_is_throwable(state, object)) {
+                    pphp_exception_set_location(
+                        object,
+                        state->chunk_name == NULL ? "<source>" : state->chunk_name,
+                        frame->line);
+                }
                 constructor = pclass_find_method(class_entry, "__construct", 11U);
                 if (constructor != NULL) {
                     if (!pclass_member_visible(constructor->flags, constructor->owner,
@@ -765,6 +904,42 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                                            "cannot access non-public constructor");
                     } else {
                         (void)enter_method(state, frame, constructor, argument_count, 1);
+                    }
+                } else if (pphp_object_is_throwable(state, object)) {
+                    if (argument_count > 2U) {
+                        pphp_runtime_error(state, frame->line,
+                                           "exception constructor expects at most two arguments");
+                    } else {
+                        int valid = 1;
+                        if (argument_count >= 1U) {
+                        const pproperty *property = pclass_find_property(
+                            class_entry, "message", 7U);
+                        pstring *message = pv_to_string(state->stack[base + 1U]);
+                        if (property == NULL || message == NULL) {
+                            ps_destroy(message);
+                            pphp_runtime_error(state, frame->line,
+                                               "invalid exception message");
+                            valid = 0;
+                        } else {
+                            pv_release(object->slots[property->slot]);
+                            object->slots[property->slot] =
+                                pv_heap(PT_STRING, &message->header);
+                        }
+                        }
+                        if (valid && argument_count == 2U) {
+                            if (state->stack[base + 2U].type != PT_INT) {
+                                pphp_runtime_error(state, frame->line,
+                                                   "exception code expects int");
+                                valid = 0;
+                            } else {
+                                pphp_exception_set_code(
+                                    object, state->stack[base + 2U].as.i);
+                            }
+                        }
+                        if (valid) {
+                            release_range(state, base + 1U, state->stack_count);
+                            state->stack_count = base + 1U;
+                        }
                     }
                 } else if (argument_count != 0U) {
                     pphp_runtime_error(state, frame->line,
@@ -859,6 +1034,38 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                     break;
                 }
                 object = (pobject *)state->stack[base].as.gc;
+                if (pphp_object_is_throwable(state, object) && argument_count == 0U) {
+                    const char *field = NULL;
+                    size_t field_length = 0U;
+                    const pvalue *value;
+                    if (ps_equal_bytes(name, "getMessage", 10U)) {
+                        field = "message";
+                        field_length = 7U;
+                    } else if (ps_equal_bytes(name, "getCode", 7U)) {
+                        field = "code";
+                        field_length = 4U;
+                    } else if (ps_equal_bytes(name, "getFile", 7U)) {
+                        field = "file";
+                        field_length = 4U;
+                    } else if (ps_equal_bytes(name, "getLine", 7U)) {
+                        field = "line";
+                        field_length = 4U;
+                    } else if (ps_equal_bytes(name, "getTraceAsString", 16U)) {
+                        field = "trace";
+                        field_length = 5U;
+                    }
+                    value = field == NULL
+                                ? NULL
+                                : pphp_exception_field(object, field, field_length);
+                    if (value != NULL) {
+                        pvalue result = *value;
+                        pv_retain(result);
+                        release_range(state, base, state->stack_count);
+                        state->stack_count = base;
+                        (void)push(state, result);
+                        break;
+                    }
+                }
                 method = pclass_find_method(object->class_entry, name->data, name->length);
                 if (method == NULL) {
                     pphp_runtime_error(state, frame->line, "undefined method %.*s()",
@@ -888,12 +1095,40 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                 (void)push(state, pv_bool(matches));
                 break;
             }
+            case OP_THROW: {
+                pvalue exception = pop(state);
+                if (exception.type != PT_OBJECT ||
+                    !pphp_object_is_throwable(state, (pobject *)exception.as.gc)) {
+                    pv_release(exception);
+                    pphp_runtime_error(state, frame->line,
+                                       "Can only throw objects implementing Throwable");
+                } else {
+                    (void)throw_exception(state, exception, instruction_pc);
+                    exception_processed = 1;
+                }
+                break;
+            }
+            case OP_RETHROW:
+                if (!state->has_pending_exception) {
+                    pphp_runtime_error(state, frame->line,
+                                       "RETHROW without pending exception");
+                } else {
+                    pvalue exception = state->pending_exception;
+                    state->pending_exception = pv_null();
+                    state->has_pending_exception = 0;
+                    (void)throw_exception(state, exception, instruction_pc);
+                    exception_processed = 1;
+                }
+                break;
             case OP_LINE:
                 frame->line = read_u16(state, frame);
                 break;
             default:
                 pphp_runtime_error(state, frame->line, "unknown opcode 0x%02x", opcode);
                 break;
+        }
+        if (state->error[0] != '\0' && !exception_processed) {
+            convert_runtime_error(state, instruction_pc);
         }
     }
     if (state->error[0] != '\0') {
@@ -906,6 +1141,11 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
         release_range(state, 0U, state->stack_count);
         state->stack_count = 0U;
         state->frame_count = 0U;
+        if (state->has_pending_exception) {
+            pv_release(state->pending_exception);
+            state->pending_exception = pv_null();
+            state->has_pending_exception = 0;
+        }
         return PPHP_E_RUNTIME;
     }
     return PPHP_OK;

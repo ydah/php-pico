@@ -87,6 +87,10 @@ int pphp_register_class(pphp_state *state, pclass *class_entry) {
 void pphp_clear_classes(pphp_state *state) {
     size_t i;
     if (state == NULL) return;
+    if (state->oom_exception != NULL) {
+        pv_release(pv_heap(PT_OBJECT, &state->oom_exception->header));
+        state->oom_exception = NULL;
+    }
     if (state->building_class != NULL) {
         pclass_destroy(state->building_class);
         state->building_class = NULL;
@@ -138,6 +142,7 @@ int pphp_exec_source_mode(pphp_state *state, const char *source, size_t length,
     }
     state->error[0] = '\0';
     state->error_line = 0U;
+    state->chunk_name = chunk_name == NULL ? "<source>" : chunk_name;
     pc_arena_init(&arena, 4096U);
     pc_parser_init(&parser, &arena, source, length, repl);
     program = pc_parse_program(&parser);
@@ -175,6 +180,7 @@ int pphp_exec_pbc(pphp_state *state, const void *pbc, size_t length) {
     }
     state->error[0] = '\0';
     state->error_line = 0U;
+    state->chunk_name = "<pbc>";
     result = pphp_pbc_load(pbc, length, &module);
     if (result != PPHP_OK) {
         pphp_runtime_error(state, 0U, "invalid or incompatible PBC image");

@@ -177,6 +177,29 @@ static int disassemble_proto(FILE *stream, const pproto *proto, size_t index) {
         fputc('\n', stream);
         pc += operands;
     }
+    if (proto->catch_count != 0U) {
+        size_t i;
+        fputs("catch table:\n", stream);
+        for (i = 0U; i < proto->catch_count; i++) {
+            const pcatch *entry = &proto->catches[i];
+            fprintf(stream, "  [%u, %u) -> %u ", entry->try_start,
+                    entry->try_end, entry->handler_pc);
+            if (entry->class_constant == UINT16_MAX) {
+                fputs("finally", stream);
+            } else if (entry->class_constant < proto->constant_count &&
+                       proto->constants[entry->class_constant].type == PT_STRING) {
+                const pstring *name = (const pstring *)
+                    proto->constants[entry->class_constant].as.gc;
+                fprintf(stream, "catch %.*s", (int)name->length, name->data);
+            } else {
+                fputs("catch <invalid>", stream);
+            }
+            if (entry->variable_slot != UINT8_MAX) {
+                fprintf(stream, " slot=%u", entry->variable_slot);
+            }
+            fputc('\n', stream);
+        }
+    }
     return 1;
 }
 

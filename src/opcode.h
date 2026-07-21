@@ -73,6 +73,8 @@ typedef enum pphp_opcode {
     OP_PROP_SET = 0x72,
     OP_MCALL = 0x73,
     OP_INSTANCEOF = 0x78,
+    OP_THROW = 0x81,
+    OP_RETHROW = 0x82,
     OP_DEF_CLASS = 0x86,
     OP_DEF_METHOD = 0x87,
     OP_DEF_PROP = 0x88,

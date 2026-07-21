@@ -112,7 +112,10 @@ TEST(argument_count_and_stack_limits_are_checked) {
 
 TEST(pbc_serialization_round_trips_through_loader) {
     const char *source =
-        "function twice($x) { return $x * 2; } echo twice(21), ':' , 1.25;";
+        "function twice($x) { return $x * 2; }"
+        "try { echo twice(21), ':' , 1.25; throw new Exception('ok'); }"
+        "catch (Exception $error) { echo ':', $error->getMessage(); }"
+        "finally { echo '!'; }";
     const char *path = "build/host/test_roundtrip.pbc";
     pphp_state *state = pphp_open(vm_pool, sizeof(vm_pool));
     pc_arena arena;
@@ -135,7 +138,7 @@ TEST(pbc_serialization_round_trips_through_loader) {
     memset(&output, 0, sizeof(output));
     pphp_set_output(state, capture_output, &output);
     ASSERT_EQ(PPHP_OK, pphp_vm_execute(state, &loaded));
-    ASSERT_STR("42:1.25", output.bytes);
+    ASSERT_STR("42:1.25:ok!", output.bytes);
     pmodule_destroy(&loaded);
     pphp_close(state);
     ASSERT_EQ(0, remove(path));
@@ -222,6 +225,106 @@ TEST(class_visibility_and_readonly_are_enforced) {
     }
 }
 
+TEST(explicit_exceptions_match_hierarchy_and_union_catches) {
+    const char *source =
+        "try { throw new InvalidArgumentException('bad input', 73); }"
+        "catch (TypeError|RuntimeException $error) {"
+        " echo $error->getMessage(), ':', $error->getCode(), ':',"
+        " $error->getFile(), ':', $error->getLine(), ':',"
+        " (strlen($error->getTraceAsString()) > 0), ':',"
+        " ($error instanceof Exception);"
+        "}";
+    output_buffer output;
+    ASSERT_EQ(PPHP_OK, execute(source, &output, NULL, 0U));
+    ASSERT_STR("bad input:73:test:1:1:1", output.bytes);
+}
+
+TEST(runtime_errors_are_converted_to_catchable_errors) {
+    const char *source =
+        "function one($value) { return $value; }"
+        "try { echo 1 / 0; }"
+        "catch (DivisionByZeroError $error) { echo $error->getMessage(); }"
+        "try { one(); }"
+        "catch (ArgumentCountError) { echo ':args'; }"
+        "try { throw new Exception('bad', 'code'); }"
+        "catch (TypeError) { echo ':type'; }";
+    output_buffer output;
+    ASSERT_EQ(PPHP_OK, execute(source, &output, NULL, 0U));
+    ASSERT_STR("Division by zero:args:type", output.bytes);
+}
+
+TEST(out_of_memory_uses_the_preallocated_catchable_exception) {
+    const char *source =
+        "$items = [];"
+        "try { for ($i = 0; $i < 20000; $i++) { $items[] = $i; } }"
+        "catch (OutOfMemoryError $error) { echo $error->getMessage(); }";
+    output_buffer output;
+    ASSERT_EQ(PPHP_OK, execute(source, &output, NULL, 0U));
+    ASSERT_STR("Out of memory", output.bytes);
+}
+
+TEST(finally_runs_for_normal_return_caught_and_rethrown_paths) {
+    const char *source =
+        "function returned() { try { return 7; } finally { echo 'R'; } }"
+        "try { echo 'A'; } finally { echo 'F'; }"
+        "try { throw new Exception('handled'); }"
+        "catch (Exception $error) { echo ':C'; } finally { echo 'Z'; }"
+        "echo ':', returned();";
+    output_buffer output;
+    ASSERT_EQ(PPHP_OK, execute(source, &output, NULL, 0U));
+    ASSERT_STR("AF:CZR:7", output.bytes);
+    {
+        char error[256];
+        const char *rethrow =
+            "try { throw new Exception('old'); }"
+            "catch (Exception $error) { echo 'C'; throw new RuntimeException('new'); }"
+            "finally { echo 'F'; }";
+        ASSERT_EQ(PPHP_E_RUNTIME,
+                  execute(rethrow, &output, error, sizeof(error)));
+        ASSERT_STR("CF", output.bytes);
+        ASSERT_TRUE(strstr(error, "Uncaught RuntimeException: new") != NULL);
+    }
+}
+
+TEST(nested_finally_preserves_the_original_pending_exception) {
+    const char *source =
+        "try { throw new Exception('outer'); }"
+        "finally {"
+        " try { throw new Exception('inner'); }"
+        " catch (Exception $error) { echo $error->getMessage(), ':'; }"
+        "}";
+    output_buffer output;
+    char error[256];
+    ASSERT_EQ(PPHP_E_RUNTIME, execute(source, &output, error, sizeof(error)));
+    ASSERT_STR("inner:", output.bytes);
+    ASSERT_TRUE(strstr(error, "Uncaught Exception: outer") != NULL);
+}
+
+TEST(loop_transfers_run_only_the_finally_blocks_they_cross) {
+    const char *source =
+        "try { while (true) { echo 'B'; break; } echo 'A'; }"
+        "finally { echo 'F'; }"
+        "$i = 0; while ($i < 2) {"
+        " try { $i++; if ($i === 1) continue; echo 'C'; }"
+        " finally { echo 'G'; }"
+        "}"
+        "while (true) { try { echo 'D'; break; } finally { echo 'H'; } }";
+    output_buffer output;
+    ASSERT_EQ(PPHP_OK, execute(source, &output, NULL, 0U));
+    ASSERT_STR("BAFGCGDH", output.bytes);
+}
+
+TEST(multilevel_continue_releases_inner_foreach_iterators) {
+    const char *source =
+        "foreach ([1, 2] as $outer) {"
+        " foreach ([3] as $inner) { echo $outer; continue 2; }"
+        " echo 'bad';"
+        "} echo ':done';";
+    output_buffer output;
+    ASSERT_EQ(PPHP_OK, execute(source, &output, NULL, 0U));
+    ASSERT_STR("12:done", output.bytes);
+}
+
 int main(void) {
     static const test_case tests[] = {
         {"arithmetic VM", arithmetic_runs_through_compiler_and_vm},
@@ -237,7 +340,14 @@ int main(void) {
         {"foreach snapshot", foreach_uses_snapshot_when_array_is_modified},
         {"object methods", classes_construct_objects_and_dispatch_methods},
         {"class inheritance", class_inheritance_reuses_properties_and_methods},
-        {"visibility and readonly", class_visibility_and_readonly_are_enforced}
+        {"visibility and readonly", class_visibility_and_readonly_are_enforced},
+        {"explicit exceptions", explicit_exceptions_match_hierarchy_and_union_catches},
+        {"catchable runtime errors", runtime_errors_are_converted_to_catchable_errors},
+        {"preallocated OOM exception", out_of_memory_uses_the_preallocated_catchable_exception},
+        {"finally control flow", finally_runs_for_normal_return_caught_and_rethrown_paths},
+        {"nested finally", nested_finally_preserves_the_original_pending_exception},
+        {"finally loop transfers", loop_transfers_run_only_the_finally_blocks_they_cross},
+        {"multilevel foreach continue", multilevel_continue_releases_inner_foreach_iterators}
     };
     return run_tests(tests, sizeof(tests) / sizeof(tests[0]));
 }

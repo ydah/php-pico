@@ -165,6 +165,33 @@ TEST(classes_properties_methods_and_new_parse) {
     pc_arena_destroy(&arena);
 }
 
+TEST(try_catch_union_and_finally_build_exception_ast) {
+    const char *source =
+        "try { throw new RuntimeException('bad'); }"
+        "catch (RuntimeException|Error $error) { echo $error; }"
+        "finally { echo 'done'; }";
+    pc_arena arena;
+    pc_parser parser;
+    pc_ast *program = parse_source(source, &arena, &parser);
+    pc_ast *try_node;
+    pc_ast *catch_node;
+    ASSERT_TRUE(program != NULL);
+    try_node = program->as.list.items;
+    ASSERT_EQ(AST_TRY, try_node->kind);
+    ASSERT_EQ(AST_THROW, try_node->as.try_stmt.try_block->as.list.items->kind);
+    catch_node = try_node->as.try_stmt.catches;
+    ASSERT_EQ(AST_CATCH, catch_node->kind);
+    ASSERT_TRUE(catch_node->as.catch_stmt.types->next != NULL);
+    ASSERT_TRUE(catch_node->as.catch_stmt.types->next->next == NULL);
+    ASSERT_EQ(AST_BLOCK, try_node->as.try_stmt.finally_block->kind);
+    pc_arena_destroy(&arena);
+
+    program = parse_source("try {}", &arena, &parser);
+    ASSERT_TRUE(program == NULL);
+    ASSERT_TRUE(strstr(pc_parser_error(&parser), "requires catch or finally") != NULL);
+    pc_arena_destroy(&arena);
+}
+
 int main(void) {
     static const test_case tests[] = {
         {"operator precedence", operator_precedence_matches_php_8},
@@ -175,7 +202,8 @@ int main(void) {
         {"unsupported syntax", parser_rejects_unsupported_reserved_syntax},
         {"parser depth", parser_enforces_nesting_limit},
         {"syntax diagnostics", parser_reports_first_syntax_error_with_line},
-        {"class syntax", classes_properties_methods_and_new_parse}
+        {"class syntax", classes_properties_methods_and_new_parse},
+        {"exception syntax", try_catch_union_and_finally_build_exception_ast}
     };
     return run_tests(tests, sizeof(tests) / sizeof(tests[0]));
 }

@@ -57,6 +57,7 @@ void pproto_destroy(pproto *proto) {
     pphp_free(proto->locals);
     pphp_free(proto->constants);
     pphp_free(proto->code);
+    pphp_free(proto->catches);
     pphp_free(proto);
 }
 
@@ -148,6 +149,15 @@ int pproto_add_local(pproto *proto, const char *name, size_t length, uint8_t *sl
     }
     *slot = proto->n_locals;
     proto->locals[proto->n_locals++] = string;
+    return 1;
+}
+
+int pproto_add_catch(pproto *proto, pcatch entry) {
+    if (proto->catch_count >= UINT16_MAX) return 0;
+    if (proto->catch_count == proto->catch_capacity &&
+        !grow_array((void **)&proto->catches, sizeof(*proto->catches),
+                    &proto->catch_capacity, proto->catch_count + 1U)) return 0;
+    proto->catches[proto->catch_count++] = entry;
     return 1;
 }
 
@@ -312,6 +322,7 @@ int pphp_pbc_write_file(const pmodule *module, const char *path) {
         for (j = 0U; j < proto->constant_count; j++) {
             total += serialized_constant_size(proto->constants[j]);
         }
+        total += proto->catch_count * 10U;
         total = align4(total);
     }
     if (total > UINT32_MAX) goto done;
@@ -351,7 +362,7 @@ int pphp_pbc_write_file(const pmodule *module, const char *path) {
         put_u16(bytes, offset + 6U, proto->max_stack);
         put_u16(bytes, offset + 8U, (uint16_t)proto->code_length);
         put_u16(bytes, offset + 10U, (uint16_t)proto->constant_count);
-        put_u16(bytes, offset + 12U, 0U);
+        put_u16(bytes, offset + 12U, (uint16_t)proto->catch_count);
         put_u16(bytes, offset + 14U, name_sid);
         offset += 16U;
         memcpy(bytes + offset, proto->code, proto->code_length);
@@ -386,6 +397,26 @@ int pphp_pbc_write_file(const pmodule *module, const char *path) {
             } else {
                 goto done;
             }
+        }
+        for (j = 0U; j < proto->catch_count; j++) {
+            const pcatch *entry = &proto->catches[j];
+            uint16_t class_sid = UINT16_MAX;
+            if (entry->class_constant != UINT16_MAX) {
+                if (entry->class_constant >= proto->constant_count ||
+                    proto->constants[entry->class_constant].type != PT_STRING ||
+                    !string_index(&strings,
+                                  (pstring *)proto->constants[entry->class_constant].as.gc,
+                                  &class_sid)) {
+                    goto done;
+                }
+            }
+            put_u16(bytes, offset, entry->try_start);
+            put_u16(bytes, offset + 2U, entry->try_end);
+            put_u16(bytes, offset + 4U, entry->handler_pc);
+            put_u16(bytes, offset + 6U, class_sid);
+            bytes[offset + 8U] = entry->variable_slot;
+            bytes[offset + 9U] = 0U;
+            offset += 10U;
         }
     }
     file = fopen(path, "wb");
@@ -474,12 +505,14 @@ int pphp_pbc_load(const void *data, size_t length, pmodule *module) {
         size_t offset = get_u32(bytes, 16U + (size_t)n_strings * 4U + i * 4U);
         uint16_t code_length;
         uint16_t constant_count;
+        uint16_t catch_count;
         uint16_t name_sid;
         pproto *proto;
         size_t j;
         if (offset + 16U > length) goto failed_module;
         code_length = get_u16(bytes, offset + 8U);
         constant_count = get_u16(bytes, offset + 10U);
+        catch_count = get_u16(bytes, offset + 12U);
         name_sid = get_u16(bytes, offset + 14U);
         if (name_sid >= n_strings || offset + 16U + align4(code_length) > length) {
             goto failed_module;
@@ -541,6 +574,35 @@ int pphp_pbc_load(const void *data, size_t length, pmodule *module) {
                 result = PPHP_E_NOMEM;
                 goto failed_module;
             }
+        }
+        for (j = 0U; j < catch_count; j++) {
+            pcatch entry;
+            uint16_t class_sid;
+            if (offset + 10U > length) goto failed_module;
+            entry.try_start = get_u16(bytes, offset);
+            entry.try_end = get_u16(bytes, offset + 2U);
+            entry.handler_pc = get_u16(bytes, offset + 4U);
+            class_sid = get_u16(bytes, offset + 6U);
+            entry.class_constant = UINT16_MAX;
+            entry.variable_slot = bytes[offset + 8U];
+            entry.reserved = 0U;
+            if (entry.try_start > entry.try_end || entry.try_end > code_length ||
+                entry.handler_pc >= code_length ||
+                (entry.variable_slot != UINT8_MAX &&
+                 entry.variable_slot >= proto->n_locals)) goto failed_module;
+            if (class_sid != UINT16_MAX) {
+                pvalue class_name;
+                uint16_t class_constant;
+                if (class_sid >= n_strings) goto failed_module;
+                class_name = pv_heap(PT_STRING, &strings[class_sid]->header);
+                if (!pproto_add_constant(proto, class_name, &class_constant)) {
+                    result = PPHP_E_NOMEM;
+                    goto failed_module;
+                }
+                entry.class_constant = class_constant;
+            }
+            if (!pproto_add_catch(proto, entry)) goto failed_module;
+            offset += 10U;
         }
     }
     result = PPHP_OK;
@@ -620,6 +682,8 @@ const char *pphp_opcode_name(uint8_t opcode) {
         case OP_PROP_SET: return "PROP_SET";
         case OP_MCALL: return "MCALL";
         case OP_INSTANCEOF: return "INSTANCEOF";
+        case OP_THROW: return "THROW";
+        case OP_RETHROW: return "RETHROW";
         case OP_DEF_CLASS: return "DEF_CLASS";
         case OP_DEF_METHOD: return "DEF_METHOD";
         case OP_DEF_PROP: return "DEF_PROP";

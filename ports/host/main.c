@@ -134,8 +134,12 @@ static int execute_source(const char *source, size_t length, const char *name,
     pphp_set_output(state, write_stdout, stdout);
     result = pphp_exec_source_mode(state, source, length, name, repl);
     if (result != PPHP_OK) {
-        fprintf(stderr, "%s on line %u\n", pphp_last_error(state),
-                pphp_last_error_line(state));
+        if (strncmp(pphp_last_error(state), "PHP Fatal error:", 16U) == 0) {
+            fprintf(stderr, "%s\n", pphp_last_error(state));
+        } else {
+            fprintf(stderr, "%s on line %u\n", pphp_last_error(state),
+                    pphp_last_error_line(state));
+        }
     }
     pphp_close(state);
     return result == PPHP_OK ? 0 : (result == PPHP_E_PARSE ? 1 : 255);

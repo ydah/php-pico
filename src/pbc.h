@@ -7,6 +7,15 @@
 #include "pstring.h"
 #include "value.h"
 
+typedef struct pcatch {
+    uint16_t try_start;
+    uint16_t try_end;
+    uint16_t handler_pc;
+    uint16_t class_constant;
+    uint8_t variable_slot;
+    uint8_t reserved;
+} pcatch;
+
 typedef struct pproto {
     pstring *name;
     uint8_t n_params;
@@ -22,6 +31,9 @@ typedef struct pproto {
     size_t constant_count;
     size_t constant_capacity;
     pstring **locals;
+    pcatch *catches;
+    size_t catch_count;
+    size_t catch_capacity;
 } pproto;
 
 typedef struct pmodule {
@@ -40,6 +52,7 @@ int pproto_add_constant(pproto *proto, pvalue value, uint16_t *index);
 int pproto_add_local(pproto *proto, const char *name, size_t length, uint8_t *slot);
 int pproto_find_local(const pproto *proto, const char *name, size_t length,
                       uint8_t *slot);
+int pproto_add_catch(pproto *proto, pcatch entry);
 
 int pmodule_init(pmodule *module);
 void pmodule_destroy(pmodule *module);

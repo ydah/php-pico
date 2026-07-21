@@ -93,7 +93,7 @@ const char *pc_ast_kind_name(pc_ast_kind kind) {
         "ECHO", "IF", "WHILE", "DO_WHILE", "FOR", "FOREACH", "SWITCH",
         "CASE", "BREAK", "CONTINUE", "RETURN", "THROW", "GLOBAL", "STATIC",
         "CONST", "FUNCTION", "PARAM", "INCLUDE", "UNSET", "ISSET", "EMPTY",
-        "CLASS", "PROPERTY", "NEW"
+        "CLASS", "PROPERTY", "NEW", "TRY", "CATCH"
     };
     if ((size_t)kind >= sizeof(names) / sizeof(names[0])) {
         return "UNKNOWN";
@@ -269,6 +269,15 @@ static void dump_node(FILE *stream, const pc_ast *node, unsigned depth) {
         case AST_NEW:
             dump_node(stream, node->as.new_expr.class_name, depth + 1U);
             dump_list(stream, node->as.new_expr.arguments, depth + 1U);
+            break;
+        case AST_TRY:
+            dump_node(stream, node->as.try_stmt.try_block, depth + 1U);
+            dump_list(stream, node->as.try_stmt.catches, depth + 1U);
+            dump_node(stream, node->as.try_stmt.finally_block, depth + 1U);
+            break;
+        case AST_CATCH:
+            dump_list(stream, node->as.catch_stmt.types, depth + 1U);
+            dump_node(stream, node->as.catch_stmt.body, depth + 1U);
             break;
         default:
             break;

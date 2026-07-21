@@ -61,7 +61,9 @@ typedef enum pc_ast_kind {
     AST_EMPTY,
     AST_CLASS,
     AST_PROPERTY,
-    AST_NEW
+    AST_NEW,
+    AST_TRY,
+    AST_CATCH
 } pc_ast_kind;
 
 typedef struct pc_ast pc_ast;
@@ -186,6 +188,16 @@ struct pc_ast {
             pc_ast *arguments;
             size_t count;
         } new_expr;
+        struct {
+            pc_ast *try_block;
+            pc_ast *catches;
+            pc_ast *finally_block;
+        } try_stmt;
+        struct {
+            pc_ast *types;
+            pc_token variable;
+            pc_ast *body;
+        } catch_stmt;
     } as;
 };
 

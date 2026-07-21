@@ -11,6 +11,7 @@
 
 typedef struct loop_context {
     size_t continue_target;
+    unsigned finally_count;
     int is_foreach;
 } loop_context;
 
@@ -18,6 +19,7 @@ typedef struct jump_record {
     size_t operand;
     unsigned loop_index;
     int is_continue;
+    int patched;
 } jump_record;
 
 typedef struct generator {
@@ -28,6 +30,8 @@ typedef struct generator {
     unsigned loop_count;
     jump_record jumps[256];
     size_t jump_count;
+    const pc_ast *finally_blocks[PPHP_PARSE_DEPTH_MAX];
+    unsigned finally_count;
     int failed;
 } generator;
 
@@ -295,9 +299,33 @@ static int variable_slot(generator *gen, pc_token token, uint8_t *slot) {
     return 1;
 }
 
+static int exception_slot(generator *gen, uint32_t line, uint8_t *slot) {
+    char name[32];
+    int length = snprintf(name, sizeof(name), "\001exception%u",
+                          (unsigned)gen->proto->n_locals);
+    if (length <= 0 || (size_t)length >= sizeof(name) ||
+        !pproto_add_local(gen->proto, name, (size_t)length, slot)) {
+        fail(gen, line, "cannot allocate pending exception slot");
+        return 0;
+    }
+    return 1;
+}
+
 static void compile_expression(generator *gen, const pc_ast *node);
 static void compile_statement(generator *gen, const pc_ast *node);
 static void compile_class_definition(generator *gen, const pc_ast *class_node);
+
+static void compile_transfer_finally_blocks(generator *gen,
+                                            unsigned preserve_count) {
+    unsigned original = gen->finally_count;
+    unsigned remaining = original;
+    while (remaining > preserve_count && !gen->failed) {
+        remaining--;
+        gen->finally_count = remaining;
+        compile_statement(gen, gen->finally_blocks[remaining]);
+    }
+    gen->finally_count = original;
+}
 
 static pphp_opcode binary_opcode(pc_token_type type) {
     switch (type) {
@@ -695,6 +723,10 @@ static void compile_expression(generator *gen, const pc_ast *node) {
                 fail(gen, node->line, "unset target is not supported");
             }
             break;
+        case AST_THROW:
+            compile_expression(gen, node->as.expression.expression);
+            emit_byte(gen, OP_THROW, node->line);
+            break;
         default:
             fail(gen, node->line, "AST node %s is not executable yet",
                  pc_ast_kind_name(node->kind));
@@ -704,6 +736,8 @@ static void compile_expression(generator *gen, const pc_ast *node) {
 
 static void record_loop_jump(generator *gen, const pc_ast *node, int is_continue) {
     unsigned level = node->as.jump.level;
+    unsigned target;
+    unsigned current;
     size_t operand;
     jump_record *record;
     if (level == 0U || level > gen->loop_count) {
@@ -715,31 +749,32 @@ static void record_loop_jump(generator *gen, const pc_ast *node, int is_continue
         fail(gen, node->line, "too many loop exits in one function");
         return;
     }
-    if (!is_continue) {
-        unsigned current = gen->loop_count;
-        unsigned target = gen->loop_count - level;
-        while (current > target) {
-            current--;
-            if (gen->loops[current].is_foreach) {
-                emit_byte(gen, OP_FE_FREE, node->line);
-            }
+    target = gen->loop_count - level;
+    compile_transfer_finally_blocks(gen, gen->loops[target].finally_count);
+    current = gen->loop_count;
+    while (current > target + (is_continue ? 1U : 0U)) {
+        current--;
+        if (gen->loops[current].is_foreach) {
+            emit_byte(gen, OP_FE_FREE, node->line);
         }
     }
     operand = emit_jump(gen, OP_JMP, node->line);
     record = &gen->jumps[gen->jump_count++];
     record->operand = operand;
-    record->loop_index = gen->loop_count - level;
+    record->loop_index = target;
     record->is_continue = is_continue;
+    record->patched = 0;
 }
 
 static void patch_loop_jumps(generator *gen, unsigned index, size_t break_target,
                              size_t continue_target, uint32_t line) {
     size_t i;
     for (i = 0U; i < gen->jump_count; i++) {
-        if (gen->jumps[i].loop_index == index) {
+        if (!gen->jumps[i].patched && gen->jumps[i].loop_index == index) {
             patch_jump(gen, gen->jumps[i].operand,
                        gen->jumps[i].is_continue ? continue_target : break_target,
                        line);
+            gen->jumps[i].patched = 1;
         }
     }
 }
@@ -805,6 +840,7 @@ static void compile_statement(generator *gen, const pc_ast *node) {
                 break;
             }
             gen->loops[gen->loop_count].continue_target = start;
+            gen->loops[gen->loop_count].finally_count = gen->finally_count;
             gen->loops[gen->loop_count].is_foreach = 0;
             gen->loop_count++;
             compile_statement(gen, node->as.loop.body);
@@ -823,6 +859,7 @@ static void compile_statement(generator *gen, const pc_ast *node) {
                 break;
             }
             gen->loops[gen->loop_count].continue_target = SIZE_MAX;
+            gen->loops[gen->loop_count].finally_count = gen->finally_count;
             gen->loops[gen->loop_count].is_foreach = 0;
             gen->loop_count++;
             compile_statement(gen, node->as.loop.body);
@@ -864,6 +901,7 @@ static void compile_statement(generator *gen, const pc_ast *node) {
                 break;
             }
             gen->loops[gen->loop_count].continue_target = SIZE_MAX;
+            gen->loops[gen->loop_count].finally_count = gen->finally_count;
             gen->loops[gen->loop_count].is_foreach = 0;
             gen->loop_count++;
             compile_statement(gen, node->as.for_stmt.body);
@@ -923,6 +961,7 @@ static void compile_statement(generator *gen, const pc_ast *node) {
                 emit_byte(gen, key_slot, node->line);
             }
             gen->loops[gen->loop_count].continue_target = loop_start;
+            gen->loops[gen->loop_count].finally_count = gen->finally_count;
             gen->loops[gen->loop_count].is_foreach = 1;
             gen->loop_count++;
             compile_statement(gen, node->as.foreach_stmt.body);
@@ -933,13 +972,170 @@ static void compile_statement(generator *gen, const pc_ast *node) {
             break;
         }
         case AST_RETURN:
-            if (node->as.expression.expression != NULL) {
+            if (gen->finally_count != 0U) {
+                uint8_t slot;
+                if (!pproto_add_local(gen->proto, "\x01return", 7U, &slot)) {
+                    fail(gen, node->line, "cannot allocate pending return slot");
+                    break;
+                }
+                if (node->as.expression.expression != NULL) {
+                    compile_expression(gen, node->as.expression.expression);
+                } else {
+                    emit_byte(gen, OP_LOAD_NULL, node->line);
+                }
+                emit_byte(gen, OP_STORE_LOCAL, node->line);
+                emit_byte(gen, slot, node->line);
+                compile_transfer_finally_blocks(gen, 0U);
+                emit_byte(gen, OP_LOAD_LOCAL, node->line);
+                emit_byte(gen, slot, node->line);
+                emit_byte(gen, OP_RET, node->line);
+            } else if (node->as.expression.expression != NULL) {
                 compile_expression(gen, node->as.expression.expression);
                 emit_byte(gen, OP_RET, node->line);
             } else {
                 emit_byte(gen, OP_RET_NULL, node->line);
             }
             break;
+        case AST_THROW:
+            compile_expression(gen, node->as.expression.expression);
+            emit_byte(gen, OP_THROW, node->line);
+            break;
+        case AST_TRY: {
+            size_t try_start = gen->proto->code_length;
+            size_t try_end;
+            size_t normal_jump;
+            size_t exit_jumps[64];
+            size_t exit_count = 0U;
+            size_t catch_starts[64];
+            size_t catch_ends[64];
+            size_t catch_range_count = 0U;
+            const pc_ast *catch_node;
+            size_t normal_target;
+            uint8_t pending_slot = UINT8_MAX;
+            if (node->as.try_stmt.finally_block != NULL &&
+                !exception_slot(gen, node->line, &pending_slot)) {
+                break;
+            }
+            if (node->as.try_stmt.finally_block != NULL) {
+                if (gen->finally_count >= PPHP_PARSE_DEPTH_MAX) {
+                    fail(gen, node->line, "finally nesting limit exceeded");
+                    break;
+                }
+                gen->finally_blocks[gen->finally_count++] =
+                    node->as.try_stmt.finally_block;
+            }
+            compile_statement(gen, node->as.try_stmt.try_block);
+            if (node->as.try_stmt.finally_block != NULL) gen->finally_count--;
+            try_end = gen->proto->code_length;
+            normal_jump = emit_jump(gen, OP_JMP, node->line);
+            catch_node = node->as.try_stmt.catches;
+            while (catch_node != NULL && !gen->failed) {
+                size_t handler = gen->proto->code_length;
+                const pc_ast *type = catch_node->as.catch_stmt.types;
+                uint8_t catch_slot = UINT8_MAX;
+                if (catch_node->as.catch_stmt.variable.length != 0U &&
+                    !variable_slot(gen, catch_node->as.catch_stmt.variable,
+                                   &catch_slot)) {
+                    break;
+                }
+                while (type != NULL) {
+                    pcatch entry;
+                    uint16_t class_name = name_constant(gen, type->as.literal.token);
+                    if (try_start > UINT16_MAX || try_end > UINT16_MAX ||
+                        handler > UINT16_MAX) {
+                        fail(gen, node->line, "try block exceeds bytecode range");
+                        break;
+                    }
+                    entry.try_start = (uint16_t)try_start;
+                    entry.try_end = (uint16_t)try_end;
+                    entry.handler_pc = (uint16_t)handler;
+                    entry.class_constant = class_name;
+                    entry.variable_slot = catch_slot;
+                    entry.reserved = 0U;
+                    if (!pproto_add_catch(gen->proto, entry)) {
+                        fail(gen, node->line, "too many catch handlers");
+                        break;
+                    }
+                    type = type->next;
+                }
+                if (node->as.try_stmt.finally_block != NULL) {
+                    gen->finally_blocks[gen->finally_count++] =
+                        node->as.try_stmt.finally_block;
+                }
+                compile_statement(gen, catch_node->as.catch_stmt.body);
+                if (node->as.try_stmt.finally_block != NULL) {
+                    if (catch_range_count >=
+                        sizeof(catch_starts) / sizeof(catch_starts[0])) {
+                        fail(gen, node->line, "too many catch clauses");
+                        break;
+                    }
+                    catch_starts[catch_range_count] = handler;
+                    catch_ends[catch_range_count] = gen->proto->code_length;
+                    catch_range_count++;
+                    gen->finally_count--;
+                    compile_statement(gen, node->as.try_stmt.finally_block);
+                }
+                if (exit_count >= sizeof(exit_jumps) / sizeof(exit_jumps[0])) {
+                    fail(gen, node->line, "too many catch clauses");
+                    break;
+                }
+                exit_jumps[exit_count++] = emit_jump(gen, OP_JMP, node->line);
+                catch_node = catch_node->next;
+            }
+            if (node->as.try_stmt.finally_block != NULL && !gen->failed) {
+                pcatch entry;
+                size_t handler = gen->proto->code_length;
+                size_t range_index;
+                if (try_start > UINT16_MAX || try_end > UINT16_MAX ||
+                    handler > UINT16_MAX) {
+                    fail(gen, node->line, "finally handler exceeds bytecode range");
+                    break;
+                }
+                entry.try_start = (uint16_t)try_start;
+                entry.try_end = (uint16_t)try_end;
+                entry.handler_pc = (uint16_t)handler;
+                entry.class_constant = UINT16_MAX;
+                entry.variable_slot = pending_slot;
+                entry.reserved = 0U;
+                if (!pproto_add_catch(gen->proto, entry)) {
+                    fail(gen, node->line, "too many exception handlers");
+                    break;
+                }
+                for (range_index = 0U;
+                     range_index < catch_range_count && !gen->failed;
+                     range_index++) {
+                    if (catch_starts[range_index] > UINT16_MAX ||
+                        catch_ends[range_index] > UINT16_MAX) {
+                        fail(gen, node->line, "catch block exceeds bytecode range");
+                        break;
+                    }
+                    if (catch_starts[range_index] == catch_ends[range_index]) {
+                        continue;
+                    }
+                    entry.try_start = (uint16_t)catch_starts[range_index];
+                    entry.try_end = (uint16_t)catch_ends[range_index];
+                    if (!pproto_add_catch(gen->proto, entry)) {
+                        fail(gen, node->line, "too many exception handlers");
+                        break;
+                    }
+                }
+                compile_statement(gen, node->as.try_stmt.finally_block);
+                emit_byte(gen, OP_LOAD_LOCAL, node->line);
+                emit_byte(gen, pending_slot, node->line);
+                emit_byte(gen, OP_THROW, node->line);
+            }
+            normal_target = gen->proto->code_length;
+            patch_jump(gen, normal_jump, normal_target, node->line);
+            if (node->as.try_stmt.finally_block != NULL) {
+                compile_statement(gen, node->as.try_stmt.finally_block);
+            }
+            while (exit_count > 0U) {
+                exit_count--;
+                patch_jump(gen, exit_jumps[exit_count], gen->proto->code_length,
+                           node->line);
+            }
+            break;
+        }
         case AST_FUNCTION:
             break;
         case AST_CLASS:
@@ -968,7 +1164,6 @@ static void compile_statement(generator *gen, const pc_ast *node) {
         case AST_CONST:
         case AST_SWITCH:
         case AST_INCLUDE:
-        case AST_THROW:
             fail(gen, node->line, "%s requires a later runtime milestone",
                  pc_ast_kind_name(node->kind));
             break;

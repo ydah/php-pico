@@ -29,8 +29,12 @@ struct pphp_state {
     size_t class_count;
     size_t class_capacity;
     pclass *building_class;
+    pobject *oom_exception;
+    pvalue pending_exception;
+    int has_pending_exception;
     pphp_output_fn output;
     void *output_context;
+    const char *chunk_name;
     uint32_t error_line;
     uint32_t ticks;
     char error[256];

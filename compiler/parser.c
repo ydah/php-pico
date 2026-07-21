@@ -812,6 +812,57 @@ static pc_ast *parse_class(pc_parser *parser, pc_token keyword, uint8_t flags) {
     return class_node;
 }
 
+static pc_ast *parse_try_statement(pc_parser *parser, pc_token keyword) {
+    pc_ast *node = new_node(parser, AST_TRY, keyword.line);
+    pc_ast *catches = NULL;
+    pc_ast *tail = NULL;
+    (void)consume(parser, T_LBRACE, "expected '{' after try");
+    if (node != NULL) {
+        node->as.try_stmt.try_block = parse_block(parser, keyword.line);
+    }
+    while (match(parser, T_CATCH)) {
+        pc_token catch_keyword = parser->previous;
+        pc_ast *catch_node = new_node(parser, AST_CATCH, catch_keyword.line);
+        pc_ast *types = NULL;
+        pc_ast *type_tail = NULL;
+        pc_token variable;
+        memset(&variable, 0, sizeof(variable));
+        (void)consume(parser, T_LPAREN, "expected '(' after catch");
+        do {
+            pc_token type = consume(parser, T_IDENTIFIER,
+                                    "expected exception class in catch");
+            pc_ast_append(&types, &type_tail,
+                          literal_node(parser, AST_IDENTIFIER, type));
+        } while (match(parser, T_PIPE));
+        if (check(parser, T_VARIABLE)) {
+            variable = parser->current;
+            advance_token(parser);
+        }
+        (void)consume(parser, T_RPAREN, "expected ')' after catch declaration");
+        (void)consume(parser, T_LBRACE, "expected catch body");
+        if (catch_node != NULL) {
+            catch_node->as.catch_stmt.types = types;
+            catch_node->as.catch_stmt.variable = variable;
+            catch_node->as.catch_stmt.body = parse_block(parser, catch_keyword.line);
+            pc_ast_append(&catches, &tail, catch_node);
+        }
+    }
+    if (match(parser, T_FINALLY)) {
+        pc_token finally_keyword = parser->previous;
+        (void)consume(parser, T_LBRACE, "expected finally body");
+        if (node != NULL) {
+            node->as.try_stmt.finally_block = parse_block(parser, finally_keyword.line);
+        }
+    }
+    if (node != NULL) {
+        node->as.try_stmt.catches = catches;
+        if (catches == NULL && node->as.try_stmt.finally_block == NULL) {
+            fail_at(parser, keyword, "try requires catch or finally");
+        }
+    }
+    return node;
+}
+
 static pc_ast *parse_binding_statement(pc_parser *parser, pc_token keyword,
                                        pc_ast_kind kind) {
     pc_ast *head = NULL;
@@ -932,6 +983,9 @@ static pc_ast *parse_statement(pc_parser *parser) {
     if (match(parser, T_FUNCTION)) {
         return parse_function(parser, token);
     }
+    if (match(parser, T_TRY)) {
+        return parse_try_statement(parser, token);
+    }
     if (match(parser, T_CLASS)) {
         return parse_class(parser, token, 0U);
     }
@@ -977,8 +1031,7 @@ static pc_ast *parse_statement(pc_parser *parser) {
         consume_statement_end(parser);
         return node;
     }
-    if (check(parser, T_TRY) ||
-        check(parser, T_SWITCH) || check(parser, T_MATCH) || check(parser, T_NEW) ||
+    if (check(parser, T_SWITCH) || check(parser, T_MATCH) || check(parser, T_NEW) ||
         check(parser, T_FN)) {
         fail_at(parser, parser->current, "syntax %.*s is reserved for a later runtime milestone",
                 (int)parser->current.length, parser->current.start);
