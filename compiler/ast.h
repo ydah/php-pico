@@ -32,6 +32,8 @@ typedef enum pc_ast_kind {
     AST_BINARY,
     AST_ASSIGN,
     AST_TERNARY,
+    AST_MATCH,
+    AST_MATCH_ARM,
     AST_CALL,
     AST_INDEX,
     AST_MEMBER,
@@ -94,6 +96,14 @@ struct pc_ast {
             pc_ast *then_expr;
             pc_ast *else_expr;
         } ternary;
+        struct {
+            pc_ast *subject;
+            pc_ast *arms;
+        } match_expr;
+        struct {
+            pc_ast *conditions;
+            pc_ast *result;
+        } match_arm;
         struct {
             pc_ast *callee;
             pc_ast *arguments;

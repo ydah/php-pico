@@ -192,6 +192,63 @@ TEST(try_catch_union_and_finally_build_exception_ast) {
     pc_arena_destroy(&arena);
 }
 
+TEST(switch_cases_and_default_preserve_statement_groups) {
+    const char *source =
+        "switch ($value) {"
+        " case 1: echo 'one'; break;"
+        " case 2:"
+        " case 3: echo 'several'; break;"
+        " default: echo 'other';"
+        "}";
+    pc_arena arena;
+    pc_parser parser;
+    pc_ast *program = parse_source(source, &arena, &parser);
+    pc_ast *switch_node;
+    pc_ast *case_node;
+    ASSERT_TRUE(program != NULL);
+    switch_node = program->as.list.items;
+    ASSERT_EQ(AST_SWITCH, switch_node->kind);
+    case_node = switch_node->as.switch_stmt.cases;
+    ASSERT_EQ(AST_CASE, case_node->kind);
+    ASSERT_EQ(2, case_node->as.case_stmt.body->as.list.count);
+    ASSERT_EQ(0, case_node->next->as.case_stmt.body->as.list.count);
+    ASSERT_TRUE(case_node->next->next->next->as.case_stmt.condition == NULL);
+    pc_arena_destroy(&arena);
+
+    program = parse_source("switch (1) { default: break; default: break; }",
+                           &arena, &parser);
+    ASSERT_TRUE(program == NULL);
+    ASSERT_TRUE(strstr(pc_parser_error(&parser), "one default") != NULL);
+    pc_arena_destroy(&arena);
+}
+
+TEST(match_parses_multiple_conditions_default_and_trailing_comma) {
+    const char *source =
+        "$result = match ($value) {"
+        " 1, 2 => 'small',"
+        " default => 'other',"
+        "};";
+    pc_arena arena;
+    pc_parser parser;
+    pc_ast *program = parse_source(source, &arena, &parser);
+    pc_ast *match_node;
+    pc_ast *first_arm;
+    ASSERT_TRUE(program != NULL);
+    match_node = program->as.list.items->as.expression.expression->as.binary.right;
+    ASSERT_EQ(AST_MATCH, match_node->kind);
+    first_arm = match_node->as.match_expr.arms;
+    ASSERT_EQ(AST_MATCH_ARM, first_arm->kind);
+    ASSERT_TRUE(first_arm->as.match_arm.conditions->next != NULL);
+    ASSERT_TRUE(first_arm->next->as.match_arm.conditions == NULL);
+    pc_arena_destroy(&arena);
+
+    program = parse_source(
+        "match (1) { default => 1, default => 2, };", &arena, &parser);
+    ASSERT_TRUE(program == NULL);
+    ASSERT_TRUE(strstr(pc_parser_error(&parser), "one default") != NULL);
+    pc_arena_destroy(&arena);
+}
+
 int main(void) {
     static const test_case tests[] = {
         {"operator precedence", operator_precedence_matches_php_8},
@@ -203,7 +260,9 @@ int main(void) {
         {"parser depth", parser_enforces_nesting_limit},
         {"syntax diagnostics", parser_reports_first_syntax_error_with_line},
         {"class syntax", classes_properties_methods_and_new_parse},
-        {"exception syntax", try_catch_union_and_finally_build_exception_ast}
+        {"exception syntax", try_catch_union_and_finally_build_exception_ast},
+        {"switch syntax", switch_cases_and_default_preserve_statement_groups},
+        {"match syntax", match_parses_multiple_conditions_default_and_trailing_comma}
     };
     return run_tests(tests, sizeof(tests) / sizeof(tests[0]));
 }

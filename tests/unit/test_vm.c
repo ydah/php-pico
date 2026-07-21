@@ -325,6 +325,59 @@ TEST(multilevel_continue_releases_inner_foreach_iterators) {
     ASSERT_STR("12:done", output.bytes);
 }
 
+TEST(switch_uses_loose_cases_fallthrough_and_control_levels) {
+    const char *source =
+        "$value = '2';"
+        "switch ($value) {"
+        " case 1: echo 'A'; break;"
+        " case 2: echo 'B';"
+        " case 3: echo 'C'; break;"
+        " default: echo 'bad';"
+        "}"
+        "switch (9) { default: echo 'D'; case 8: echo 'N'; break; }"
+        "while (true) { switch (1) { case 1: echo 'X'; break 2; } echo 'bad'; }"
+        "echo 'Y';";
+    output_buffer output;
+    ASSERT_EQ(PPHP_OK, execute(source, &output, NULL, 0U));
+    ASSERT_STR("BCDNXY", output.bytes);
+}
+
+TEST(switch_transfers_interact_with_continue_and_finally) {
+    const char *source =
+        "$i = 0;"
+        "while ($i < 2) {"
+        " $i++; switch ($i) { case 1: continue 2; default: echo 'C'; }"
+        "}"
+        "try { switch (1) { case 1: break; } echo 'A'; } finally { echo 'F'; }"
+        "switch (1) { case 1: try { break; } finally { echo 'G'; } }"
+        "echo 'E';";
+    output_buffer output;
+    ASSERT_EQ(PPHP_OK, execute(source, &output, NULL, 0U));
+    ASSERT_STR("CAFGE", output.bytes);
+}
+
+TEST(match_is_strict_and_evaluates_its_subject_once) {
+    const char *source =
+        "$count = 0;"
+        "echo match ($count++) { 0 => 'Z', default => 'bad' }, ':', $count, ':';"
+        "echo match ('1') { 1 => 'int', '1' => 'string', default => 'bad' }, ':';"
+        "echo match (3) { 1, 2 => 'small', default => 'other' };";
+    output_buffer output;
+    ASSERT_EQ(PPHP_OK, execute(source, &output, NULL, 0U));
+    ASSERT_STR("Z:1:string:other", output.bytes);
+}
+
+TEST(match_without_a_matching_arm_throws_unhandled_match_error) {
+    const char *source =
+        "try { echo match (9) { 1 => 'one', 2 => 'two' }; }"
+        "catch (UnhandledMatchError $error) {"
+        " echo 'caught:', ($error instanceof Error);"
+        "}";
+    output_buffer output;
+    ASSERT_EQ(PPHP_OK, execute(source, &output, NULL, 0U));
+    ASSERT_STR("caught:1", output.bytes);
+}
+
 int main(void) {
     static const test_case tests[] = {
         {"arithmetic VM", arithmetic_runs_through_compiler_and_vm},
@@ -347,7 +400,11 @@ int main(void) {
         {"finally control flow", finally_runs_for_normal_return_caught_and_rethrown_paths},
         {"nested finally", nested_finally_preserves_the_original_pending_exception},
         {"finally loop transfers", loop_transfers_run_only_the_finally_blocks_they_cross},
-        {"multilevel foreach continue", multilevel_continue_releases_inner_foreach_iterators}
+        {"multilevel foreach continue", multilevel_continue_releases_inner_foreach_iterators},
+        {"switch runtime", switch_uses_loose_cases_fallthrough_and_control_levels},
+        {"switch transfers", switch_transfers_interact_with_continue_and_finally},
+        {"match runtime", match_is_strict_and_evaluates_its_subject_once},
+        {"match exhaustiveness", match_without_a_matching_arm_throws_unhandled_match_error}
     };
     return run_tests(tests, sizeof(tests) / sizeof(tests[0]));
 }

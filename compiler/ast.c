@@ -89,7 +89,7 @@ const char *pc_ast_kind_name(pc_ast_kind kind) {
     static const char *const names[] = {
         "PROGRAM", "BLOCK", "NULL", "BOOL", "INT", "FLOAT", "STRING",
         "VARIABLE", "IDENTIFIER", "UNARY", "BINARY", "ASSIGN", "TERNARY",
-        "CALL", "INDEX", "MEMBER", "ARRAY", "ARRAY_ITEM", "EXPR_STMT",
+        "MATCH", "MATCH_ARM", "CALL", "INDEX", "MEMBER", "ARRAY", "ARRAY_ITEM", "EXPR_STMT",
         "ECHO", "IF", "WHILE", "DO_WHILE", "FOR", "FOREACH", "SWITCH",
         "CASE", "BREAK", "CONTINUE", "RETURN", "THROW", "GLOBAL", "STATIC",
         "CONST", "FUNCTION", "PARAM", "INCLUDE", "UNSET", "ISSET", "EMPTY",
@@ -195,6 +195,14 @@ static void dump_node(FILE *stream, const pc_ast *node, unsigned depth) {
             dump_node(stream, node->as.ternary.condition, depth + 1U);
             dump_node(stream, node->as.ternary.then_expr, depth + 1U);
             dump_node(stream, node->as.ternary.else_expr, depth + 1U);
+            break;
+        case AST_MATCH:
+            dump_node(stream, node->as.match_expr.subject, depth + 1U);
+            dump_list(stream, node->as.match_expr.arms, depth + 1U);
+            break;
+        case AST_MATCH_ARM:
+            dump_list(stream, node->as.match_arm.conditions, depth + 1U);
+            dump_node(stream, node->as.match_arm.result, depth + 1U);
             break;
         case AST_CALL:
             dump_node(stream, node->as.call.callee, depth + 1U);

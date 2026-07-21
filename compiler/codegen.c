@@ -13,6 +13,7 @@ typedef struct loop_context {
     size_t continue_target;
     unsigned finally_count;
     int is_foreach;
+    int is_switch;
 } loop_context;
 
 typedef struct jump_record {
@@ -593,6 +594,81 @@ static void compile_expression(generator *gen, const pc_ast *node) {
                 patch_jump(gen, end, gen->proto->code_length, node->line);
             }
             break;
+        case AST_MATCH: {
+            const pc_ast *arm = node->as.match_expr.arms;
+            size_t condition_jumps[256];
+            size_t condition_count = 0U;
+            size_t condition_index = 0U;
+            size_t end_jumps[256];
+            size_t end_count = 0U;
+            size_t no_match;
+            size_t default_target = SIZE_MAX;
+            compile_expression(gen, node->as.match_expr.subject);
+            while (arm != NULL && !gen->failed) {
+                const pc_ast *condition = arm->as.match_arm.conditions;
+                while (condition != NULL) {
+                    if (condition_count >=
+                        sizeof(condition_jumps) / sizeof(condition_jumps[0])) {
+                        fail(gen, node->line, "too many match conditions");
+                        break;
+                    }
+                    emit_byte(gen, OP_DUP, condition->line);
+                    compile_expression(gen, condition);
+                    emit_byte(gen, OP_IDENT, condition->line);
+                    condition_jumps[condition_count++] = emit_jump(
+                        gen, OP_JMP_IF, condition->line);
+                    condition = condition->next;
+                }
+                arm = arm->next;
+            }
+            no_match = emit_jump(gen, OP_JMP, node->line);
+            arm = node->as.match_expr.arms;
+            while (arm != NULL && !gen->failed) {
+                const pc_ast *condition = arm->as.match_arm.conditions;
+                size_t handler = gen->proto->code_length;
+                if (condition == NULL) {
+                    default_target = handler;
+                } else {
+                    while (condition != NULL) {
+                        patch_jump(gen, condition_jumps[condition_index++], handler,
+                                   condition->line);
+                        condition = condition->next;
+                    }
+                }
+                emit_byte(gen, OP_POP, arm->line);
+                compile_expression(gen, arm->as.match_arm.result);
+                if (end_count >= sizeof(end_jumps) / sizeof(end_jumps[0])) {
+                    fail(gen, node->line, "too many match arms");
+                    break;
+                }
+                end_jumps[end_count++] = emit_jump(gen, OP_JMP, arm->line);
+                arm = arm->next;
+            }
+            if (default_target == SIZE_MAX && !gen->failed) {
+                pc_token class_token;
+                uint16_t class_name;
+                memset(&class_token, 0, sizeof(class_token));
+                class_token.type = T_IDENTIFIER;
+                class_token.start = "UnhandledMatchError";
+                class_token.length = 19U;
+                class_token.line = node->line;
+                patch_jump(gen, no_match, gen->proto->code_length, node->line);
+                emit_byte(gen, OP_POP, node->line);
+                class_name = name_constant(gen, class_token);
+                emit_byte(gen, OP_NEW_OBJ, node->line);
+                emit_u16(gen, class_name, node->line);
+                emit_byte(gen, 0U, node->line);
+                emit_byte(gen, OP_THROW, node->line);
+            } else if (!gen->failed) {
+                patch_jump(gen, no_match, default_target, node->line);
+            }
+            while (end_count > 0U) {
+                end_count--;
+                patch_jump(gen, end_jumps[end_count], gen->proto->code_length,
+                           node->line);
+            }
+            break;
+        }
         case AST_CALL: {
             const pc_ast *argument = node->as.call.arguments;
             pstring *name;
@@ -752,10 +828,13 @@ static void record_loop_jump(generator *gen, const pc_ast *node, int is_continue
     target = gen->loop_count - level;
     compile_transfer_finally_blocks(gen, gen->loops[target].finally_count);
     current = gen->loop_count;
-    while (current > target + (is_continue ? 1U : 0U)) {
+    while (current > target +
+           ((is_continue && !gen->loops[target].is_switch) ? 1U : 0U)) {
         current--;
         if (gen->loops[current].is_foreach) {
             emit_byte(gen, OP_FE_FREE, node->line);
+        } else if (gen->loops[current].is_switch) {
+            emit_byte(gen, OP_POP, node->line);
         }
     }
     operand = emit_jump(gen, OP_JMP, node->line);
@@ -772,7 +851,10 @@ static void patch_loop_jumps(generator *gen, unsigned index, size_t break_target
     for (i = 0U; i < gen->jump_count; i++) {
         if (!gen->jumps[i].patched && gen->jumps[i].loop_index == index) {
             patch_jump(gen, gen->jumps[i].operand,
-                       gen->jumps[i].is_continue ? continue_target : break_target,
+                       gen->jumps[i].is_continue &&
+                               !gen->loops[index].is_switch
+                           ? continue_target
+                           : break_target,
                        line);
             gen->jumps[i].patched = 1;
         }
@@ -842,6 +924,7 @@ static void compile_statement(generator *gen, const pc_ast *node) {
             gen->loops[gen->loop_count].continue_target = start;
             gen->loops[gen->loop_count].finally_count = gen->finally_count;
             gen->loops[gen->loop_count].is_foreach = 0;
+            gen->loops[gen->loop_count].is_switch = 0;
             gen->loop_count++;
             compile_statement(gen, node->as.loop.body);
             emit_back_jump(gen, start, node->line);
@@ -861,6 +944,7 @@ static void compile_statement(generator *gen, const pc_ast *node) {
             gen->loops[gen->loop_count].continue_target = SIZE_MAX;
             gen->loops[gen->loop_count].finally_count = gen->finally_count;
             gen->loops[gen->loop_count].is_foreach = 0;
+            gen->loops[gen->loop_count].is_switch = 0;
             gen->loop_count++;
             compile_statement(gen, node->as.loop.body);
             condition = gen->proto->code_length;
@@ -903,6 +987,7 @@ static void compile_statement(generator *gen, const pc_ast *node) {
             gen->loops[gen->loop_count].continue_target = SIZE_MAX;
             gen->loops[gen->loop_count].finally_count = gen->finally_count;
             gen->loops[gen->loop_count].is_foreach = 0;
+            gen->loops[gen->loop_count].is_switch = 0;
             gen->loop_count++;
             compile_statement(gen, node->as.for_stmt.body);
             increment_start = gen->proto->code_length;
@@ -963,11 +1048,69 @@ static void compile_statement(generator *gen, const pc_ast *node) {
             gen->loops[gen->loop_count].continue_target = loop_start;
             gen->loops[gen->loop_count].finally_count = gen->finally_count;
             gen->loops[gen->loop_count].is_foreach = 1;
+            gen->loops[gen->loop_count].is_switch = 0;
             gen->loop_count++;
             compile_statement(gen, node->as.foreach_stmt.body);
             emit_back_jump(gen, loop_start, node->line);
             patch_foreach_jump(gen, exit, gen->proto->code_length, node->line);
             patch_loop_jumps(gen, index, gen->proto->code_length, loop_start, node->line);
+            gen->loop_count--;
+            break;
+        }
+        case AST_SWITCH: {
+            const pc_ast *case_node = node->as.switch_stmt.cases;
+            size_t case_jumps[256];
+            size_t case_count = 0U;
+            size_t case_index = 0U;
+            size_t no_match;
+            size_t default_target = SIZE_MAX;
+            size_t cleanup_target;
+            size_t end_target;
+            unsigned index = gen->loop_count;
+            if (gen->loop_count >= PPHP_PARSE_DEPTH_MAX) {
+                fail(gen, node->line, "switch nesting limit exceeded");
+                break;
+            }
+            compile_expression(gen, node->as.switch_stmt.subject);
+            while (case_node != NULL && !gen->failed) {
+                if (case_node->as.case_stmt.condition != NULL) {
+                    if (case_count >= sizeof(case_jumps) / sizeof(case_jumps[0])) {
+                        fail(gen, node->line, "too many switch cases");
+                        break;
+                    }
+                    emit_byte(gen, OP_DUP, case_node->line);
+                    compile_expression(gen, case_node->as.case_stmt.condition);
+                    emit_byte(gen, OP_EQ, case_node->line);
+                    case_jumps[case_count++] = emit_jump(
+                        gen, OP_JMP_IF, case_node->line);
+                }
+                case_node = case_node->next;
+            }
+            no_match = emit_jump(gen, OP_JMP, node->line);
+            gen->loops[gen->loop_count].continue_target = SIZE_MAX;
+            gen->loops[gen->loop_count].finally_count = gen->finally_count;
+            gen->loops[gen->loop_count].is_foreach = 0;
+            gen->loops[gen->loop_count].is_switch = 1;
+            gen->loop_count++;
+            case_node = node->as.switch_stmt.cases;
+            while (case_node != NULL && !gen->failed) {
+                size_t handler = gen->proto->code_length;
+                if (case_node->as.case_stmt.condition == NULL) {
+                    default_target = handler;
+                } else {
+                    patch_jump(gen, case_jumps[case_index++], handler,
+                               case_node->line);
+                }
+                compile_statement(gen, case_node->as.case_stmt.body);
+                case_node = case_node->next;
+            }
+            cleanup_target = gen->proto->code_length;
+            emit_byte(gen, OP_POP, node->line);
+            end_target = gen->proto->code_length;
+            patch_jump(gen, no_match,
+                       default_target == SIZE_MAX ? cleanup_target : default_target,
+                       node->line);
+            patch_loop_jumps(gen, index, end_target, end_target, node->line);
             gen->loop_count--;
             break;
         }
@@ -1162,7 +1305,6 @@ static void compile_statement(generator *gen, const pc_ast *node) {
         case AST_GLOBAL:
             break;
         case AST_CONST:
-        case AST_SWITCH:
         case AST_INCLUDE:
             fail(gen, node->line, "%s requires a later runtime milestone",
                  pc_ast_kind_name(node->kind));

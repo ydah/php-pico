@@ -182,6 +182,55 @@ static int is_lvalue(const pc_ast *node) {
 static pc_ast *parse_expression_precedence(pc_parser *parser, int minimum);
 static pc_ast *parse_call(pc_parser *parser, pc_ast *callee, uint32_t line);
 
+static pc_ast *parse_match(pc_parser *parser, pc_token keyword) {
+    pc_ast *node = new_node(parser, AST_MATCH, keyword.line);
+    pc_ast *arms = NULL;
+    pc_ast *arm_tail = NULL;
+    int saw_default = 0;
+    (void)consume(parser, T_LPAREN, "expected '(' after match");
+    if (node != NULL) {
+        node->as.match_expr.subject = parse_expression_precedence(
+            parser, PREC_NONE + 1);
+    }
+    (void)consume(parser, T_RPAREN, "expected ')' after match subject");
+    (void)consume(parser, T_LBRACE, "expected '{' after match subject");
+    if (!enter_depth(parser)) return node;
+    while (!check(parser, T_RBRACE) && !check(parser, T_EOF) && !parser->failed) {
+        pc_ast *arm = new_node(parser, AST_MATCH_ARM, parser->current.line);
+        pc_ast *conditions = NULL;
+        pc_ast *condition_tail = NULL;
+        if (match(parser, T_DEFAULT)) {
+            if (saw_default) {
+                fail_at(parser, parser->previous,
+                        "match may only contain one default arm");
+            }
+            saw_default = 1;
+        } else {
+            do {
+                pc_ast *condition = parse_expression_precedence(
+                    parser, PREC_ASSIGN + 1);
+                pc_ast_append(&conditions, &condition_tail, condition);
+                if (!match(parser, T_COMMA)) break;
+            } while (!check(parser, T_DOUBLE_ARROW) && !parser->failed);
+        }
+        (void)consume(parser, T_DOUBLE_ARROW, "expected '=>' in match arm");
+        if (arm != NULL) {
+            arm->as.match_arm.conditions = conditions;
+            arm->as.match_arm.result = parse_expression_precedence(
+                parser, PREC_ASSIGN + 1);
+            pc_ast_append(&arms, &arm_tail, arm);
+        }
+        if (!match(parser, T_COMMA) && !check(parser, T_RBRACE)) {
+            fail_at(parser, parser->current,
+                    "expected ',' after match arm");
+        }
+    }
+    (void)consume(parser, T_RBRACE, "expected '}' after match arms");
+    leave_depth(parser);
+    if (node != NULL) node->as.match_expr.arms = arms;
+    return node;
+}
+
 static pc_ast *literal_node(pc_parser *parser, pc_ast_kind kind, pc_token token) {
     pc_ast *node = new_node(parser, kind, token.line);
     if (node != NULL) {
@@ -307,6 +356,8 @@ static pc_ast *parse_prefix(pc_parser *parser) {
             return node;
         case T_LBRACKET:
             return parse_array(parser, token.line);
+        case T_MATCH:
+            return parse_match(parser, token);
         case T_NEW: {
             pc_token class_token = parser->current;
             pc_ast *class_name;
@@ -639,6 +690,63 @@ static pc_ast *parse_foreach(pc_parser *parser, pc_token keyword) {
     return node;
 }
 
+static pc_ast *parse_switch(pc_parser *parser, pc_token keyword) {
+    pc_ast *node = new_node(parser, AST_SWITCH, keyword.line);
+    pc_ast *cases = NULL;
+    pc_ast *case_tail = NULL;
+    int saw_default = 0;
+    (void)consume(parser, T_LPAREN, "expected '(' after switch");
+    if (node != NULL) node->as.switch_stmt.subject = parse_expression(parser);
+    (void)consume(parser, T_RPAREN, "expected ')' after switch expression");
+    (void)consume(parser, T_LBRACE, "expected '{' after switch expression");
+    if (!enter_depth(parser)) return node;
+    while (!check(parser, T_RBRACE) && !check(parser, T_EOF) && !parser->failed) {
+        pc_ast *case_node;
+        pc_ast *body;
+        pc_ast *statements = NULL;
+        pc_ast *statement_tail = NULL;
+        size_t statement_count = 0U;
+        pc_token label = parser->current;
+        if (match(parser, T_CASE)) {
+            case_node = new_node(parser, AST_CASE, label.line);
+            if (case_node != NULL) {
+                case_node->as.case_stmt.condition = parse_expression(parser);
+            }
+        } else if (match(parser, T_DEFAULT)) {
+            case_node = new_node(parser, AST_CASE, label.line);
+            if (saw_default) {
+                fail_at(parser, label, "switch may only contain one default clause");
+            }
+            saw_default = 1;
+        } else {
+            fail_at(parser, parser->current,
+                    "expected case or default in switch body");
+            break;
+        }
+        (void)consume(parser, T_COLON, "expected ':' after switch label");
+        while (!check(parser, T_CASE) && !check(parser, T_DEFAULT) &&
+               !check(parser, T_RBRACE) && !check(parser, T_EOF) &&
+               !parser->failed) {
+            pc_ast *statement = parse_statement(parser);
+            pc_ast_append(&statements, &statement_tail, statement);
+            if (statement != NULL) statement_count++;
+        }
+        body = new_node(parser, AST_BLOCK, label.line);
+        if (body != NULL) {
+            body->as.list.items = statements;
+            body->as.list.count = statement_count;
+        }
+        if (case_node != NULL) {
+            case_node->as.case_stmt.body = body;
+            pc_ast_append(&cases, &case_tail, case_node);
+        }
+    }
+    (void)consume(parser, T_RBRACE, "expected '}' after switch body");
+    leave_depth(parser);
+    if (node != NULL) node->as.switch_stmt.cases = cases;
+    return node;
+}
+
 static pc_ast *parse_echo(pc_parser *parser, pc_token keyword) {
     pc_ast *node = new_node(parser, AST_ECHO, keyword.line);
     pc_ast *head = NULL;
@@ -943,6 +1051,9 @@ static pc_ast *parse_statement(pc_parser *parser) {
     if (match(parser, T_FOREACH)) {
         return parse_foreach(parser, token);
     }
+    if (match(parser, T_SWITCH)) {
+        return parse_switch(parser, token);
+    }
     if (match(parser, T_BREAK) || match(parser, T_CONTINUE)) {
         pc_ast_kind kind = token.type == T_BREAK ? AST_BREAK : AST_CONTINUE;
         node = new_node(parser, kind, token.line);
@@ -1031,7 +1142,7 @@ static pc_ast *parse_statement(pc_parser *parser) {
         consume_statement_end(parser);
         return node;
     }
-    if (check(parser, T_SWITCH) || check(parser, T_MATCH) || check(parser, T_NEW) ||
+    if (check(parser, T_NEW) ||
         check(parser, T_FN)) {
         fail_at(parser, parser->current, "syntax %.*s is reserved for a later runtime milestone",
                 (int)parser->current.length, parser->current.start);
