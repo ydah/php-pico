@@ -327,6 +327,111 @@ static int enter_method(pphp_state *state, pframe *caller,
                         const pmethod *method, uint8_t argument_count,
                         int constructor);
 
+static int expand_argument_array(pphp_state *state, uint32_t line,
+                                 uint8_t *argument_count) {
+    pvalue array_value = pop(state);
+    const parray *array;
+    size_t position = 0U;
+    uint8_t count = 0U;
+    if (array_value.type != PT_ARRAY) {
+        pv_release(array_value);
+        pphp_runtime_error(state, line, "only arrays can be unpacked as arguments");
+        return 0;
+    }
+    array = (const parray *)array_value.as.gc;
+    while (position < array->used) {
+        pvalue key;
+        pvalue value;
+        size_t next;
+        if (!pa_entry_at(array, position, &key, &value, &next)) break;
+        if (key.type != PT_INT) {
+            pv_release(key);
+            pv_release(value);
+            pv_release(array_value);
+            pphp_runtime_error(state, line,
+                               "named arguments are not supported in argument unpacking");
+            return 0;
+        }
+        pv_release(key);
+        if (count >= 31U) {
+            pv_release(value);
+            pv_release(array_value);
+            pphp_runtime_error(state, line, "a call may have at most 31 arguments");
+            return 0;
+        }
+        if (!push(state, value)) {
+            pv_release(array_value);
+            return 0;
+        }
+        count++;
+        position = next;
+    }
+    pv_release(array_value);
+    *argument_count = count;
+    return 1;
+}
+
+static int bind_arguments(pphp_state *state, const pproto *callee,
+                          size_t target_base, size_t argument_base,
+                          uint8_t argument_count, size_t local_offset,
+                          uint32_t line) {
+    size_t fixed_count = callee->n_params;
+    size_t supplied;
+    size_t i;
+    parray *rest = NULL;
+    if (callee->variadic) {
+        if (fixed_count == 0U) {
+            pphp_runtime_error(state, line, "invalid variadic function metadata");
+            return 0;
+        }
+        fixed_count--;
+    }
+    if (target_base + callee->n_locals >= PPHP_STACK_SLOTS ||
+        local_offset + callee->n_params > callee->n_locals) {
+        pphp_runtime_error(state, line, "value stack overflow entering function");
+        return 0;
+    }
+    supplied = argument_count < fixed_count ? argument_count : fixed_count;
+    if (callee->variadic) {
+        size_t extra_count = argument_count > fixed_count
+                                 ? (size_t)argument_count - fixed_count
+                                 : 0U;
+        rest = pa_new(extra_count);
+        if (rest == NULL) {
+            pphp_runtime_error(state, line,
+                               "out of memory collecting variadic arguments");
+            return 0;
+        }
+        for (i = 0U; i < extra_count; i++) {
+            if (!pa_push(rest, state->stack[argument_base + fixed_count + i])) {
+                pv_release(pv_heap(PT_ARRAY, &rest->header));
+                pphp_runtime_error(state, line,
+                                   "out of memory collecting variadic arguments");
+                return 0;
+            }
+        }
+    }
+    if ((size_t)argument_count > fixed_count) {
+        release_range(state, argument_base + fixed_count,
+                      argument_base + argument_count);
+    }
+    if (supplied != 0U && target_base + local_offset != argument_base) {
+        memmove(state->stack + target_base + local_offset,
+                state->stack + argument_base, supplied * sizeof(*state->stack));
+    }
+    for (i = supplied; i < fixed_count; i++) {
+        state->stack[target_base + local_offset + i] = pv_null();
+    }
+    if (callee->variadic) {
+        state->stack[target_base + local_offset + fixed_count] =
+            pv_heap(PT_ARRAY, &rest->header);
+    }
+    for (i = local_offset + callee->n_params; i < callee->n_locals; i++) {
+        state->stack[target_base + i] = pv_null();
+    }
+    return 1;
+}
+
 static int call_function(pphp_state *state, pframe *caller, uint16_t name_index,
                          uint8_t argument_count) {
     const pvalue *name_value;
@@ -335,8 +440,6 @@ static int call_function(pphp_state *state, pframe *caller, uint16_t name_index,
     pvalue result = pv_null();
     int builtin;
     const pproto *callee;
-    size_t i;
-    (void)caller;
     if (name_index >= caller->proto->constant_count ||
         caller->proto->constants[name_index].type != PT_STRING ||
         state->stack_count < argument_count) {
@@ -366,32 +469,20 @@ static int call_function(pphp_state *state, pframe *caller, uint16_t name_index,
                            argument_count);
         return 0;
     }
-    if (callee->variadic) {
-        pphp_runtime_error(state, caller->line,
-                           "variadic functions require the array runtime");
-        return 0;
-    }
-    if (argument_count > callee->n_params) {
-        release_range(state, argument_base + callee->n_params, state->stack_count);
-        state->stack_count = argument_base + callee->n_params;
-    }
-    if (argument_base + callee->n_locals >= PPHP_STACK_SLOTS) {
-        pphp_runtime_error(state, caller->line, "value stack overflow entering function");
-        return 0;
-    }
-    for (i = argument_count < callee->n_params ? argument_count : callee->n_params;
-         i < callee->n_locals; i++) {
-        state->stack[argument_base + i] = pv_null();
-    }
-    state->stack_count = argument_base + callee->n_locals;
     if (state->frame_count >= PPHP_FRAME_MAX) {
         pphp_runtime_error(state, caller->line, "call stack overflow");
         return 0;
     }
+    if (!bind_arguments(state, callee, argument_base, argument_base,
+                        argument_count, 0U, caller->line)) {
+        return 0;
+    }
+    state->stack_count = argument_base + callee->n_locals;
     state->frames[state->frame_count].proto = callee;
     state->frames[state->frame_count].pc = 0U;
     state->frames[state->frame_count].base = argument_base;
     state->frames[state->frame_count].line = 1U;
+    state->frames[state->frame_count].argument_count = argument_count;
     state->frames[state->frame_count].has_return_override = 0;
     state->frames[state->frame_count].return_override = pv_null();
     state->frames[state->frame_count].called_scope = NULL;
@@ -405,8 +496,6 @@ static int call_named_value(pphp_state *state, pframe *caller,
     pvalue callable = state->stack[base];
     pvalue result = pv_null();
     const pproto *callee;
-    size_t supplied;
-    size_t i;
     int builtin = pphp_call_builtin(state, name, state->stack + base + 1U,
                                     argument_count, &result);
     if (builtin != 0) {
@@ -428,22 +517,14 @@ static int call_named_value(pphp_state *state, pframe *caller,
                            argument_count);
         return 0;
     }
-    supplied = argument_count < callee->n_params
-                   ? argument_count
-                   : callee->n_params;
-    if (base + callee->n_locals >= PPHP_STACK_SLOTS ||
-        state->frame_count >= PPHP_FRAME_MAX) {
+    if (state->frame_count >= PPHP_FRAME_MAX) {
         pphp_runtime_error(state, caller->line,
                            "stack overflow entering callable function");
         return 0;
     }
-    if (argument_count > callee->n_params) {
-        release_range(state, base + 1U + callee->n_params, state->stack_count);
-    }
-    memmove(state->stack + base, state->stack + base + 1U,
-            supplied * sizeof(*state->stack));
-    for (i = supplied; i < callee->n_locals; i++) {
-        state->stack[base + i] = pv_null();
+    if (!bind_arguments(state, callee, base, base + 1U, argument_count,
+                        0U, caller->line)) {
+        return 0;
     }
     pv_release(callable);
     state->stack_count = base + callee->n_locals;
@@ -451,6 +532,7 @@ static int call_named_value(pphp_state *state, pframe *caller,
     state->frames[state->frame_count].pc = 0U;
     state->frames[state->frame_count].base = base;
     state->frames[state->frame_count].line = 1U;
+    state->frames[state->frame_count].argument_count = argument_count;
     state->frames[state->frame_count].has_return_override = 0;
     state->frames[state->frame_count].return_override = pv_null();
     state->frames[state->frame_count].called_scope = NULL;
@@ -461,7 +543,6 @@ static int call_named_value(pphp_state *state, pframe *caller,
 static int call_value(pphp_state *state, pframe *caller,
                       uint8_t argument_count) {
     size_t base;
-    size_t supplied;
     size_t i;
     pvalue callable;
     pclosure *closure;
@@ -531,30 +612,18 @@ static int call_value(pphp_state *state, pframe *caller,
                            callee->n_required, argument_count);
         return 0;
     }
-    supplied = argument_count < callee->n_params
-                   ? argument_count
-                   : callee->n_params;
-    if (base + callee->n_locals >= PPHP_STACK_SLOTS ||
-        state->frame_count >= PPHP_FRAME_MAX ||
+    if (state->frame_count >= PPHP_FRAME_MAX ||
         (size_t)callee->n_params + closure->capture_count > callee->n_locals) {
         pphp_runtime_error(state, caller->line, "stack overflow entering closure");
         return 0;
     }
-    if (argument_count > callee->n_params) {
-        release_range(state, base + 1U + callee->n_params, state->stack_count);
-    }
-    memmove(state->stack + base, state->stack + base + 1U,
-            supplied * sizeof(*state->stack));
-    for (i = supplied; i < callee->n_params; i++) {
-        state->stack[base + i] = pv_null();
+    if (!bind_arguments(state, callee, base, base + 1U, argument_count,
+                        0U, caller->line)) {
+        return 0;
     }
     for (i = 0U; i < closure->capture_count; i++) {
         state->stack[base + callee->n_params + i] = closure->captures[i];
         pv_retain(closure->captures[i]);
-    }
-    for (i = (size_t)callee->n_params + closure->capture_count;
-         i < callee->n_locals; i++) {
-        state->stack[base + i] = pv_null();
     }
     pv_release(callable);
     state->stack_count = base + callee->n_locals;
@@ -562,6 +631,7 @@ static int call_value(pphp_state *state, pframe *caller,
     state->frames[state->frame_count].pc = 0U;
     state->frames[state->frame_count].base = base;
     state->frames[state->frame_count].line = 1U;
+    state->frames[state->frame_count].argument_count = argument_count;
     state->frames[state->frame_count].has_return_override = 0;
     state->frames[state->frame_count].return_override = pv_null();
     state->frames[state->frame_count].called_scope = caller->called_scope;
@@ -579,12 +649,72 @@ static const pstring *constant_string(pphp_state *state, pframe *frame,
     return (const pstring *)frame->proto->constants[index].as.gc;
 }
 
+static int invoke_named_method(pphp_state *state, pframe *frame,
+                               const pstring *name,
+                               uint8_t argument_count) {
+    size_t base;
+    pobject *object;
+    const pmethod *method;
+    if (name == NULL || state->stack_count < (size_t)argument_count + 1U) {
+        pphp_runtime_error(state, frame->line, "invalid method call operands");
+        return 0;
+    }
+    base = state->stack_count - argument_count - 1U;
+    if (state->stack[base].type != PT_OBJECT) {
+        pphp_runtime_error(state, frame->line, "method call on non-object");
+        return 0;
+    }
+    object = (pobject *)state->stack[base].as.gc;
+    if (pphp_object_is_throwable(state, object) && argument_count == 0U) {
+        const char *field = NULL;
+        size_t field_length = 0U;
+        const pvalue *value;
+        if (ps_equal_bytes(name, "getMessage", 10U)) {
+            field = "message";
+            field_length = 7U;
+        } else if (ps_equal_bytes(name, "getCode", 7U)) {
+            field = "code";
+            field_length = 4U;
+        } else if (ps_equal_bytes(name, "getFile", 7U)) {
+            field = "file";
+            field_length = 4U;
+        } else if (ps_equal_bytes(name, "getLine", 7U)) {
+            field = "line";
+            field_length = 4U;
+        } else if (ps_equal_bytes(name, "getTraceAsString", 16U)) {
+            field = "trace";
+            field_length = 5U;
+        }
+        value = field == NULL ? NULL
+                              : pphp_exception_field(object, field, field_length);
+        if (value != NULL) {
+            pvalue result = *value;
+            pv_retain(result);
+            release_range(state, base, state->stack_count);
+            state->stack_count = base;
+            return push(state, result);
+        }
+    }
+    method = pclass_find_method(object->class_entry, name->data, name->length);
+    if (method == NULL) {
+        pphp_runtime_error(state, frame->line, "undefined method %.*s()",
+                           (int)name->length, name->data);
+        return 0;
+    }
+    if (!pclass_member_visible(method->flags, method->owner,
+                               frame->called_scope)) {
+        pphp_runtime_error(state, frame->line,
+                           "cannot access non-public method %.*s()",
+                           (int)name->length, name->data);
+        return 0;
+    }
+    return enter_method(state, frame, method, argument_count, 0);
+}
+
 static int enter_method(pphp_state *state, pframe *caller, const pmethod *method,
                         uint8_t argument_count, int constructor) {
     const pproto *callee = method->proto;
     size_t base;
-    size_t supplied;
-    size_t i;
     pvalue object_value;
     if (method == NULL || callee == NULL || (method->flags & PC_STATIC) != 0U ||
         state->stack_count < (size_t)argument_count + 1U) {
@@ -604,24 +734,20 @@ static int enter_method(pphp_state *state, pframe *caller, const pmethod *method
                            callee->n_required, argument_count);
         return 0;
     }
-    if (argument_count > callee->n_params) {
-        release_range(state, base + 1U + callee->n_params, state->stack_count);
-        state->stack_count = base + 1U + callee->n_params;
-    }
-    supplied = argument_count < callee->n_params ? argument_count : callee->n_params;
-    if (base + callee->n_locals >= PPHP_STACK_SLOTS ||
-        state->frame_count >= PPHP_FRAME_MAX) {
+    if (state->frame_count >= PPHP_FRAME_MAX) {
         pphp_runtime_error(state, caller->line, "stack overflow entering method");
         return 0;
     }
-    for (i = 1U + supplied; i < callee->n_locals; i++) {
-        state->stack[base + i] = pv_null();
+    if (!bind_arguments(state, callee, base, base + 1U, argument_count,
+                        1U, caller->line)) {
+        return 0;
     }
     state->stack_count = base + callee->n_locals;
     state->frames[state->frame_count].proto = callee;
     state->frames[state->frame_count].pc = 0U;
     state->frames[state->frame_count].base = base;
     state->frames[state->frame_count].line = 1U;
+    state->frames[state->frame_count].argument_count = argument_count;
     state->frames[state->frame_count].has_return_override = constructor;
     state->frames[state->frame_count].return_override = pv_null();
     state->frames[state->frame_count].called_scope = method->owner;
@@ -630,6 +756,100 @@ static int enter_method(pphp_state *state, pframe *caller, const pmethod *method
         pv_retain(object_value);
     }
     state->frame_count++;
+    return 1;
+}
+
+static int construct_object(pphp_state *state, pframe *frame,
+                            uint16_t name_index, uint8_t argument_count) {
+    const pstring *name = constant_string(state, frame, name_index);
+    pclass *class_entry;
+    pobject *object;
+    const pmethod *constructor;
+    size_t base;
+    if (name == NULL || state->stack_count < argument_count) return 0;
+    class_entry = pphp_find_class(state, name->data, name->length);
+    if (class_entry == NULL) {
+        pphp_runtime_error(state, frame->line, "Class %.*s not found",
+                           (int)name->length, name->data);
+        return 0;
+    }
+    object = pobject_new(class_entry);
+    if (object == NULL) {
+        pphp_runtime_error(state, frame->line, "cannot instantiate class %.*s",
+                           (int)name->length, name->data);
+        return 0;
+    }
+    base = state->stack_count - argument_count;
+    if (state->stack_count + 1U >= PPHP_STACK_SLOTS) {
+        pv_release(pv_heap(PT_OBJECT, &object->header));
+        pphp_runtime_error(state, frame->line,
+                           "stack overflow constructing object");
+        return 0;
+    }
+    memmove(state->stack + base + 1U, state->stack + base,
+            argument_count * sizeof(*state->stack));
+    state->stack[base] = pv_heap(PT_OBJECT, &object->header);
+    state->stack_count++;
+    if (pphp_object_is_throwable(state, object)) {
+        pphp_exception_set_location(
+            object, state->chunk_name == NULL ? "<source>" : state->chunk_name,
+            frame->line);
+    }
+    constructor = pclass_find_method(class_entry, "__construct", 11U);
+    if (constructor != NULL) {
+        if (!pclass_member_visible(constructor->flags, constructor->owner,
+                                   frame->called_scope)) {
+            pphp_runtime_error(state, frame->line,
+                               "cannot access non-public constructor");
+            return 0;
+        }
+        return enter_method(state, frame, constructor, argument_count, 1);
+    }
+    if (pphp_object_is_throwable(state, object)) {
+        int valid = 1;
+        if (argument_count > 2U) {
+            pphp_runtime_error(state, frame->line,
+                               "exception constructor expects at most two arguments");
+            return 0;
+        }
+        if (argument_count >= 1U) {
+            const pproperty *property = pclass_find_property(
+                class_entry, "message", 7U);
+            pstring *message = pv_to_string(state->stack[base + 1U]);
+            if (property == NULL || message == NULL) {
+                ps_destroy(message);
+                pphp_runtime_error(state, frame->line,
+                                   "invalid exception message");
+                valid = 0;
+            } else {
+                pv_release(object->slots[property->slot]);
+                object->slots[property->slot] =
+                    pv_heap(PT_STRING, &message->header);
+            }
+        }
+        if (valid && argument_count == 2U) {
+            if (state->stack[base + 2U].type != PT_INT) {
+                pphp_runtime_error(state, frame->line,
+                                   "exception code expects int");
+                valid = 0;
+            } else {
+                pphp_exception_set_code(object,
+                                        state->stack[base + 2U].as.i);
+            }
+        }
+        if (valid) {
+            release_range(state, base + 1U, state->stack_count);
+            state->stack_count = base + 1U;
+            return 1;
+        }
+        return 0;
+    }
+    if (argument_count != 0U) {
+        pphp_runtime_error(state, frame->line,
+                           "Class %.*s has no constructor",
+                           (int)name->length, name->data);
+        return 0;
+    }
     return 1;
 }
 
@@ -670,6 +890,7 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
     state->frames[0].pc = 0U;
     state->frames[0].base = 0U;
     state->frames[0].line = 1U;
+    state->frames[0].argument_count = 0U;
     state->frames[0].has_return_override = 0;
     state->frames[0].return_override = pv_null();
     state->frames[0].called_scope = NULL;
@@ -755,6 +976,9 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                 }
                 break;
             }
+            case OP_LOAD_ARGC:
+                (void)push(state, pv_int((pphp_int)frame->argument_count));
+                break;
             case OP_ADD: case OP_SUB: case OP_MUL: case OP_DIV: case OP_MOD:
             case OP_POW: case OP_CONCAT: case OP_BAND: case OP_BOR: case OP_BXOR:
             case OP_SHL: case OP_SHR:
@@ -842,6 +1066,21 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                 (void)call_value(state, frame, count);
                 break;
             }
+            case OP_CALL_ARRAY: {
+                uint16_t name = read_u16(state, frame);
+                uint8_t count;
+                if (expand_argument_array(state, frame->line, &count)) {
+                    (void)call_function(state, frame, name, count);
+                }
+                break;
+            }
+            case OP_CALL_VALUE_ARRAY: {
+                uint8_t count;
+                if (expand_argument_array(state, frame->line, &count)) {
+                    (void)call_value(state, frame, count);
+                }
+                break;
+            }
             case OP_RET: {
                 pvalue result = pop(state);
                 (void)return_from_function(state, result);
@@ -902,6 +1141,43 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                     pphp_runtime_error(state, frame->line, "array construction failed");
                 } else {
                     (void)push(state, array_value);
+                }
+                break;
+            }
+            case OP_ARR_EXTEND: {
+                pvalue source_value = pop(state);
+                pvalue target_value = pop(state);
+                size_t position = 0U;
+                int ok = 1;
+                if (source_value.type != PT_ARRAY || target_value.type != PT_ARRAY) {
+                    pphp_runtime_error(state, frame->line,
+                                       "only arrays can be unpacked into arrays");
+                    ok = 0;
+                }
+                while (ok && position < ((const parray *)source_value.as.gc)->used) {
+                    pvalue key;
+                    pvalue value;
+                    size_t next;
+                    if (!pa_entry_at((const parray *)source_value.as.gc, position,
+                                     &key, &value, &next)) {
+                        break;
+                    }
+                    ok = key.type == PT_INT
+                             ? pa_push((parray *)target_value.as.gc, value)
+                             : pa_set((parray *)target_value.as.gc, key, value);
+                    pv_release(key);
+                    pv_release(value);
+                    position = next;
+                }
+                pv_release(source_value);
+                if (!ok) {
+                    pv_release(target_value);
+                    if (state->error[0] == '\0') {
+                        pphp_runtime_error(state, frame->line,
+                                           "array unpacking failed");
+                    }
+                } else {
+                    (void)push(state, target_value);
                 }
                 break;
             }
@@ -1038,93 +1314,19 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                     state->building_class = NULL;
                 }
                 break;
-            case OP_NEW_OBJ: {
+            case OP_NEW_OBJ:
+            case OP_NEW_OBJ_ARRAY: {
                 uint16_t name_index = read_u16(state, frame);
-                uint8_t argument_count = read_u8(state, frame);
-                const pstring *name = constant_string(state, frame, name_index);
-                pclass *class_entry;
-                pobject *object;
-                const pmethod *constructor;
-                size_t base;
-                if (name == NULL || state->stack_count < argument_count) break;
-                class_entry = pphp_find_class(state, name->data, name->length);
-                if (class_entry == NULL) {
-                    pphp_runtime_error(state, frame->line, "Class %.*s not found",
-                                       (int)name->length, name->data);
-                    break;
-                }
-                object = pobject_new(class_entry);
-                if (object == NULL) {
-                    pphp_runtime_error(state, frame->line, "cannot instantiate class %.*s",
-                                       (int)name->length, name->data);
-                    break;
-                }
-                base = state->stack_count - argument_count;
-                if (state->stack_count + 1U >= PPHP_STACK_SLOTS) {
-                    pv_release(pv_heap(PT_OBJECT, &object->header));
-                    pphp_runtime_error(state, frame->line, "stack overflow constructing object");
-                    break;
-                }
-                memmove(state->stack + base + 1U, state->stack + base,
-                        argument_count * sizeof(*state->stack));
-                state->stack[base] = pv_heap(PT_OBJECT, &object->header);
-                state->stack_count++;
-                if (pphp_object_is_throwable(state, object)) {
-                    pphp_exception_set_location(
-                        object,
-                        state->chunk_name == NULL ? "<source>" : state->chunk_name,
-                        frame->line);
-                }
-                constructor = pclass_find_method(class_entry, "__construct", 11U);
-                if (constructor != NULL) {
-                    if (!pclass_member_visible(constructor->flags, constructor->owner,
-                                               frame->called_scope)) {
-                        pphp_runtime_error(state, frame->line,
-                                           "cannot access non-public constructor");
-                    } else {
-                        (void)enter_method(state, frame, constructor, argument_count, 1);
+                uint8_t argument_count;
+                if (opcode == OP_NEW_OBJ_ARRAY) {
+                    if (!expand_argument_array(state, frame->line,
+                                               &argument_count)) {
+                        break;
                     }
-                } else if (pphp_object_is_throwable(state, object)) {
-                    if (argument_count > 2U) {
-                        pphp_runtime_error(state, frame->line,
-                                           "exception constructor expects at most two arguments");
-                    } else {
-                        int valid = 1;
-                        if (argument_count >= 1U) {
-                        const pproperty *property = pclass_find_property(
-                            class_entry, "message", 7U);
-                        pstring *message = pv_to_string(state->stack[base + 1U]);
-                        if (property == NULL || message == NULL) {
-                            ps_destroy(message);
-                            pphp_runtime_error(state, frame->line,
-                                               "invalid exception message");
-                            valid = 0;
-                        } else {
-                            pv_release(object->slots[property->slot]);
-                            object->slots[property->slot] =
-                                pv_heap(PT_STRING, &message->header);
-                        }
-                        }
-                        if (valid && argument_count == 2U) {
-                            if (state->stack[base + 2U].type != PT_INT) {
-                                pphp_runtime_error(state, frame->line,
-                                                   "exception code expects int");
-                                valid = 0;
-                            } else {
-                                pphp_exception_set_code(
-                                    object, state->stack[base + 2U].as.i);
-                            }
-                        }
-                        if (valid) {
-                            release_range(state, base + 1U, state->stack_count);
-                            state->stack_count = base + 1U;
-                        }
-                    }
-                } else if (argument_count != 0U) {
-                    pphp_runtime_error(state, frame->line,
-                                       "Class %.*s has no constructor",
-                                       (int)name->length, name->data);
+                } else {
+                    argument_count = read_u8(state, frame);
                 }
+                (void)construct_object(state, frame, name_index, argument_count);
                 break;
             }
             case OP_PROP_GET: {
@@ -1199,65 +1401,20 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                 pv_release(value);
                 break;
             }
-            case OP_MCALL: {
+            case OP_MCALL:
+            case OP_MCALL_ARRAY: {
                 uint16_t name_index = read_u16(state, frame);
-                uint8_t argument_count = read_u8(state, frame);
+                uint8_t argument_count;
                 const pstring *name = constant_string(state, frame, name_index);
-                size_t base;
-                pobject *object;
-                const pmethod *method;
-                if (name == NULL || state->stack_count < (size_t)argument_count + 1U) break;
-                base = state->stack_count - argument_count - 1U;
-                if (state->stack[base].type != PT_OBJECT) {
-                    pphp_runtime_error(state, frame->line, "method call on non-object");
-                    break;
-                }
-                object = (pobject *)state->stack[base].as.gc;
-                if (pphp_object_is_throwable(state, object) && argument_count == 0U) {
-                    const char *field = NULL;
-                    size_t field_length = 0U;
-                    const pvalue *value;
-                    if (ps_equal_bytes(name, "getMessage", 10U)) {
-                        field = "message";
-                        field_length = 7U;
-                    } else if (ps_equal_bytes(name, "getCode", 7U)) {
-                        field = "code";
-                        field_length = 4U;
-                    } else if (ps_equal_bytes(name, "getFile", 7U)) {
-                        field = "file";
-                        field_length = 4U;
-                    } else if (ps_equal_bytes(name, "getLine", 7U)) {
-                        field = "line";
-                        field_length = 4U;
-                    } else if (ps_equal_bytes(name, "getTraceAsString", 16U)) {
-                        field = "trace";
-                        field_length = 5U;
-                    }
-                    value = field == NULL
-                                ? NULL
-                                : pphp_exception_field(object, field, field_length);
-                    if (value != NULL) {
-                        pvalue result = *value;
-                        pv_retain(result);
-                        release_range(state, base, state->stack_count);
-                        state->stack_count = base;
-                        (void)push(state, result);
+                if (opcode == OP_MCALL_ARRAY) {
+                    if (!expand_argument_array(state, frame->line,
+                                               &argument_count)) {
                         break;
                     }
-                }
-                method = pclass_find_method(object->class_entry, name->data, name->length);
-                if (method == NULL) {
-                    pphp_runtime_error(state, frame->line, "undefined method %.*s()",
-                                       (int)name->length, name->data);
-                    break;
-                } else if (!pclass_member_visible(method->flags, method->owner,
-                                                  frame->called_scope)) {
-                    pphp_runtime_error(state, frame->line,
-                                       "cannot access non-public method %.*s()",
-                                       (int)name->length, name->data);
                 } else {
-                    (void)enter_method(state, frame, method, argument_count, 0);
+                    argument_count = read_u8(state, frame);
                 }
+                (void)invoke_named_method(state, frame, name, argument_count);
                 break;
             }
             case OP_INSTANCEOF: {

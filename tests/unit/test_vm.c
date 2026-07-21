@@ -112,9 +112,9 @@ TEST(argument_count_and_stack_limits_are_checked) {
 
 TEST(pbc_serialization_round_trips_through_loader) {
     const char *source =
-        "function twice($x) { return $x * 2; } $offset = 1;"
-        "$calculate = fn($x) => twice($x) + $offset;"
-        "try { echo $calculate(20), ':' , 1.25; throw new Exception('ok'); }"
+        "function twice($x = 20, ...$unused) { return $x * 2 + count($unused); }"
+        "$offset = 1; $calculate = fn($x = 20) => twice(...[$x]) + $offset;"
+        "try { echo $calculate(...[]), ':' , 1.25; throw new Exception('ok'); }"
         "catch (Exception $error) { echo ':', $error->getMessage(); }"
         "finally { echo '!'; }";
     const char *path = "build/host/test_roundtrip.pbc";
@@ -547,6 +547,52 @@ TEST(array_builtins_preserve_php_key_and_order_rules) {
                output.bytes);
 }
 
+TEST(default_and_variadic_parameters_work_for_all_callable_forms) {
+    const char *source =
+        "function describe($first = 2, $options = ['n' => 3], ...$rest) {"
+        " return $first + $options['n'] + count($rest);"
+        "}"
+        "$named = 'describe';"
+        "class Defaults {"
+        " public function total($value = 7, ...$rest) {"
+        "  return $value + count($rest);"
+        " }"
+        "}"
+        "$offset = 4;"
+        "$closure = function ($value = 2, ...$rest) use ($offset) {"
+        " return $value + $offset + count($rest);"
+        "};"
+        "$object = new Defaults();"
+        "echo describe(), ':', describe(4, ['n' => 5], 6, 7), ':',"
+        " $named(), ':', $object->total(), ':', $object->total(1, 2, 3), ':',"
+        " $closure(), ':', $closure(1, 2, 3);";
+    output_buffer output;
+    ASSERT_EQ(PPHP_OK, execute(source, &output, NULL, 0U));
+    ASSERT_STR("5:11:5:7:3:6:7", output.bytes);
+}
+
+TEST(array_and_argument_unpacking_preserve_evaluation_order) {
+    const char *source =
+        "function sum3($a, $b, $c) { return $a + $b + $c; }"
+        "class SpreadBox {"
+        " public $total;"
+        " public function __construct($a, $b) { $this->total = $a + $b; }"
+        " public function sum($a, $b) { return $a + $b; }"
+        "}"
+        "$tail = [2, 3]; $named = 'sum3';"
+        "$box = new SpreadBox(...[7, 8]);"
+        "$closure = fn($a, $b) => $a + $b;"
+        "$array = [0, ...[5, 6], 'x' => 1, ...['x' => 2, 9 => 7]];"
+        "echo sum3(1, ...$tail), ':', $named(...[4, 5, 6]), ':',"
+        " $box->total, ':', $box->sum(...[1, 2]), ':',"
+        " $closure(...[3, 4]), ':',"
+        " $array[0], ',', $array[1], ',', $array[2], ',',"
+        " $array['x'], ',', $array[3];";
+    output_buffer output;
+    ASSERT_EQ(PPHP_OK, execute(source, &output, NULL, 0U));
+    ASSERT_STR("6:15:15:3:7:0,5,6,2,7", output.bytes);
+}
+
 int main(void) {
     static const test_case tests[] = {
         {"arithmetic VM", arithmetic_runs_through_compiler_and_vm},
@@ -583,7 +629,9 @@ int main(void) {
         {"type builtins", type_conversion_and_predicate_builtins_follow_php_values},
         {"math builtins", math_builtins_cover_integer_float_and_collection_forms},
         {"string builtins", string_builtins_cover_search_transform_split_and_join},
-        {"array builtins", array_builtins_preserve_php_key_and_order_rules}
+        {"array builtins", array_builtins_preserve_php_key_and_order_rules},
+        {"default and variadic parameters", default_and_variadic_parameters_work_for_all_callable_forms},
+        {"array and argument unpacking", array_and_argument_unpacking_preserve_evaluation_order}
     };
     return run_tests(tests, sizeof(tests) / sizeof(tests[0]));
 }

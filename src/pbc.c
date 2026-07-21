@@ -634,6 +634,7 @@ const char *pphp_opcode_name(uint8_t opcode) {
         case OP_LOAD_CONST: return "LOAD_CONST";
         case OP_LOAD_LOCAL: return "LOAD_LOCAL";
         case OP_STORE_LOCAL: return "STORE_LOCAL";
+        case OP_LOAD_ARGC: return "LOAD_ARGC";
         case OP_ADD: return "ADD";
         case OP_SUB: return "SUB";
         case OP_MUL: return "MUL";
@@ -669,6 +670,8 @@ const char *pphp_opcode_name(uint8_t opcode) {
         case OP_RET: return "RET";
         case OP_RET_NULL: return "RET_NULL";
         case OP_ECHO: return "ECHO";
+        case OP_CALL_ARRAY: return "CALL_ARRAY";
+        case OP_CALL_VALUE_ARRAY: return "CALL_VALUE_ARRAY";
         case OP_NEW_ARRAY: return "NEW_ARRAY";
         case OP_ARR_PUSH: return "ARR_PUSH";
         case OP_ARR_SET: return "ARR_SET";
@@ -678,10 +681,13 @@ const char *pphp_opcode_name(uint8_t opcode) {
         case OP_FE_INIT: return "FE_INIT";
         case OP_FE_NEXT: return "FE_NEXT";
         case OP_FE_FREE: return "FE_FREE";
+        case OP_ARR_EXTEND: return "ARR_EXTEND";
         case OP_NEW_OBJ: return "NEW_OBJ";
         case OP_PROP_GET: return "PROP_GET";
         case OP_PROP_SET: return "PROP_SET";
         case OP_MCALL: return "MCALL";
+        case OP_MCALL_ARRAY: return "MCALL_ARRAY";
+        case OP_NEW_OBJ_ARRAY: return "NEW_OBJ_ARRAY";
         case OP_INSTANCEOF: return "INSTANCEOF";
         case OP_CLOSURE: return "CLOSURE";
         case OP_THROW: return "THROW";

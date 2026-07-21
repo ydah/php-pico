@@ -315,6 +315,8 @@ static int exception_slot(generator *gen, uint32_t line, uint8_t *slot) {
 static void compile_expression(generator *gen, const pc_ast *node);
 static void compile_statement(generator *gen, const pc_ast *node);
 static void compile_class_definition(generator *gen, const pc_ast *class_node);
+static void compile_parameter_defaults(generator *gen,
+                                       const pc_ast *parameters);
 
 typedef struct capture_set {
     pc_token tokens[64];
@@ -581,6 +583,20 @@ static void compile_closure_expression(generator *gen, const pc_ast *node) {
             return;
         }
         proto->n_params++;
+        if (proto->n_params > 31U) {
+            fail(gen, parameter->line, "a closure may have at most 31 parameters");
+            return;
+        }
+        if (parameter->as.parameter.variadic && parameter->next != NULL) {
+            fail(gen, parameter->line, "variadic parameter must be last");
+            return;
+        }
+        if (parameter->as.parameter.variadic &&
+            parameter->as.parameter.default_value != NULL) {
+            fail(gen, parameter->line,
+                 "variadic parameter cannot have a default value");
+            return;
+        }
         if (parameter->as.parameter.default_value == NULL &&
             !parameter->as.parameter.variadic) {
             if (saw_default) {
@@ -613,6 +629,7 @@ static void compile_closure_expression(generator *gen, const pc_ast *node) {
     child.module = gen->module;
     child.proto = proto;
     child.error = gen->error;
+    compile_parameter_defaults(&child, node->as.closure.parameters);
     if (node->as.closure.is_arrow) {
         compile_expression(&child, node->as.closure.body);
         emit_byte(&child, OP_RET, node->line);
@@ -670,6 +687,76 @@ static pphp_opcode binary_opcode(pc_token_type type) {
         case T_GT_EQUAL: return OP_GE;
         case T_SPACESHIP: return OP_CMP;
         default: return OP_NOP;
+    }
+}
+
+static int is_constant_default(const pc_ast *node) {
+    const pc_ast *item;
+    if (node == NULL) return 0;
+    switch (node->kind) {
+        case AST_NULL:
+        case AST_BOOL:
+        case AST_INT:
+        case AST_FLOAT:
+        case AST_STRING:
+            return 1;
+        case AST_UNARY:
+            return node->as.unary.op != T_ELLIPSIS &&
+                   node->as.unary.op != T_CLONE &&
+                   is_constant_default(node->as.unary.operand);
+        case AST_BINARY:
+            return binary_opcode(node->as.binary.op) != OP_NOP &&
+                   is_constant_default(node->as.binary.left) &&
+                   is_constant_default(node->as.binary.right);
+        case AST_TERNARY:
+            return is_constant_default(node->as.ternary.condition) &&
+                   (node->as.ternary.then_expr == NULL ||
+                    is_constant_default(node->as.ternary.then_expr)) &&
+                   is_constant_default(node->as.ternary.else_expr);
+        case AST_ARRAY:
+            item = node->as.list.items;
+            while (item != NULL) {
+                if (item->kind != AST_ARRAY_ITEM || item->as.array_item.spread ||
+                    (item->as.array_item.key != NULL &&
+                     !is_constant_default(item->as.array_item.key)) ||
+                    !is_constant_default(item->as.array_item.value)) {
+                    return 0;
+                }
+                item = item->next;
+            }
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+static void compile_parameter_defaults(generator *gen,
+                                       const pc_ast *parameters) {
+    const pc_ast *parameter = parameters;
+    size_t index = 0U;
+    while (parameter != NULL && !gen->failed) {
+        if (parameter->as.parameter.default_value != NULL) {
+            uint8_t slot;
+            size_t supplied;
+            if (!is_constant_default(parameter->as.parameter.default_value)) {
+                fail(gen, parameter->line,
+                     "parameter default must be a constant expression");
+                return;
+            }
+            emit_byte(gen, OP_LOAD_ARGC, parameter->line);
+            emit_byte(gen, OP_LOAD_I8, parameter->line);
+            emit_byte(gen, (uint8_t)index, parameter->line);
+            emit_byte(gen, OP_GT, parameter->line);
+            supplied = emit_jump(gen, OP_JMP_IF, parameter->line);
+            compile_expression(gen, parameter->as.parameter.default_value);
+            if (!variable_slot(gen, parameter->as.parameter.name, &slot)) return;
+            emit_byte(gen, OP_STORE_LOCAL, parameter->line);
+            emit_byte(gen, slot, parameter->line);
+            patch_jump(gen, supplied, gen->proto->code_length,
+                       parameter->line);
+        }
+        index++;
+        parameter = parameter->next;
     }
 }
 
@@ -790,6 +877,34 @@ static void compile_short_circuit(generator *gen, const pc_ast *node) {
     jump = emit_jump(gen, opcode, node->line);
     compile_expression(gen, node->as.binary.right);
     patch_jump(gen, jump, gen->proto->code_length, node->line);
+}
+
+static int argument_list_has_spread(const pc_ast *argument) {
+    while (argument != NULL) {
+        if (argument->kind == AST_UNARY &&
+            argument->as.unary.op == T_ELLIPSIS) {
+            return 1;
+        }
+        argument = argument->next;
+    }
+    return 0;
+}
+
+static void compile_argument_array(generator *gen, const pc_ast *argument,
+                                   size_t count, uint32_t line) {
+    emit_byte(gen, OP_NEW_ARRAY, line);
+    emit_u16(gen, (uint16_t)count, line);
+    while (argument != NULL && !gen->failed) {
+        if (argument->kind == AST_UNARY &&
+            argument->as.unary.op == T_ELLIPSIS) {
+            compile_expression(gen, argument->as.unary.operand);
+            emit_byte(gen, OP_ARR_EXTEND, argument->line);
+        } else {
+            compile_expression(gen, argument);
+            emit_byte(gen, OP_ARR_PUSH, argument->line);
+        }
+        argument = argument->next;
+    }
 }
 
 static void compile_expression(generator *gen, const pc_ast *node) {
@@ -996,41 +1111,56 @@ static void compile_expression(generator *gen, const pc_ast *node) {
             pstring *name;
             pvalue name_value;
             uint16_t name_index;
+            int has_spread = argument_list_has_spread(argument);
+            if (node->as.call.count > 31U) {
+                fail(gen, node->line, "a call may have at most 31 arguments");
+                break;
+            }
             if (node->as.call.callee->kind == AST_MEMBER &&
                 node->as.call.callee->as.member.op == T_ARROW) {
                 uint16_t method_name;
                 compile_expression(gen, node->as.call.callee->as.member.base);
-                while (argument != NULL) {
-                    compile_expression(gen, argument);
-                    argument = argument->next;
-                }
                 method_name = name_constant(gen, node->as.call.callee->as.member.name);
-                emit_byte(gen, OP_MCALL, node->line);
-                emit_u16(gen, method_name, node->line);
-                emit_byte(gen, (uint8_t)node->as.call.count, node->line);
-                break;
-            }
-            if (node->as.call.count > 255U) {
-                fail(gen, node->line, "too many call arguments");
+                if (has_spread) {
+                    compile_argument_array(gen, argument, node->as.call.count,
+                                           node->line);
+                    emit_byte(gen, OP_MCALL_ARRAY, node->line);
+                    emit_u16(gen, method_name, node->line);
+                } else {
+                    while (argument != NULL) {
+                        compile_expression(gen, argument);
+                        argument = argument->next;
+                    }
+                    emit_byte(gen, OP_MCALL, node->line);
+                    emit_u16(gen, method_name, node->line);
+                    emit_byte(gen, (uint8_t)node->as.call.count, node->line);
+                }
                 break;
             }
             if (node->as.call.callee->kind != AST_IDENTIFIER) {
                 compile_expression(gen, node->as.call.callee);
+                if (has_spread) {
+                    compile_argument_array(gen, argument, node->as.call.count,
+                                           node->line);
+                    emit_byte(gen, OP_CALL_VALUE_ARRAY, node->line);
+                } else {
+                    while (argument != NULL) {
+                        compile_expression(gen, argument);
+                        argument = argument->next;
+                    }
+                    emit_byte(gen, OP_CALL_VALUE, node->line);
+                    emit_byte(gen, (uint8_t)node->as.call.count, node->line);
+                }
+                break;
+            }
+            if (has_spread) {
+                compile_argument_array(gen, argument, node->as.call.count,
+                                       node->line);
+            } else {
                 while (argument != NULL) {
                     compile_expression(gen, argument);
                     argument = argument->next;
                 }
-                emit_byte(gen, OP_CALL_VALUE, node->line);
-                emit_byte(gen, (uint8_t)node->as.call.count, node->line);
-                break;
-            }
-            while (argument != NULL) {
-                if (argument->kind == AST_UNARY && argument->as.unary.op == T_ELLIPSIS) {
-                    fail(gen, argument->line, "argument unpacking requires array runtime");
-                    break;
-                }
-                compile_expression(gen, argument);
-                argument = argument->next;
             }
             name = ps_new(node->as.call.callee->as.literal.token.start,
                           node->as.call.callee->as.literal.token.length);
@@ -1043,9 +1173,11 @@ static void compile_expression(generator *gen, const pc_ast *node) {
                 fail(gen, node->line, "constant pool limit exceeded");
             }
             pv_release(name_value);
-            emit_byte(gen, OP_CALL, node->line);
+            emit_byte(gen, has_spread ? OP_CALL_ARRAY : OP_CALL, node->line);
             emit_u16(gen, name_index, node->line);
-            emit_byte(gen, (uint8_t)node->as.call.count, node->line);
+            if (!has_spread) {
+                emit_byte(gen, (uint8_t)node->as.call.count, node->line);
+            }
             break;
         }
         case AST_MEMBER: {
@@ -1065,18 +1197,25 @@ static void compile_expression(generator *gen, const pc_ast *node) {
             uint16_t class_name;
             if (node->as.new_expr.class_name == NULL ||
                 node->as.new_expr.class_name->kind != AST_IDENTIFIER ||
-                node->as.new_expr.count > 255U) {
+                node->as.new_expr.count > 31U) {
                 fail(gen, node->line, "invalid class construction");
                 break;
             }
-            while (argument != NULL) {
-                compile_expression(gen, argument);
-                argument = argument->next;
-            }
             class_name = name_constant(gen, node->as.new_expr.class_name->as.literal.token);
-            emit_byte(gen, OP_NEW_OBJ, node->line);
-            emit_u16(gen, class_name, node->line);
-            emit_byte(gen, (uint8_t)node->as.new_expr.count, node->line);
+            if (argument_list_has_spread(argument)) {
+                compile_argument_array(gen, argument, node->as.new_expr.count,
+                                       node->line);
+                emit_byte(gen, OP_NEW_OBJ_ARRAY, node->line);
+                emit_u16(gen, class_name, node->line);
+            } else {
+                while (argument != NULL) {
+                    compile_expression(gen, argument);
+                    argument = argument->next;
+                }
+                emit_byte(gen, OP_NEW_OBJ, node->line);
+                emit_u16(gen, class_name, node->line);
+                emit_byte(gen, (uint8_t)node->as.new_expr.count, node->line);
+            }
             break;
         }
         case AST_ARRAY: {
@@ -1085,10 +1224,9 @@ static void compile_expression(generator *gen, const pc_ast *node) {
             emit_u16(gen, (uint16_t)node->as.list.count, node->line);
             while (item != NULL) {
                 if (item->as.array_item.spread) {
-                    fail(gen, item->line, "array spread is not supported yet");
-                    break;
-                }
-                if (item->as.array_item.key != NULL) {
+                    compile_expression(gen, item->as.array_item.value);
+                    emit_byte(gen, OP_ARR_EXTEND, item->line);
+                } else if (item->as.array_item.key != NULL) {
                     compile_expression(gen, item->as.array_item.key);
                     compile_expression(gen, item->as.array_item.value);
                     emit_byte(gen, OP_ARR_SET, item->line);
@@ -1672,6 +1810,20 @@ static int compile_function(generator *gen, const pc_ast *function) {
             return 0;
         }
         proto->n_params++;
+        if (proto->n_params > 31U) {
+            fail(gen, parameter->line, "a function may have at most 31 parameters");
+            return 0;
+        }
+        if (parameter->as.parameter.variadic && parameter->next != NULL) {
+            fail(gen, parameter->line, "variadic parameter must be last");
+            return 0;
+        }
+        if (parameter->as.parameter.variadic &&
+            parameter->as.parameter.default_value != NULL) {
+            fail(gen, parameter->line,
+                 "variadic parameter cannot have a default value");
+            return 0;
+        }
         if (parameter->as.parameter.default_value == NULL && !parameter->as.parameter.variadic) {
             if (saw_default) {
                 fail(gen, parameter->line, "required parameter follows optional parameter");
@@ -1688,6 +1840,7 @@ static int compile_function(generator *gen, const pc_ast *function) {
     child.module = gen->module;
     child.proto = proto;
     child.error = gen->error;
+    compile_parameter_defaults(&child, function->as.function.parameters);
     compile_statement(&child, function->as.function.body);
     if (!child.failed) {
         emit_byte(&child, OP_RET_NULL, function->line);
@@ -1742,6 +1895,20 @@ static int compile_method(generator *gen, pc_token class_name,
             return 0;
         }
         proto->n_params++;
+        if (proto->n_params > 31U) {
+            fail(gen, parameter->line, "a method may have at most 31 parameters");
+            return 0;
+        }
+        if (parameter->as.parameter.variadic && parameter->next != NULL) {
+            fail(gen, parameter->line, "variadic parameter must be last");
+            return 0;
+        }
+        if (parameter->as.parameter.variadic &&
+            parameter->as.parameter.default_value != NULL) {
+            fail(gen, parameter->line,
+                 "variadic parameter cannot have a default value");
+            return 0;
+        }
         if (parameter->as.parameter.default_value == NULL && !parameter->as.parameter.variadic) {
             if (saw_default) {
                 fail(gen, parameter->line, "required parameter follows optional parameter");
@@ -1758,6 +1925,7 @@ static int compile_method(generator *gen, pc_token class_name,
     child.module = gen->module;
     child.proto = proto;
     child.error = gen->error;
+    compile_parameter_defaults(&child, method->as.function.parameters);
     compile_statement(&child, method->as.function.body);
     if (!child.failed) {
         emit_byte(&child, OP_RET_NULL, method->line);

@@ -26,6 +26,9 @@ static size_t operand_size(uint8_t opcode) {
         case OP_CALL_VALUE:
             return 1U;
         case OP_LOAD_CONST:
+        case OP_CALL_ARRAY:
+        case OP_MCALL_ARRAY:
+        case OP_NEW_OBJ_ARRAY:
         case OP_JMP:
         case OP_JMP_IF:
         case OP_JMP_UNLESS:
@@ -139,6 +142,14 @@ static int disassemble_proto(FILE *stream, const pproto *proto, size_t index) {
             case OP_PROP_GET:
             case OP_PROP_SET:
             case OP_INSTANCEOF: {
+                uint16_t constant = code_u16(proto->code, pc);
+                fprintf(stream, " name=%u", constant);
+                print_constant(stream, proto, constant);
+                break;
+            }
+            case OP_CALL_ARRAY:
+            case OP_MCALL_ARRAY:
+            case OP_NEW_OBJ_ARRAY: {
                 uint16_t constant = code_u16(proto->code, pc);
                 fprintf(stream, " name=%u", constant);
                 print_constant(stream, proto, constant);

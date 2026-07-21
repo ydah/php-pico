@@ -13,6 +13,7 @@ typedef struct pframe {
     size_t pc;
     size_t base;
     uint32_t line;
+    uint8_t argument_count;
     pvalue return_override;
     int has_return_override;
     pclass *called_scope;
