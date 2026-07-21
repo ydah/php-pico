@@ -187,8 +187,22 @@ int pmodule_add(pmodule *module, pproto *proto) {
 
 const pproto *pmodule_find(const pmodule *module, const pstring *name) {
     size_t i;
+    size_t j;
     for (i = 1U; i < module->count; i++) {
-        if (ps_equal(module->protos[i]->name, name)) {
+        const pstring *candidate = module->protos[i]->name;
+        int equal = candidate->length == name->length;
+        for (j = 0U; equal && j < name->length; j++) {
+            unsigned char left = (unsigned char)candidate->data[j];
+            unsigned char right = (unsigned char)name->data[j];
+            if (left >= 'A' && left <= 'Z') {
+                left = (unsigned char)(left + ('a' - 'A'));
+            }
+            if (right >= 'A' && right <= 'Z') {
+                right = (unsigned char)(right + ('a' - 'A'));
+            }
+            equal = left == right;
+        }
+        if (equal) {
             return module->protos[i];
         }
     }

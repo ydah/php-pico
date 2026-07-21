@@ -629,6 +629,33 @@ TEST(repl_chunks_retain_globals_and_constants_by_name) {
     pphp_close(state);
 }
 
+TEST(repl_chunks_retain_functions_classes_and_closures) {
+    const char *first =
+        "function plus($a, $b) { return $a + $b; }"
+        "class ReplBox {"
+        " private $value;"
+        " public function __construct($value) { $this->value = $value; }"
+        " public function get() { return $this->value; }"
+        "}"
+        "$offset = 5; $adder = fn($value) => $value + $offset;";
+    const char *second =
+        "$box = new ReplBox(7);"
+        "echo plus(2, 3), ':', $box->get(), ':', $adder(4), ':',"
+        " (function_exists('plus') ? 1 : 0), ':',"
+        " (class_exists('ReplBox') ? 1 : 0);";
+    pphp_state *state = pphp_open(vm_pool, sizeof(vm_pool));
+    output_buffer output;
+    ASSERT_TRUE(state != NULL);
+    memset(&output, 0, sizeof(output));
+    pphp_set_output(state, capture_output, &output);
+    ASSERT_EQ(PPHP_OK,
+              pphp_exec_source_mode(state, first, strlen(first), "repl-1", 1));
+    ASSERT_EQ(PPHP_OK,
+              pphp_exec_source_mode(state, second, strlen(second), "repl-2", 1));
+    ASSERT_STR("5:7:9:1:1", output.bytes);
+    pphp_close(state);
+}
+
 TEST(constant_and_reflection_builtins_share_runtime_registries) {
     const char *source =
         "function reflectedFunction() { return 1; }"
@@ -740,6 +767,7 @@ int main(void) {
         {"array and argument unpacking", array_and_argument_unpacking_preserve_evaluation_order},
         {"persistent language bindings", global_static_and_named_constants_use_persistent_storage},
         {"REPL global persistence", repl_chunks_retain_globals_and_constants_by_name},
+        {"REPL definition persistence", repl_chunks_retain_functions_classes_and_closures},
         {"constant and reflection builtins", constant_and_reflection_builtins_share_runtime_registries},
         {"formatting builtins", formatting_builtins_cover_width_precision_bases_and_print_r},
         {"JSON builtins", json_builtins_round_trip_ordered_arrays_and_pretty_output},

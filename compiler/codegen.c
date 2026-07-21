@@ -102,7 +102,16 @@ static void emit_back_jump(generator *gen, size_t target, uint32_t line) {
 }
 
 static int token_equal(pc_token token, const pstring *string) {
-    return ps_equal_bytes(string, token.start, token.length);
+    size_t i;
+    if (string->length != token.length) return 0;
+    for (i = 0U; i < token.length; i++) {
+        unsigned char left = (unsigned char)token.start[i];
+        unsigned char right = (unsigned char)string->data[i];
+        if (left >= 'A' && left <= 'Z') left = (unsigned char)(left + ('a' - 'A'));
+        if (right >= 'A' && right <= 'Z') right = (unsigned char)(right + ('a' - 'A'));
+        if (left != right) return 0;
+    }
+    return 1;
 }
 
 static pphp_int parse_integer_token(pc_token token, int *overflow) {

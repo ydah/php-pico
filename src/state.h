@@ -11,6 +11,7 @@
 
 typedef struct pframe {
     const pproto *proto;
+    const pmodule *module;
     size_t pc;
     size_t base;
     uint32_t line;
@@ -29,6 +30,9 @@ struct pphp_state {
     size_t stack_count;
     size_t frame_count;
     const pmodule *module;
+    pmodule **repl_modules;
+    size_t repl_module_count;
+    size_t repl_module_capacity;
     psymbol_table symbols;
     parray *globals;
     parray *statics;
@@ -46,6 +50,7 @@ struct pphp_state {
     uint32_t random_state;
     int exit_requested;
     int exit_status;
+    int repl_mode;
     char error[256];
 };
 
@@ -56,5 +61,7 @@ int pphp_exec_source_mode(pphp_state *state, const char *source, size_t length,
 pclass *pphp_find_class(const pphp_state *state, const char *name, size_t length);
 int pphp_register_class(pphp_state *state, pclass *class_entry);
 void pphp_clear_classes(pphp_state *state);
+const pproto *pphp_find_function(const pphp_state *state, const pstring *name,
+                                 const pmodule **owner);
 
 #endif

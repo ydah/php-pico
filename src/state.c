@@ -87,15 +87,85 @@ pphp_state *pphp_open(void *pool, size_t pool_size) {
 }
 
 void pphp_close(pphp_state *state) {
+    size_t i;
     if (state == NULL) {
         return;
     }
     pphp_clear_classes(state);
+    for (i = 0U; i < state->repl_module_count; i++) {
+        pmodule_destroy(state->repl_modules[i]);
+        pphp_free(state->repl_modules[i]);
+    }
+    pphp_free(state->repl_modules);
     pa_destroy(state->globals);
     pa_destroy(state->statics);
     pa_destroy(state->constants);
     psymbol_destroy(&state->symbols);
     pphp_free(state);
+}
+
+const pproto *pphp_find_function(const pphp_state *state, const pstring *name,
+                                 const pmodule **owner) {
+    const pproto *proto;
+    size_t i;
+    if (owner != NULL) *owner = NULL;
+    if (state == NULL || name == NULL) return NULL;
+    if (state->module != NULL &&
+        (proto = pmodule_find(state->module, name)) != NULL) {
+        if (owner != NULL) *owner = state->module;
+        return proto;
+    }
+    for (i = state->repl_module_count; i > 0U; i--) {
+        const pmodule *module = state->repl_modules[i - 1U];
+        if (module == state->module) continue;
+        proto = pmodule_find(module, name);
+        if (proto != NULL) {
+            if (owner != NULL) *owner = module;
+            return proto;
+        }
+    }
+    return NULL;
+}
+
+static int retain_repl_module(pphp_state *state, pmodule *module,
+                              pmodule **owned) {
+    pmodule **resized;
+    size_t capacity;
+    *owned = pphp_alloc(sizeof(**owned));
+    if (*owned == NULL) return 0;
+    if (state->repl_module_count == state->repl_module_capacity) {
+        capacity = state->repl_module_capacity == 0U
+                       ? 8U : state->repl_module_capacity * 2U;
+        resized = pphp_realloc(state->repl_modules,
+                               capacity * sizeof(*resized));
+        if (resized == NULL) {
+            pphp_free(*owned);
+            *owned = NULL;
+            return 0;
+        }
+        state->repl_modules = resized;
+        state->repl_module_capacity = capacity;
+    }
+    **owned = *module;
+    memset(module, 0, sizeof(*module));
+    state->repl_modules[state->repl_module_count++] = *owned;
+    return 1;
+}
+
+static int validate_repl_functions(pphp_state *state, const pmodule *module) {
+    size_t i;
+    for (i = 1U; i < module->count; i++) {
+        const pproto *proto = module->protos[i];
+        if (proto->is_method || proto->name->length == 0U ||
+            proto->name->data[0] == '{' ||
+            strstr(proto->name->data, "::") != NULL) continue;
+        if (pphp_find_function(state, proto->name, NULL) != NULL) {
+            pphp_runtime_error(state, 0U, "function %.*s is already defined",
+                               (int)proto->name->length, proto->name->data);
+            return 0;
+        }
+    }
+    return 1;
 }
 
 static int class_name_equal(const pstring *name, const char *other, size_t length) {
@@ -193,6 +263,7 @@ int pphp_exec_source_mode(pphp_state *state, const char *source, size_t length,
     pmodule module;
     pc_codegen_error codegen_error;
     int result;
+    pmodule *execution_module = &module;
     if (state == NULL || source == NULL) {
         return PPHP_E_RUNTIME;
     }
@@ -219,9 +290,23 @@ int pphp_exec_source_mode(pphp_state *state, const char *source, size_t length,
         return PPHP_E_PARSE;
     }
     pc_arena_destroy(&arena);
-    result = pphp_vm_execute(state, &module);
-    pphp_clear_classes(state);
-    pmodule_destroy(&module);
+    state->repl_mode = repl;
+    if (repl && !validate_repl_functions(state, &module)) {
+        pmodule_destroy(&module);
+        return PPHP_E_RUNTIME;
+    }
+    if (repl && !retain_repl_module(state, &module, &execution_module)) {
+        pmodule_destroy(&module);
+        pphp_runtime_error(state, 0U,
+                           "out of memory retaining REPL definitions");
+        return PPHP_E_RUNTIME;
+    }
+    result = pphp_vm_execute(state, execution_module);
+    if (!repl) {
+        pphp_clear_classes(state);
+        pmodule_destroy(&module);
+        state->module = NULL;
+    }
     return result;
 }
 
@@ -241,6 +326,7 @@ int pphp_exec_pbc(pphp_state *state, const void *pbc, size_t length) {
     state->exit_requested = 0;
     state->exit_status = 0;
     state->chunk_name = "<pbc>";
+    state->repl_mode = 0;
     result = pphp_pbc_load(pbc, length, &module);
     if (result != PPHP_OK) {
         pphp_runtime_error(state, 0U, "invalid or incompatible PBC image");

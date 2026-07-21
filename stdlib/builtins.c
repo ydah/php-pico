@@ -99,8 +99,7 @@ static int call_reflection_builtin(pphp_state *state, const pstring *name,
         }
         function_name = (pstring *)arguments[0].as.gc;
         *result = pv_bool(pphp_builtin_exists(function_name) ||
-                          (state->module != NULL &&
-                           pmodule_find(state->module, function_name) != NULL));
+                          pphp_find_function(state, function_name, NULL) != NULL);
         return 1;
     }
     if (name_is(name, "class_exists")) {

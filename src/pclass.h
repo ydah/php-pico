@@ -31,6 +31,7 @@ typedef struct pmethod {
     pstring *name;
     uint8_t flags;
     const pproto *proto;
+    const pmodule *module;
     pclass *owner;
 } pmethod;
 
@@ -57,7 +58,8 @@ void pclass_destroy(pclass *class_entry);
 int pclass_add_property(pclass *class_entry, const char *name, size_t length,
                         uint8_t flags, pvalue default_value);
 int pclass_add_method(pclass *class_entry, const char *name, size_t length,
-                      uint8_t flags, const pproto *proto);
+                      uint8_t flags, const pproto *proto,
+                      const pmodule *module);
 const pproperty *pclass_find_property(const pclass *class_entry,
                                       const char *name, size_t length);
 const pmethod *pclass_find_method(const pclass *class_entry,

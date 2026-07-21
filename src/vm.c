@@ -528,6 +528,7 @@ static int call_function(pphp_state *state, pframe *caller, uint16_t name_index,
     pvalue result = pv_null();
     int builtin;
     const pproto *callee;
+    const pmodule *callee_module;
     if (name_index >= caller->proto->constant_count ||
         caller->proto->constants[name_index].type != PT_STRING ||
         state->stack_count < argument_count) {
@@ -544,7 +545,7 @@ static int call_function(pphp_state *state, pframe *caller, uint16_t name_index,
         state->stack_count = argument_base;
         return builtin > 0 && push(state, result);
     }
-    callee = pmodule_find(state->module, name);
+    callee = pphp_find_function(state, name, &callee_module);
     if (callee == NULL) {
         pphp_runtime_error(state, caller->line, "Call to undefined function %.*s()",
                            (int)name->length, name->data);
@@ -569,6 +570,7 @@ static int call_function(pphp_state *state, pframe *caller, uint16_t name_index,
     memset(&state->frames[state->frame_count], 0,
            sizeof(state->frames[state->frame_count]));
     state->frames[state->frame_count].proto = callee;
+    state->frames[state->frame_count].module = callee_module;
     state->frames[state->frame_count].pc = 0U;
     state->frames[state->frame_count].base = argument_base;
     state->frames[state->frame_count].line = 1U;
@@ -586,6 +588,7 @@ static int call_named_value(pphp_state *state, pframe *caller,
     pvalue callable = state->stack[base];
     pvalue result = pv_null();
     const pproto *callee;
+    const pmodule *callee_module;
     int builtin = pphp_call_builtin(state, name, state->stack + base + 1U,
                                     argument_count, &result);
     if (builtin != 0) {
@@ -593,7 +596,7 @@ static int call_named_value(pphp_state *state, pframe *caller,
         state->stack_count = base;
         return builtin > 0 && push(state, result);
     }
-    callee = pmodule_find(state->module, name);
+    callee = pphp_find_function(state, name, &callee_module);
     if (callee == NULL) {
         pphp_runtime_error(state, caller->line,
                            "Call to undefined function %.*s()",
@@ -621,6 +624,7 @@ static int call_named_value(pphp_state *state, pframe *caller,
     memset(&state->frames[state->frame_count], 0,
            sizeof(state->frames[state->frame_count]));
     state->frames[state->frame_count].proto = callee;
+    state->frames[state->frame_count].module = callee_module;
     state->frames[state->frame_count].pc = 0U;
     state->frames[state->frame_count].base = base;
     state->frames[state->frame_count].line = 1U;
@@ -722,6 +726,7 @@ static int call_value(pphp_state *state, pframe *caller,
     memset(&state->frames[state->frame_count], 0,
            sizeof(state->frames[state->frame_count]));
     state->frames[state->frame_count].proto = callee;
+    state->frames[state->frame_count].module = closure->module;
     state->frames[state->frame_count].pc = 0U;
     state->frames[state->frame_count].base = base;
     state->frames[state->frame_count].line = 1U;
@@ -840,6 +845,7 @@ static int enter_method(pphp_state *state, pframe *caller, const pmethod *method
     memset(&state->frames[state->frame_count], 0,
            sizeof(state->frames[state->frame_count]));
     state->frames[state->frame_count].proto = callee;
+    state->frames[state->frame_count].module = method->module;
     state->frames[state->frame_count].pc = 0U;
     state->frames[state->frame_count].base = base;
     state->frames[state->frame_count].line = 1U;
@@ -974,8 +980,9 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
         pphp_runtime_error(state, 0U, "module has no entry point");
         return PPHP_E_RUNTIME;
     }
-    pphp_clear_classes(state);
-    if (!pphp_register_exception_classes(state)) {
+    if (!state->repl_mode) pphp_clear_classes(state);
+    if (pphp_find_class(state, "Throwable", 9U) == NULL &&
+        !pphp_register_exception_classes(state)) {
         pphp_runtime_error(state, 0U, "cannot initialize exception classes");
         return PPHP_E_RUNTIME;
     }
@@ -984,6 +991,7 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
     state->frame_count = 1U;
     memset(&state->frames[0], 0, sizeof(state->frames[0]));
     state->frames[0].proto = module->protos[0];
+    state->frames[0].module = module;
     state->frames[0].pc = 0U;
     state->frames[0].base = 0U;
     state->frames[0].line = 1U;
@@ -1448,9 +1456,10 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                 uint8_t flags = read_u8(state, frame);
                 const pstring *name = constant_string(state, frame, name_index);
                 if (state->building_class == NULL || name == NULL ||
-                    proto_index >= state->module->count ||
+                    frame->module == NULL || proto_index >= frame->module->count ||
                     !pclass_add_method(state->building_class, name->data, name->length,
-                                       flags, state->module->protos[proto_index])) {
+                                       flags, frame->module->protos[proto_index],
+                                       frame->module)) {
                     pphp_runtime_error(state, frame->line, "cannot define method");
                 }
                 break;
@@ -1613,7 +1622,8 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                 uint8_t capture_count = read_u8(state, frame);
                 pvalue captures[UINT8_MAX];
                 size_t capture;
-                int valid = proto_index < state->module->count;
+                int valid = frame->module != NULL &&
+                            proto_index < frame->module->count;
                 pclosure *closure;
                 for (capture = 0U; capture < capture_count; capture++) {
                     uint8_t kind = read_u8(state, frame);
@@ -1635,8 +1645,8 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                                        "invalid CLOSURE instruction");
                     break;
                 }
-                closure = pclosure_new(state->module->protos[proto_index],
-                                       captures, capture_count);
+                closure = pclosure_new(frame->module->protos[proto_index],
+                                       frame->module, captures, capture_count);
                 for (capture = 0U; capture < capture_count; capture++) {
                     pv_release(captures[capture]);
                 }
@@ -1698,6 +1708,10 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
         }
     }
     if (state->error[0] != '\0') {
+        if (state->building_class != NULL) {
+            pclass_destroy(state->building_class);
+            state->building_class = NULL;
+        }
         for (i = 0U; i < state->frame_count; i++) {
             if (state->frames[i].has_return_override) {
                 pv_release(state->frames[i].return_override);

@@ -91,7 +91,8 @@ int pclass_add_property(pclass *class_entry, const char *name, size_t length,
 }
 
 int pclass_add_method(pclass *class_entry, const char *name, size_t length,
-                      uint8_t flags, const pproto *proto) {
+                      uint8_t flags, const pproto *proto,
+                      const pmodule *module) {
     pmethod *method;
     size_t i;
     if (class_entry == NULL) return 0;
@@ -106,6 +107,7 @@ int pclass_add_method(pclass *class_entry, const char *name, size_t length,
     if (method->name == NULL) return 0;
     method->flags = flags;
     method->proto = proto;
+    method->module = module;
     method->owner = class_entry;
     class_entry->method_count++;
     return 1;

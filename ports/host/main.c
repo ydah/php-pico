@@ -7,6 +7,7 @@
 #include "disasm.h"
 #include "pbc.h"
 #include "pphp/hal.h"
+#include "p2sh.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -230,8 +231,26 @@ static int execute_pbc(const void *bytes, size_t length) {
     if (result != PPHP_OK) {
         fprintf(stderr, "%s\n", pphp_last_error(state));
     }
+    if (result == PPHP_OK && pphp_exit_requested(state)) {
+        result = pphp_exit_status(state);
+        pphp_close(state);
+        return result;
+    }
     pphp_close(state);
     return result == PPHP_OK ? 0 : (result == PPHP_E_PARSE ? 1 : 255);
+}
+
+static int run_repl(void) {
+    pphp_state *state = pphp_open(NULL, 0U);
+    int result;
+    if (state == NULL) {
+        fprintf(stderr, "php-pico: cannot initialize VM\n");
+        return 255;
+    }
+    pphp_set_output(state, write_stdout, stdout);
+    result = pphp_host_repl(state, stdin, stdout, stderr);
+    pphp_close(state);
+    return result;
 }
 
 int main(int argc, char **argv) {
@@ -277,6 +296,7 @@ int main(int argc, char **argv) {
         pphp_free(source);
         return result;
     }
-    print_usage(argc == 1 ? stdout : stderr);
-    return argc == 1 ? 0 : 2;
+    if (argc == 1) return run_repl();
+    print_usage(stderr);
+    return 2;
 }
