@@ -51,6 +51,9 @@ int hal_init(void) {
     return PPHP_HAL_OK;
 }
 
+int hal_interrupt_requested(void) { return 0; }
+int hal_bootsel_pressed(void) { return 0; }
+
 int hal_gpio_init(uint8_t pin, uint8_t mode, uint8_t pull) {
     gpio_pins[pin].initialized = 1U;
     gpio_pins[pin].mode = mode;

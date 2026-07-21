@@ -47,6 +47,8 @@ uint32_t hal_random(void);
 
 void hal_console_write(const char *bytes, size_t length);
 int hal_console_read(uint8_t *bytes, size_t length);
+int hal_interrupt_requested(void);
+int hal_bootsel_pressed(void);
 
 int hal_flash_read(uint32_t offset, void *buffer, size_t length);
 int hal_flash_prog(uint32_t offset, const void *buffer, size_t length);

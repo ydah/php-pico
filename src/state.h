@@ -71,7 +71,7 @@ struct pphp_state {
     void *output_context;
     const char *chunk_name;
     uint32_t error_line;
-    uint32_t ticks;
+    volatile uint32_t ticks;
     uint32_t processed_ticks;
     uint32_t random_state;
     int exit_requested;

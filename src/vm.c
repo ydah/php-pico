@@ -5,6 +5,7 @@
 #include "parray.h"
 #include "resource.h"
 #include "pclass.h"
+#include "pphp/hal.h"
 #include "closure.h"
 #include "value_ops.h"
 #include "pgems.h"
@@ -1245,6 +1246,11 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
         uint8_t opcode = read_u8(state, frame);
         if (state->processed_ticks != state->ticks) {
             state->processed_ticks = state->ticks;
+            if (hal_interrupt_requested()) {
+                pphp_runtime_error(state, frame->line,
+                                   "execution interrupted");
+                continue;
+            }
             pphp_poll_pgems(state);
             if (state->error[0] != '\0') continue;
         }

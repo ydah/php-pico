@@ -1,5 +1,8 @@
 cmake_minimum_required(VERSION 3.13)
 
+if(NOT DEFINED PICO_SDK_PATH AND DEFINED ENV{PICO_SDK_PATH})
+  set(PICO_SDK_PATH "$ENV{PICO_SDK_PATH}")
+endif()
 if(NOT DEFINED PICO_SDK_PATH)
   message(FATAL_ERROR "Set PICO_SDK_PATH to a Raspberry Pi Pico SDK checkout")
 endif()
@@ -40,6 +43,7 @@ set(PPHP_SOURCES
   ${PPHP_ROOT}/stdlib/system.c
   ${PPHP_ROOT}/stdlib/files.c
   ${PPHP_ROOT}/pgems/pgems.c
+  ${PPHP_ROOT}/shell/p2sh_device.c
   ${PPHP_ROOT}/fs/fs_lfs.c
   ${PPHP_ROOT}/third_party/littlefs/lfs.c
   ${PPHP_ROOT}/third_party/littlefs/lfs_util.c

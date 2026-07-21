@@ -9,6 +9,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -76,6 +77,43 @@ def execute(command: list[str], source: str) -> tuple[int, str]:
     return completed.returncode, normalized(completed.stdout)
 
 
+def serial_read_until(port: object, marker: bytes,
+                      timeout: float = 30.0) -> bytes:
+    deadline = time.monotonic() + timeout
+    received = bytearray()
+    while marker not in received:
+        if time.monotonic() >= deadline:
+            raise TimeoutError(f"serial timeout waiting for {marker!r}")
+        received.extend(port.read(256))
+    return bytes(received)
+
+
+def execute_serial(port: object, source: str) -> tuple[int, str]:
+    payload = source.encode("utf-8")
+    remote = "/home/.phpt.php"
+    port.reset_input_buffer()
+    port.write(f"upload {remote} {len(payload)}\n".encode("ascii"))
+    serial_read_until(port, b"READY\r\n")
+    port.write(payload)
+    uploaded = serial_read_until(port, b"pico$ ")
+    if b"OK\r\n" not in uploaded:
+        return 2, normalized(uploaded.decode("utf-8", errors="replace"))
+    port.write(f"php {remote}\n".encode("ascii"))
+    response = serial_read_until(port, b"pico$ ")
+    response = response.removesuffix(b"pico$ ")
+    _, separator, response = response.partition(b"\r\n")
+    if not separator:
+        response = b""
+    actual = normalized(response.decode("utf-8", errors="replace"))
+    return 0, actual
+
+
+def execute_pico(args: argparse.Namespace, source: str) -> tuple[int, str]:
+    if args.target == "serial":
+        return execute_serial(args.serial, source)
+    return execute([args.binary], source)
+
+
 def skipped(sections: dict[str, str], php: str) -> bool:
     source = sections.get("SKIPIF", "").strip()
     if not source:
@@ -115,7 +153,7 @@ def run_cases(args: argparse.Namespace, paths: list[Path]) -> list[CaseResult]:
             if skipped(sections, args.php):
                 result = CaseResult(path, "SKIP", "", "")
             else:
-                returncode, actual = execute([args.binary], sections["FILE"])
+                returncode, actual = execute_pico(args, sections["FILE"])
                 matches, expected = matches_expectation(sections, actual)
                 status = "PASS" if matches else "FAIL"
                 detail = "" if returncode in (0, 1, 255) else f"exit {returncode}"
@@ -144,7 +182,7 @@ def diff_cases(args: argparse.Namespace, paths: list[Path]) -> list[CaseResult]:
                 result = CaseResult(path, "SKIP", "", "")
             else:
                 _, native = execute([args.php], sections["FILE"])
-                _, pico = execute([args.binary], sections["FILE"])
+                _, pico = execute_pico(args, sections["FILE"])
                 declared = bool(sections.get("PHP_PICO_DIFF", "").strip())
                 if native == pico:
                     status = "PASS"
@@ -197,12 +235,30 @@ def main() -> int:
     parser.add_argument("--binary", default="build/host/php-pico")
     parser.add_argument("--php", default="php")
     parser.add_argument("--report", default="build/reports/differential.html")
+    parser.add_argument("--target", choices=("host", "serial"), default="host")
+    parser.add_argument("--port", help="serial device for --target=serial")
+    parser.add_argument("--baud", type=int, default=115200)
     args = parser.parse_args()
+    args.serial = None
+    if args.target == "serial":
+        if not args.port:
+            parser.error("--port is required with --target=serial")
+        try:
+            import serial  # type: ignore[import-not-found]
+        except ImportError:
+            parser.error("serial target requires pyserial")
+        args.serial = serial.Serial(args.port, args.baud, timeout=0.1)
+        serial_read_until(args.serial, b"pico$ ", timeout=10.0)
     paths = discover(args.paths or ["tests/phpt"])
     if not paths:
         print("no PHPT files found", file=sys.stderr)
         return 2
-    results = run_cases(args, paths) if args.mode == "run" else diff_cases(args, paths)
+    try:
+        results = (run_cases(args, paths) if args.mode == "run"
+                   else diff_cases(args, paths))
+    finally:
+        if args.serial is not None:
+            args.serial.close()
     if args.mode == "diff":
         write_report(Path(args.report), results)
         print(f"report: {args.report}")

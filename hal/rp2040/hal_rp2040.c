@@ -10,6 +10,8 @@
 #include "hardware/sync.h"
 #include "hardware/uart.h"
 #include "hardware/watchdog.h"
+#include "hardware/structs/ioqspi.h"
+#include "hardware/structs/sio.h"
 #include "pico/stdlib.h"
 #include "pico/unique_id.h"
 
@@ -291,6 +293,32 @@ int hal_console_read(uint8_t *bytes, size_t length) {
         bytes[count++] = (uint8_t)value;
     }
     return (int)count;
+}
+
+int hal_interrupt_requested(void) {
+    int value = getchar_timeout_us(0U);
+    return value == 3;
+}
+
+int __no_inline_not_in_flash_func(hal_bootsel_pressed)(void) {
+    const uint32_t pin = 1U;
+    uint32_t interrupts = save_and_disable_interrupts();
+    uint32_t delay;
+    int pressed;
+    hw_write_masked(&ioqspi_hw->io[pin].ctrl,
+                    GPIO_OVERRIDE_LOW <<
+                        IO_QSPI_GPIO_QSPI_SS_CTRL_OEOVER_LSB,
+                    IO_QSPI_GPIO_QSPI_SS_CTRL_OEOVER_BITS);
+    for (delay = 0U; delay < 1000U; delay++) {
+        __asm volatile ("nop");
+    }
+    pressed = (sio_hw->gpio_hi_in & (1UL << pin)) == 0U;
+    hw_write_masked(&ioqspi_hw->io[pin].ctrl,
+                    GPIO_OVERRIDE_NORMAL <<
+                        IO_QSPI_GPIO_QSPI_SS_CTRL_OEOVER_LSB,
+                    IO_QSPI_GPIO_QSPI_SS_CTRL_OEOVER_BITS);
+    restore_interrupts(interrupts);
+    return pressed;
 }
 
 static uint32_t flash_offset(uint32_t offset) {
