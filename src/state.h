@@ -43,6 +43,9 @@ struct pphp_state {
     const char *chunk_name;
     uint32_t error_line;
     uint32_t ticks;
+    uint32_t random_state;
+    int exit_requested;
+    int exit_status;
     char error[256];
 };
 

@@ -995,7 +995,8 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
     for (i = 0U; i < state->stack_count; i++) {
         state->stack[i] = pv_null();
     }
-    while (state->frame_count != 0U && state->error[0] == '\0') {
+    while (state->frame_count != 0U && state->error[0] == '\0' &&
+           !state->exit_requested) {
         pframe *frame = &state->frames[state->frame_count - 1U];
         size_t instruction_pc = frame->pc;
         int exception_processed = 0;
@@ -1707,6 +1708,17 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
         state->stack_count = 0U;
         state->frame_count = 0U;
         return PPHP_E_RUNTIME;
+    }
+    if (state->exit_requested) {
+        for (i = 0U; i < state->frame_count; i++) {
+            if (state->frames[i].has_return_override) {
+                pv_release(state->frames[i].return_override);
+                state->frames[i].has_return_override = 0;
+            }
+        }
+        release_range(state, 0U, state->stack_count);
+        state->stack_count = 0U;
+        state->frame_count = 0U;
     }
     return PPHP_OK;
 }

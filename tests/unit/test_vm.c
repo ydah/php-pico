@@ -679,6 +679,26 @@ TEST(json_builtins_round_trip_ordered_arrays_and_pretty_output) {
                output.bytes);
 }
 
+TEST(time_random_and_system_builtins_use_portable_runtime_services) {
+    const char *source =
+        "srand(1234); $a = rand(10, 20); srand(1234); $b = mt_rand(10, 20);"
+        "echo ($a === $b ? 1 : 0), ':';"
+        "echo date('Y-m-d H:i:s D N w', 0), ':';"
+        "$hr = hrtime(); echo count($hr), ':', (microtime() > 0 ? 1 : 0), ':';"
+        "echo gc_collect_cycles(), ':'; exit('done'); echo 'unreachable';";
+    output_buffer output;
+    pphp_state *state = pphp_open(vm_pool, sizeof(vm_pool));
+    ASSERT_TRUE(state != NULL);
+    memset(&output, 0, sizeof(output));
+    pphp_set_output(state, capture_output, &output);
+    ASSERT_EQ(PPHP_OK, pphp_exec_source_mode(state, source, strlen(source),
+                                            "test", 1));
+    ASSERT_STR("1:1970-01-01 00:00:00 Thu 4 4:2:1:0:done", output.bytes);
+    ASSERT_TRUE(pphp_exit_requested(state));
+    ASSERT_EQ(0, pphp_exit_status(state));
+    pphp_close(state);
+}
+
 int main(void) {
     static const test_case tests[] = {
         {"arithmetic VM", arithmetic_runs_through_compiler_and_vm},
@@ -722,7 +742,8 @@ int main(void) {
         {"REPL global persistence", repl_chunks_retain_globals_and_constants_by_name},
         {"constant and reflection builtins", constant_and_reflection_builtins_share_runtime_registries},
         {"formatting builtins", formatting_builtins_cover_width_precision_bases_and_print_r},
-        {"JSON builtins", json_builtins_round_trip_ordered_arrays_and_pretty_output}
+        {"JSON builtins", json_builtins_round_trip_ordered_arrays_and_pretty_output},
+        {"time, random, and system builtins", time_random_and_system_builtins_use_portable_runtime_services}
     };
     return run_tests(tests, sizeof(tests) / sizeof(tests[0]));
 }

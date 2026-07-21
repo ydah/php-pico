@@ -5,6 +5,7 @@
 #include "vm.h"
 #include "pclass.h"
 #include "parray.h"
+#include "pphp/hal.h"
 
 #include <stdarg.h>
 #include <float.h>
@@ -57,6 +58,7 @@ pphp_state *pphp_open(void *pool, size_t pool_size) {
     }
     memset(state, 0, sizeof(*state));
     state->output = discard_output;
+    state->random_state = hal_random();
     if (!psymbol_init(&state->symbols, 64U)) {
         pphp_free(state);
         return NULL;
@@ -196,6 +198,8 @@ int pphp_exec_source_mode(pphp_state *state, const char *source, size_t length,
     }
     state->error[0] = '\0';
     state->error_line = 0U;
+    state->exit_requested = 0;
+    state->exit_status = 0;
     state->chunk_name = chunk_name == NULL ? "<source>" : chunk_name;
     pc_arena_init(&arena, 4096U);
     pc_parser_init(&parser, &arena, source, length, repl);
@@ -234,6 +238,8 @@ int pphp_exec_pbc(pphp_state *state, const void *pbc, size_t length) {
     }
     state->error[0] = '\0';
     state->error_line = 0U;
+    state->exit_requested = 0;
+    state->exit_status = 0;
     state->chunk_name = "<pbc>";
     result = pphp_pbc_load(pbc, length, &module);
     if (result != PPHP_OK) {
@@ -258,4 +264,12 @@ const char *pphp_last_error(const pphp_state *state) {
 
 uint32_t pphp_last_error_line(const pphp_state *state) {
     return state == NULL ? 0U : state->error_line;
+}
+
+int pphp_exit_requested(const pphp_state *state) {
+    return state != NULL && state->exit_requested;
+}
+
+int pphp_exit_status(const pphp_state *state) {
+    return state == NULL ? 0 : state->exit_status;
 }

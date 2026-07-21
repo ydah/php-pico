@@ -6,6 +6,7 @@
 #include "codegen.h"
 #include "disasm.h"
 #include "pbc.h"
+#include "pphp/hal.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -141,6 +142,11 @@ static int execute_source(const char *source, size_t length, const char *name,
                     pphp_last_error_line(state));
         }
     }
+    if (result == PPHP_OK && pphp_exit_requested(state)) {
+        result = pphp_exit_status(state);
+        pphp_close(state);
+        return result;
+    }
     pphp_close(state);
     return result == PPHP_OK ? 0 : (result == PPHP_E_PARSE ? 1 : 255);
 }
@@ -230,6 +236,7 @@ static int execute_pbc(const void *bytes, size_t length) {
 
 int main(int argc, char **argv) {
     pphp_pool_init(host_pool, sizeof(host_pool));
+    (void)hal_init();
     if (argc == 2 && strcmp(argv[1], "--version") == 0) {
         printf("php-pico %s\n", PPHP_VERSION);
         return 0;

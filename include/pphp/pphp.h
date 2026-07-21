@@ -49,6 +49,8 @@ void pphp_tick(pphp_state *state);
 void pphp_set_output(pphp_state *state, pphp_output_fn output, void *context);
 const char *pphp_last_error(const pphp_state *state);
 uint32_t pphp_last_error_line(const pphp_state *state);
+int pphp_exit_requested(const pphp_state *state);
+int pphp_exit_status(const pphp_state *state);
 
 #ifdef __cplusplus
 }

@@ -7,6 +7,7 @@
 #include "arrays.h"
 #include "formatting.h"
 #include "json.h"
+#include "system.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -22,16 +23,16 @@ int pphp_builtin_exists(const pstring *name) {
         "array_is_list\0array_key_exists\0array_keys\0array_merge\0array_product\0"
         "array_reverse\0array_search\0array_slice\0array_sum\0array_values\0"
         "asin\0atan\0atan2\0bin2hex\0bindec\0boolval\0ceil\0chr\0class_exists\0"
-        "constant\0cos\0count\0decbin\0dechex\0decoct\0define\0defined\0exp\0"
+        "constant\0cos\0count\0date\0decbin\0dechex\0decoct\0define\0defined\0die\0error_log\0exit\0exp\0"
         "explode\0fdiv\0floatval\0floor\0fmod\0function_exists\0get_class\0"
-        "gettype\0hex2bin\0hexdec\0implode\0in_array\0intdiv\0intval\0is_array\0"
+        "gc_collect_cycles\0gettype\0hex2bin\0hexdec\0hrtime\0implode\0in_array\0intdiv\0intval\0is_array\0"
         "is_bool\0is_callable\0is_float\0is_int\0is_null\0is_numeric\0is_object\0"
         "is_string\0join\0json_decode\0json_encode\0key_exists\0lcfirst\0log\0log10\0ltrim\0max\0"
-        "memory_get_usage\0method_exists\0min\0octdec\0ord\0pi\0pow\0print_r\0printf\0range\0"
+        "memory_get_usage\0method_exists\0microtime\0min\0mt_rand\0octdec\0ord\0pi\0pow\0print_r\0printf\0rand\0random_int\0range\0"
         "round\0rtrim\0sin\0sqrt\0str_contains\0str_ends_with\0str_pad\0"
         "str_repeat\0str_replace\0str_split\0str_starts_with\0strcasecmp\0strcmp\0"
         "strlen\0strncmp\0strpos\0strrev\0strrpos\0strtolower\0strtoupper\0"
-        "strval\0substr\0sprintf\0tan\0trim\0ucfirst\0var_dump\0";
+        "srand\0strval\0substr\0sprintf\0tan\0time\0trim\0ucfirst\0usleep\0var_dump\0sleep\0";
     const char *candidate = names;
     while (*candidate != '\0') {
         if (name_is(name, candidate)) return 1;
@@ -545,6 +546,8 @@ int pphp_call_builtin(pphp_state *state, const pstring *name,
     handled = pphp_call_formatting_builtin(state, name, arguments, count, result);
     if (handled != 0) return handled;
     handled = pphp_call_json_builtin(state, name, arguments, count, result);
+    if (handled != 0) return handled;
+    handled = pphp_call_system_builtin(state, name, arguments, count, result);
     if (handled != 0) return handled;
     handled = pphp_call_array_builtin(state, name, arguments, count, result);
     if (handled != 0) return handled;
