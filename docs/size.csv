@@ -1,4 +1,8 @@
-timestamp,commit,target,bytes
-2026-07-21T06:06:17Z,397ef4e,build/host/php-pico,35032
-2026-07-21T06:47:12Z,e6e950a,build/host/php-pico,89960
-2026-07-21T06:56:21Z,82dfb8e,build/host/php-pico,107608
+timestamp,commit,target,bytes,rom,ram
+2026-07-21T06:06:17Z,397ef4e,build/host/php-pico,35032,,
+2026-07-21T06:47:12Z,e6e950a,build/host/php-pico,89960,,
+2026-07-21T06:56:21Z,82dfb8e,build/host/php-pico,107608,,
+2026-07-21T11:20:39Z,dec8ca9,build/host/php-pico,305672,,
+2026-07-21T12:38:07Z,dec8ca9,build/rp2040/php-pico.elf,1574904,182172,138752
+2026-07-21T13:17:21Z,833edbc,build/host/php-pico,339928,,
+2026-07-21T13:17:52Z,833edbc,build/rp2040/php-pico.elf,1686976,194512,139068

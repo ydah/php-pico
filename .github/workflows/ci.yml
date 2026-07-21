@@ -1,17 +1,30 @@
 name: ci
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 on:
   push:
   pull_request:
+  schedule:
+    - cron: "23 3 * * 0"
 
 jobs:
   host:
+    name: Host (${{ matrix.compiler }})
     strategy:
       matrix:
         compiler: [gcc, clang]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          submodules: true
+          persist-credentials: false
       - name: Build and test
         env:
           CC: ${{ matrix.compiler }}
@@ -21,3 +34,73 @@ jobs:
         env:
           CC: clang
         run: make test-asan
+      - name: Benchmarks
+        if: matrix.compiler == 'gcc'
+        run: make bench
+      - name: Build RP2040-compatible PBC compiler
+        if: matrix.compiler == 'gcc'
+        run: make host-rp2040
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: matrix.compiler == 'gcc'
+        with:
+          name: php-pico-host-linux-1.0.0
+          path: |
+            build/host/php-pico
+            build/host/php-pico-rp2040
+
+  differential:
+    name: PHP 8.3 differential
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          submodules: true
+          persist-credentials: false
+      - run: make host
+      - name: Compare with PHP 8.3
+        run: docker run --rm -v "$PWD:/work" -w /work php:8.3-cli sh tools/difftest.sh --binary build/host/php-pico tests/phpt
+
+  rp2040:
+    name: RP2040 firmware
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          submodules: true
+          persist-credentials: false
+      - name: Install ARM toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake gcc-arm-none-eabi libnewlib-arm-none-eabi
+      - name: Fetch Pico SDK 2.3.0
+        run: git clone --branch 2.3.0 --depth 1 --recurse-submodules --shallow-submodules https://github.com/raspberrypi/pico-sdk.git "$RUNNER_TEMP/pico-sdk"
+      - name: Build firmware
+        env:
+          PICO_SDK_PATH: ${{ runner.temp }}/pico-sdk
+        run: make rp2040
+      - name: Check firmware size
+        run: tools/sizecheck.sh build/rp2040/php-pico.elf
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: php-pico-1.0.0
+          path: |
+            build/rp2040/php-pico-1.0.0.uf2
+            build/rp2040/php-pico.elf
+
+  valgrind:
+    name: Weekly Valgrind
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          submodules: true
+          persist-credentials: false
+      - run: sudo apt-get update && sudo apt-get install -y valgrind
+      - run: make test-unit
+      - name: Leak and invalid-access checks
+        run: |
+          valgrind --error-exitcode=1 --leak-check=full build/host/test_core
+          valgrind --error-exitcode=1 --leak-check=full build/host/test_lexer
+          valgrind --error-exitcode=1 --leak-check=full build/host/test_parser
+          valgrind --error-exitcode=1 --leak-check=full build/host/test_vm

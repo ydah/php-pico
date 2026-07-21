@@ -13,6 +13,7 @@ LEXER_TEST_SOURCES := compiler/lexer.c tests/unit/test_lexer.c
 PARSER_TEST_SOURCES := src/alloc.c compiler/lexer.c compiler/ast.c compiler/parser.c tests/unit/test_parser.c
 VM_TEST_SOURCES := $(RUNTIME_SOURCES) $(COMPILER_SOURCES) compiler/codegen.c tests/unit/test_vm.c
 HOST_BINARY := build/host/php-pico
+RP2040_HOST_BINARY := build/host/php-pico-rp2040
 TEST_BINARY := build/host/test_core
 LEXER_TEST_BINARY := build/host/test_lexer
 PARSER_TEST_BINARY := build/host/test_parser
@@ -23,19 +24,26 @@ ASAN_PARSER_BINARY := build/host/test_parser_asan
 ASAN_VM_BINARY := build/host/test_vm_asan
 ASAN_LEAKS := $(if $(filter Darwin,$(shell uname -s)),0,1)
 
-.PHONY: all host rp2040 test test-unit test-phpt test-target test-asan test-diff size clean
+.PHONY: all host host-rp2040 rp2040 test test-unit test-phpt test-target test-asan test-diff bench size clean
 
 all: host
 
 host: $(HOST_BINARY)
 
+host-rp2040: $(RP2040_HOST_BINARY)
+
 rp2040:
 	cmake -S ports/rp2040 -B build/rp2040 -DPICO_BOARD=pico
-	cmake --build build/rp2040 --parallel
+	cmake --build build/rp2040 --parallel 2
 
 $(HOST_BINARY): $(HOST_SOURCES)
 	@mkdir -p $(@D)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(HOST_SOURCES) $(LDFLAGS) $(LDLIBS) -o $@
+
+$(RP2040_HOST_BINARY): $(HOST_SOURCES)
+	@mkdir -p $(@D)
+	$(CC) $(CPPFLAGS) -DPPHP_INT64=0 -DPPHP_USE_DOUBLE=0 $(CFLAGS) \
+		$(HOST_SOURCES) $(LDFLAGS) $(LDLIBS) -o $@
 
 $(TEST_BINARY): $(TEST_SOURCES)
 	@mkdir -p $(@D)
@@ -87,6 +95,9 @@ test-asan:
 
 test-diff: test
 	sh tools/difftest.sh --binary $(HOST_BINARY) tests/phpt
+
+bench: host
+	python3 tools/bench.py --binary $(HOST_BINARY)
 
 size: host
 	sh tools/sizecheck.sh $(HOST_BINARY)

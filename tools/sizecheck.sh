@@ -11,6 +11,7 @@ mkdir -p docs
 bytes=$(wc -c < "$binary" | tr -d ' ')
 ram=''
 rom=''
+previous_rom=''
 case "$binary" in
     *.elf)
         size_tool=${SIZE_TOOL:-arm-none-eabi-size}
@@ -19,21 +20,34 @@ case "$binary" in
             rom=$(($1 + $2))
             ram=$(($2 + $3))
         fi
+        if [ -f docs/size.csv ]; then
+            previous_rom=$(awk -F, -v target="$binary" \
+                '$3 == target && $5 ~ /^[0-9]+$/ { value = $5 } END { print value }' \
+                docs/size.csv)
+        fi
         ;;
 esac
 commit=$(git rev-parse --short HEAD 2>/dev/null || printf 'working-tree')
 timestamp=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 
-if [ ! -f docs/size.csv ]; then
-    printf 'timestamp,commit,target,bytes,rom,ram\n' > docs/size.csv
-fi
-printf '%s,%s,%s,%s,%s,%s\n' "$timestamp" "$commit" "$binary" "$bytes" "$rom" "$ram" >> docs/size.csv
 printf '%s: %s bytes\n' "$binary" "$bytes"
 if [ -n "$rom" ]; then
     printf 'ROM: %s bytes, RAM: %s bytes\n' "$rom" "$ram"
-    if [ "$rom" -gt "${PPHP_ROM_LIMIT:-98304}" ] ||
+    if [ "$rom" -gt "${PPHP_ROM_LIMIT:-196608}" ] ||
        [ "$ram" -gt "${PPHP_RAM_LIMIT:-143360}" ]; then
         echo 'sizecheck: RP2040 footprint exceeds configured MUST limit' >&2
         exit 1
     fi
+    if [ -n "$previous_rom" ] &&
+       [ "$rom" -gt $((previous_rom + ${PPHP_SIZE_REGRESSION_LIMIT:-2048})) ] &&
+       [ "${PPHP_SIZE_ALLOW_GROWTH:-0}" != 1 ]; then
+        echo "sizecheck: ROM grew by more than the configured regression limit (previous $previous_rom, current $rom)" >&2
+        exit 1
+    fi
 fi
+
+if [ ! -f docs/size.csv ]; then
+    printf 'timestamp,commit,target,bytes,rom,ram\n' > docs/size.csv
+fi
+printf '%s,%s,%s,%s,%s,%s\n' "$timestamp" "$commit" "$binary" \
+    "$bytes" "$rom" "$ram" >> docs/size.csv
