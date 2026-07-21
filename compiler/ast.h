@@ -173,6 +173,7 @@ struct pc_ast {
             pc_ast *body;
             size_t parameter_count;
             uint8_t flags;
+            int declaration_only;
         } function;
         struct {
             pc_ast *parameters;
@@ -186,6 +187,7 @@ struct pc_ast {
             pc_token name;
             pc_ast *default_value;
             int variadic;
+            uint8_t flags;
         } parameter;
         struct {
             pc_token_type mode;
@@ -194,6 +196,7 @@ struct pc_ast {
         struct {
             pc_token name;
             pc_token parent;
+            pc_ast *interfaces;
             pc_ast *members;
             uint8_t flags;
         } class_decl;

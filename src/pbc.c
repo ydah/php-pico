@@ -732,15 +732,22 @@ const char *pphp_opcode_name(uint8_t opcode) {
         case OP_MCALL: return "MCALL";
         case OP_MCALL_ARRAY: return "MCALL_ARRAY";
         case OP_NEW_OBJ_ARRAY: return "NEW_OBJ_ARRAY";
+        case OP_SCALL: return "SCALL";
+        case OP_SCALL_ARRAY: return "SCALL_ARRAY";
         case OP_INSTANCEOF: return "INSTANCEOF";
+        case OP_SPROP_GET: return "SPROP_GET";
+        case OP_SPROP_SET: return "SPROP_SET";
+        case OP_CLSCONST: return "CLSCONST";
         case OP_CLOSURE: return "CLOSURE";
         case OP_THROW: return "THROW";
         case OP_CLONE: return "CLONE";
+        case OP_DEF_CCONST: return "DEF_CCONST";
         case OP_DEF_CLASS: return "DEF_CLASS";
         case OP_DEF_METHOD: return "DEF_METHOD";
         case OP_DEF_PROP: return "DEF_PROP";
         case OP_DEF_CONST: return "DEF_CONST";
         case OP_DEF_END: return "DEF_END";
+        case OP_DEF_INTERFACE: return "DEF_INTERFACE";
         case OP_LINE: return "LINE";
         default: return "UNKNOWN";
     }

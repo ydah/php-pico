@@ -22,6 +22,7 @@ typedef struct pframe {
     pvalue return_override;
     int has_return_override;
     pclass *called_scope;
+    pclass *called_class;
 } pframe;
 
 struct pphp_state {
@@ -53,6 +54,8 @@ struct pphp_state {
     int repl_mode;
     int capture_halt_result;
     pvalue *halt_result;
+    int (*invoke)(struct pphp_state *state, pvalue callable,
+                  const pvalue *arguments, size_t count, pvalue *result);
     char error[256];
 };
 

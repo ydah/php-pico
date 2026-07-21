@@ -63,6 +63,7 @@ pphp_state *pphp_open(void *pool, size_t pool_size) {
     }
     memset(state, 0, sizeof(*state));
     state->output = discard_output;
+    state->invoke = pphp_vm_invoke;
     state->random_state = hal_random();
     if (!psymbol_init(&state->symbols, 64U)) {
         pphp_free(state);
@@ -96,15 +97,15 @@ void pphp_close(pphp_state *state) {
     if (state == NULL) {
         return;
     }
+    pa_destroy(state->globals);
+    pa_destroy(state->statics);
+    pa_destroy(state->constants);
     pphp_clear_classes(state);
     for (i = 0U; i < state->repl_module_count; i++) {
         pmodule_destroy(state->repl_modules[i]);
         pphp_free(state->repl_modules[i]);
     }
     pphp_free(state->repl_modules);
-    pa_destroy(state->globals);
-    pa_destroy(state->statics);
-    pa_destroy(state->constants);
     psymbol_destroy(&state->symbols);
     pphp_free(state);
 }

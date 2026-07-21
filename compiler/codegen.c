@@ -295,6 +295,14 @@ static uint16_t name_constant(generator *gen, pc_token token) {
     return index;
 }
 
+static uint16_t member_name_constant(generator *gen, pc_token token) {
+    if (token.length != 0U && token.start[0] == '$') {
+        token.start++;
+        token.length--;
+    }
+    return name_constant(gen, token);
+}
+
 static int variable_slot(generator *gen, pc_token token, uint8_t *slot) {
     const char *name = token.start;
     size_t length = token.length;
@@ -816,8 +824,27 @@ static void compile_assignment(generator *gen, const pc_ast *node) {
     if (node->as.binary.left->kind == AST_MEMBER) {
         const pc_ast *member = node->as.binary.left;
         uint16_t name;
-        if (operation != T_EQUAL || member->as.member.op != T_ARROW) {
+        if (operation != T_EQUAL) {
             fail(gen, node->line, "complex property assignment is not supported");
+            return;
+        }
+        if (member->as.member.op == T_SCOPE) {
+            uint16_t class_name;
+            if (member->as.member.base->kind != AST_IDENTIFIER) {
+                fail(gen, node->line, "invalid static property target");
+                return;
+            }
+            compile_expression(gen, node->as.binary.right);
+            class_name = name_constant(
+                gen, member->as.member.base->as.literal.token);
+            name = member_name_constant(gen, member->as.member.name);
+            emit_byte(gen, OP_SPROP_SET, node->line);
+            emit_u16(gen, class_name, node->line);
+            emit_u16(gen, name, node->line);
+            return;
+        }
+        if (member->as.member.op != T_ARROW) {
+            fail(gen, node->line, "invalid property assignment target");
             return;
         }
         compile_expression(gen, member->as.member.base);
@@ -1179,6 +1206,36 @@ static void compile_expression(generator *gen, const pc_ast *node) {
                 }
                 break;
             }
+            if (node->as.call.callee->kind == AST_MEMBER &&
+                node->as.call.callee->as.member.op == T_SCOPE) {
+                const pc_ast *member = node->as.call.callee;
+                uint16_t class_name;
+                uint16_t method_name;
+                if (member->as.member.base->kind != AST_IDENTIFIER) {
+                    fail(gen, node->line, "invalid static method target");
+                    break;
+                }
+                class_name = name_constant(
+                    gen, member->as.member.base->as.literal.token);
+                method_name = member_name_constant(gen, member->as.member.name);
+                if (has_spread) {
+                    compile_argument_array(gen, argument, node->as.call.count,
+                                           node->line);
+                    emit_byte(gen, OP_SCALL_ARRAY, node->line);
+                    emit_u16(gen, class_name, node->line);
+                    emit_u16(gen, method_name, node->line);
+                } else {
+                    while (argument != NULL) {
+                        compile_expression(gen, argument);
+                        argument = argument->next;
+                    }
+                    emit_byte(gen, OP_SCALL, node->line);
+                    emit_u16(gen, class_name, node->line);
+                    emit_u16(gen, method_name, node->line);
+                    emit_byte(gen, (uint8_t)node->as.call.count, node->line);
+                }
+                break;
+            }
             if (node->as.call.callee->kind != AST_IDENTIFIER) {
                 compile_expression(gen, node->as.call.callee);
                 if (has_spread) {
@@ -1244,8 +1301,24 @@ static void compile_expression(generator *gen, const pc_ast *node) {
         }
         case AST_MEMBER: {
             uint16_t name;
+            if (node->as.member.op == T_SCOPE) {
+                uint16_t class_name;
+                if (node->as.member.base->kind != AST_IDENTIFIER) {
+                    fail(gen, node->line, "invalid static member target");
+                    break;
+                }
+                class_name = name_constant(
+                    gen, node->as.member.base->as.literal.token);
+                name = member_name_constant(gen, node->as.member.name);
+                emit_byte(gen, node->as.member.name.type == T_VARIABLE
+                                   ? OP_SPROP_GET : OP_CLSCONST,
+                          node->line);
+                emit_u16(gen, class_name, node->line);
+                emit_u16(gen, name, node->line);
+                break;
+            }
             if (node->as.member.op != T_ARROW) {
-                fail(gen, node->line, "static member access is not supported yet");
+                fail(gen, node->line, "invalid member access");
                 break;
             }
             compile_expression(gen, node->as.member.base);
@@ -1877,11 +1950,16 @@ static void compile_statement(generator *gen, const pc_ast *node) {
 }
 
 static int compile_function(generator *gen, const pc_ast *function) {
-    pproto *proto = pproto_new(function->as.function.name.start,
-                               function->as.function.name.length);
+    pproto *proto;
     const pc_ast *parameter;
     generator child;
     int saw_default = 0;
+    if (function->as.function.declaration_only) {
+        fail(gen, function->line, "function declaration requires a body");
+        return 0;
+    }
+    proto = pproto_new(function->as.function.name.start,
+                       function->as.function.name.length);
     if (proto == NULL || !pmodule_add(gen->module, proto)) {
         pproto_destroy(proto);
         fail(gen, function->line, "out of memory while creating function");
@@ -1946,12 +2024,28 @@ static int compile_function(generator *gen, const pc_ast *function) {
 static int compile_method(generator *gen, pc_token class_name,
                           const pc_ast *method) {
     size_t qualified_length = class_name.length + 2U + method->as.function.name.length;
-    char *qualified = pphp_alloc(qualified_length);
+    char *qualified;
     pproto *proto;
     const pc_ast *parameter;
     generator child;
     int saw_default = 0;
     uint8_t ignored;
+    if ((method->as.function.flags & PC_MOD_ABSTRACT) != 0U &&
+        !method->as.function.declaration_only) {
+        fail(gen, method->line, "abstract method must not have a body");
+        return 0;
+    }
+    if ((method->as.function.flags & PC_MOD_ABSTRACT) == 0U &&
+        method->as.function.declaration_only) {
+        fail(gen, method->line, "non-abstract method requires a body");
+        return 0;
+    }
+    if ((method->as.function.flags & (PC_MOD_ABSTRACT | PC_MOD_FINAL)) ==
+        (PC_MOD_ABSTRACT | PC_MOD_FINAL)) {
+        fail(gen, method->line, "method cannot be both abstract and final");
+        return 0;
+    }
+    qualified = pphp_alloc(qualified_length);
     if (qualified == NULL) {
         fail(gen, method->line, "out of memory creating method name");
         return 0;
@@ -2016,6 +2110,29 @@ static int compile_method(generator *gen, pc_token class_name,
     child.proto = proto;
     child.error = gen->error;
     compile_parameter_defaults(&child, method->as.function.parameters);
+    if (method->as.function.name.length == 11U &&
+        memcmp(method->as.function.name.start, "__construct", 11U) == 0) {
+        parameter = method->as.function.parameters;
+        while (parameter != NULL && !child.failed) {
+            if (parameter->as.parameter.flags != 0U) {
+                uint8_t slot;
+                uint16_t property_name;
+                if (!variable_slot(&child, parameter->as.parameter.name, &slot)) {
+                    break;
+                }
+                emit_byte(&child, OP_LOAD_LOCAL, parameter->line);
+                emit_byte(&child, 0U, parameter->line);
+                emit_byte(&child, OP_LOAD_LOCAL, parameter->line);
+                emit_byte(&child, slot, parameter->line);
+                property_name = member_name_constant(
+                    &child, parameter->as.parameter.name);
+                emit_byte(&child, OP_PROP_SET, parameter->line);
+                emit_u16(&child, property_name, parameter->line);
+                emit_byte(&child, OP_POP, parameter->line);
+            }
+            parameter = parameter->next;
+        }
+    }
     compile_statement(&child, method->as.function.body);
     if (!child.failed) {
         emit_byte(&child, OP_RET_NULL, method->line);
@@ -2057,14 +2174,50 @@ static void compile_class_definition(generator *gen, const pc_ast *class_node) {
     emit_u16(gen, class_name, class_node->line);
     emit_u16(gen, parent_name, class_node->line);
     emit_byte(gen, class_node->as.class_decl.flags, class_node->line);
+    {
+        const pc_ast *interface_node = class_node->as.class_decl.interfaces;
+        while (interface_node != NULL) {
+            uint16_t interface_name = name_constant(
+                gen, interface_node->as.literal.token);
+            emit_byte(gen, OP_DEF_INTERFACE, interface_node->line);
+            emit_u16(gen, interface_name, interface_node->line);
+            interface_node = interface_node->next;
+        }
+    }
+    {
+        const pc_ast *method = member;
+        while (method != NULL && !gen->failed) {
+            if (method->kind == AST_FUNCTION &&
+                method->as.function.name.length == 11U &&
+                memcmp(method->as.function.name.start, "__construct", 11U) == 0) {
+                const pc_ast *parameter = method->as.function.parameters;
+                while (parameter != NULL) {
+                    if (parameter->as.parameter.flags != 0U) {
+                        uint16_t property_name;
+                        if (parameter->as.parameter.default_value != NULL) {
+                            compile_expression(
+                                gen, parameter->as.parameter.default_value);
+                        } else {
+                            emit_byte(gen, OP_LOAD_NULL, parameter->line);
+                        }
+                        property_name = member_name_constant(
+                            gen, parameter->as.parameter.name);
+                        emit_byte(gen, OP_DEF_PROP, parameter->line);
+                        emit_u16(gen, property_name, parameter->line);
+                        emit_byte(gen, parameter->as.parameter.flags,
+                                  parameter->line);
+                    }
+                    parameter = parameter->next;
+                }
+                break;
+            }
+            method = method->next;
+        }
+    }
     while (member != NULL && !gen->failed) {
         if (member->kind == AST_PROPERTY) {
             uint16_t name;
             pc_token property_name = member->as.property.name;
-            if ((member->as.property.flags & PC_MOD_STATIC) != 0U) {
-                fail(gen, member->line, "static properties are not supported yet");
-                break;
-            }
             if (member->as.property.default_value != NULL) {
                 compile_expression(gen, member->as.property.default_value);
             } else {
@@ -2090,6 +2243,18 @@ static void compile_class_definition(generator *gen, const pc_ast *class_node) {
             emit_u16(gen, name, member->line);
             emit_u16(gen, proto_index, member->line);
             emit_byte(gen, member->as.function.flags, member->line);
+        } else if (member->kind == AST_CONST) {
+            uint16_t name;
+            if (member->as.binding.value == NULL ||
+                !is_constant_default(member->as.binding.value)) {
+                fail(gen, member->line,
+                     "class constant initializer must be constant");
+                break;
+            }
+            compile_expression(gen, member->as.binding.value);
+            name = name_constant(gen, member->as.binding.name);
+            emit_byte(gen, OP_DEF_CCONST, member->line);
+            emit_u16(gen, name, member->line);
         }
         member = member->next;
     }

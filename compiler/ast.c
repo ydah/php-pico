@@ -276,6 +276,7 @@ static void dump_node(FILE *stream, const pc_ast *node, unsigned depth) {
             dump_node(stream, node->as.include_stmt.path, depth + 1U);
             break;
         case AST_CLASS:
+            dump_list(stream, node->as.class_decl.interfaces, depth + 1U);
             dump_list(stream, node->as.class_decl.members, depth + 1U);
             break;
         case AST_PROPERTY:

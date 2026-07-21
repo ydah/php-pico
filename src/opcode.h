@@ -83,15 +83,22 @@ typedef enum pphp_opcode {
     OP_MCALL = 0x73,
     OP_MCALL_ARRAY = 0x74,
     OP_NEW_OBJ_ARRAY = 0x75,
+    OP_SCALL = 0x76,
+    OP_SCALL_ARRAY = 0x77,
     OP_INSTANCEOF = 0x78,
+    OP_SPROP_GET = 0x79,
+    OP_SPROP_SET = 0x7a,
+    OP_CLSCONST = 0x7b,
     OP_CLOSURE = 0x80,
     OP_THROW = 0x81,
     OP_CLONE = 0x82,
+    OP_DEF_CCONST = 0x85,
     OP_DEF_CLASS = 0x86,
     OP_DEF_METHOD = 0x87,
     OP_DEF_PROP = 0x88,
     OP_DEF_CONST = 0x89,
     OP_DEF_END = 0x8a,
+    OP_DEF_INTERFACE = 0x8b,
     OP_LINE = 0x90
 } pphp_opcode;
 

@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "pbc.h"
+#include "parray.h"
 #include "pphp/pphp.h"
 #include "value.h"
 
@@ -44,12 +45,18 @@ struct pclass {
     pmethod *methods;
     size_t method_count;
     size_t method_capacity;
+    parray *static_properties;
+    parray *constants;
+    pclass **interfaces;
+    size_t interface_count;
+    size_t interface_capacity;
     uint8_t flags;
 };
 
 struct pobject {
     pheader header;
     pclass *class_entry;
+    pphp_state *owner_state;
     pvalue slots[];
 };
 
@@ -60,11 +67,23 @@ int pclass_add_property(pclass *class_entry, const char *name, size_t length,
 int pclass_add_method(pclass *class_entry, const char *name, size_t length,
                       uint8_t flags, const pproto *proto,
                       const pmodule *module);
+int pclass_add_static_property(pclass *class_entry, const char *name,
+                               size_t length, pvalue default_value);
+int pclass_get_static_property(const pclass *class_entry, const char *name,
+                               size_t length, pvalue *value);
+int pclass_set_static_property(pclass *class_entry, const char *name,
+                               size_t length, pvalue value);
+int pclass_add_constant(pclass *class_entry, const char *name, size_t length,
+                        pvalue value);
+int pclass_get_constant(const pclass *class_entry, const char *name,
+                        size_t length, pvalue *value);
+int pclass_add_interface(pclass *class_entry, pclass *interface_entry);
+int pclass_is_complete(const pclass *class_entry, const pmethod **missing);
 const pproperty *pclass_find_property(const pclass *class_entry,
                                       const char *name, size_t length);
 const pmethod *pclass_find_method(const pclass *class_entry,
                                   const char *name, size_t length);
-pobject *pobject_new(pclass *class_entry);
+pobject *pobject_new(pphp_state *state, pclass *class_entry);
 pobject *pobject_clone(const pobject *source);
 void pobject_destroy(pobject *object);
 int pclass_is_a(const pclass *class_entry, const pclass *expected);

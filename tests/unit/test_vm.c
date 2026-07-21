@@ -758,6 +758,64 @@ TEST(str_replace_accepts_array_search_replacement_and_subject_values) {
     ASSERT_STR("R G :-R:--c", output.bytes);
 }
 
+TEST(static_class_members_promotion_and_magic_methods_execute) {
+    const char *source =
+        "class BaseStatic {"
+        " const VALUE = 4; public static $count = 1;"
+        " public static function add($value) {"
+        "  self::$count = self::$count + $value; return self::$count;"
+        " }"
+        " public function value() { return self::VALUE; }"
+        "}"
+        "class ChildStatic extends BaseStatic {"
+        " public static function name() { return static::class; }"
+        " public function inherited() { return parent::value(); }"
+        "}"
+        "class PromotedMagic {"
+        " public function __construct(private $x, public readonly $y = 2) {}"
+        " public function __get($name) { return 'get:' . $name; }"
+        " public function __set($name, $value) { $this->x = $value; }"
+        " public function __toString() { return 'value=' . $this->x; }"
+        " public function __destruct() { echo ':destroyed'; }"
+        "}"
+        "echo BaseStatic::VALUE, ':', BaseStatic::$count, ':',"
+        " BaseStatic::add(2), ':', ChildStatic::add(3), ':',"
+        " ChildStatic::name(), ':', (new ChildStatic())->inherited(), ':';"
+        "$magic = new PromotedMagic(5); echo $magic->missing, ':', $magic->y, ':';"
+        "$magic->dynamic = 8; echo $magic, ':', ('x=' . $magic); unset($magic);";
+    output_buffer output;
+    ASSERT_EQ(PPHP_OK, execute(source, &output, NULL, 0U));
+    ASSERT_STR("4:1:3:6:ChildStatic:4:get:missing:2:value=8:x=value=8:destroyed",
+               output.bytes);
+}
+
+TEST(interfaces_and_abstract_final_contracts_are_enforced) {
+    const char *valid =
+        "interface Runnable { public function run(); }"
+        "interface Named extends Runnable { public function name(); }"
+        "abstract class BaseTask implements Named {"
+        " public function name() { return 'task'; }"
+        "}"
+        "final class Task extends BaseTask {"
+        " public function run() { return 9; }"
+        "}"
+        "$task = new Task(); echo $task->name(), ':', $task->run(), ':',"
+        " ($task instanceof Runnable), ':', ($task instanceof Named), ':',"
+        " ($task instanceof BaseTask);";
+    output_buffer output;
+    char error[256];
+    ASSERT_EQ(PPHP_OK, execute(valid, &output, error, sizeof(error)));
+    ASSERT_STR("task:9:1:1:1", output.bytes);
+    ASSERT_EQ(PPHP_E_RUNTIME,
+              execute("interface I { function required(); } class Bad implements I {}",
+                      &output, error, sizeof(error)));
+    ASSERT_TRUE(strstr(error, "must implement method required") != NULL);
+    ASSERT_EQ(PPHP_E_RUNTIME,
+              execute("class A { final function f() {} } class B extends A { function f() {} }",
+                      &output, error, sizeof(error)));
+    ASSERT_TRUE(strstr(error, "cannot define method") != NULL);
+}
+
 int main(void) {
     static const test_case tests[] = {
         {"arithmetic VM", arithmetic_runs_through_compiler_and_vm},
@@ -805,7 +863,9 @@ int main(void) {
         {"JSON builtins", json_builtins_round_trip_ordered_arrays_and_pretty_output},
         {"time, random, and system builtins", time_random_and_system_builtins_use_portable_runtime_services},
         {"array mutation, callbacks, and sorts", array_mutators_callbacks_and_sorts_preserve_cow_semantics},
-        {"array string replacement", str_replace_accepts_array_search_replacement_and_subject_values}
+        {"array string replacement", str_replace_accepts_array_search_replacement_and_subject_values},
+        {"static and magic class features", static_class_members_promotion_and_magic_methods_execute},
+        {"interface, abstract, and final contracts", interfaces_and_abstract_final_contracts_are_enforced}
     };
     return run_tests(tests, sizeof(tests) / sizeof(tests[0]));
 }

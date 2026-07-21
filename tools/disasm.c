@@ -32,6 +32,8 @@ static size_t operand_size(uint8_t opcode) {
         case OP_CALL_ARRAY:
         case OP_MCALL_ARRAY:
         case OP_NEW_OBJ_ARRAY:
+        case OP_DEF_CCONST:
+        case OP_DEF_INTERFACE:
         case OP_JMP:
         case OP_JMP_IF:
         case OP_JMP_UNLESS:
@@ -48,6 +50,13 @@ static size_t operand_size(uint8_t opcode) {
         case OP_FE_NEXT:
         case OP_STATIC_INIT:
             return 3U;
+        case OP_SPROP_GET:
+        case OP_SPROP_SET:
+        case OP_CLSCONST:
+        case OP_SCALL_ARRAY:
+            return 4U;
+        case OP_SCALL:
+            return 5U;
         case OP_PROP_GET:
         case OP_PROP_SET:
         case OP_INSTANCEOF:
@@ -127,6 +136,12 @@ static int disassemble_proto(FILE *stream, const pproto *proto, size_t index) {
                 print_constant(stream, proto, constant);
                 break;
             }
+            case OP_DEF_CCONST: {
+                uint16_t constant = code_u16(proto->code, pc);
+                fprintf(stream, " name=%u", constant);
+                print_constant(stream, proto, constant);
+                break;
+            }
             case OP_JMP:
             case OP_JMP_IF:
             case OP_JMP_UNLESS:
@@ -149,6 +164,20 @@ static int disassemble_proto(FILE *stream, const pproto *proto, size_t index) {
                 uint16_t constant = code_u16(proto->code, pc);
                 fprintf(stream, " name=%u argc=%u", constant, proto->code[pc + 2U]);
                 print_constant(stream, proto, constant);
+                break;
+            }
+            case OP_SCALL:
+            case OP_SCALL_ARRAY:
+            case OP_SPROP_GET:
+            case OP_SPROP_SET:
+            case OP_CLSCONST: {
+                uint16_t class_name = code_u16(proto->code, pc);
+                uint16_t member_name = code_u16(proto->code, pc + 2U);
+                fprintf(stream, " class=%u member=%u", class_name, member_name);
+                if (opcode == OP_SCALL) {
+                    fprintf(stream, " argc=%u", proto->code[pc + 4U]);
+                }
+                print_constant(stream, proto, class_name);
                 break;
             }
             case OP_PROP_GET:

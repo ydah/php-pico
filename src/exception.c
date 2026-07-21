@@ -81,7 +81,7 @@ pobject *pphp_exception_new(pphp_state *state, const char *class_name,
     const pproperty *property;
     pstring *string;
     if (class_entry == NULL) return NULL;
-    object = pobject_new(class_entry);
+    object = pobject_new(state, class_entry);
     if (object == NULL) return NULL;
     property = pclass_find_property(class_entry, "message", 7U);
     string = ps_new(message == NULL ? "" : message,

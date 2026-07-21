@@ -885,9 +885,19 @@ static pc_ast *parse_function(pc_parser *parser, pc_token keyword) {
     while (!check(parser, T_RPAREN) && !check(parser, T_EOF) && !parser->failed) {
         pc_ast *parameter;
         int variadic;
+        uint8_t parameter_flags = 0U;
         while (check(parser, T_PUBLIC) || check(parser, T_PROTECTED) ||
                check(parser, T_PRIVATE) || check(parser, T_READONLY)) {
+            if (check(parser, T_PUBLIC)) parameter_flags |= PC_MOD_PUBLIC;
+            else if (check(parser, T_PROTECTED)) parameter_flags |= PC_MOD_PROTECTED;
+            else if (check(parser, T_PRIVATE)) parameter_flags |= PC_MOD_PRIVATE;
+            else parameter_flags |= PC_MOD_READONLY;
             advance_token(parser);
+        }
+        if ((parameter_flags & PC_MOD_READONLY) != 0U &&
+            (parameter_flags & (PC_MOD_PUBLIC | PC_MOD_PROTECTED |
+                                PC_MOD_PRIVATE)) == 0U) {
+            parameter_flags |= PC_MOD_PUBLIC;
         }
         if (!check(parser, T_VARIABLE) && !check(parser, T_ELLIPSIS)) {
             parse_optional_type(parser);
@@ -898,6 +908,7 @@ static pc_ast *parse_function(pc_parser *parser, pc_token keyword) {
             parameter->as.parameter.name = consume(parser, T_VARIABLE,
                                                     "expected parameter variable");
             parameter->as.parameter.variadic = variadic;
+            parameter->as.parameter.flags = parameter_flags;
             if (match(parser, T_EQUAL)) {
                 parameter->as.parameter.default_value = parse_expression_precedence(
                     parser, PREC_ASSIGN + 1);
@@ -913,12 +924,22 @@ static pc_ast *parse_function(pc_parser *parser, pc_token keyword) {
     if (match(parser, T_COLON)) {
         parse_optional_type(parser);
     }
-    (void)consume(parser, T_LBRACE, "expected function body");
+    if (match(parser, T_SEMICOLON)) {
+        if (function != NULL) {
+            function->as.function.body = new_node(parser, AST_BLOCK,
+                                                  keyword.line);
+            function->as.function.declaration_only = 1;
+        }
+    } else {
+        (void)consume(parser, T_LBRACE, "expected function body");
+        if (function != NULL) {
+            function->as.function.body = parse_block(parser, keyword.line);
+        }
+    }
     if (function != NULL) {
         function->as.function.name = name;
         function->as.function.parameters = head;
         function->as.function.parameter_count = count;
-        function->as.function.body = parse_block(parser, keyword.line);
         function->as.function.flags = PC_MOD_PUBLIC;
     }
     return function;
@@ -949,15 +970,32 @@ static pc_ast *parse_class(pc_parser *parser, pc_token keyword, uint8_t flags) {
     pc_ast *class_node = new_node(parser, AST_CLASS, keyword.line);
     pc_ast *head = NULL;
     pc_ast *tail = NULL;
+    pc_ast *interfaces = NULL;
+    pc_ast *interface_tail = NULL;
     pc_token name = consume(parser, T_IDENTIFIER, "expected class name");
     pc_token parent;
     memset(&parent, 0, sizeof(parent));
     if (match(parser, T_EXTENDS)) {
-        parent = consume(parser, T_IDENTIFIER, "expected parent class name");
+        if ((flags & PC_MOD_INTERFACE) != 0U) {
+            do {
+                pc_token interface_name = consume(
+                    parser, T_IDENTIFIER, "expected parent interface name");
+                pc_ast_append(&interfaces, &interface_tail,
+                              literal_node(parser, AST_IDENTIFIER,
+                                           interface_name));
+            } while (match(parser, T_COMMA));
+        } else {
+            parent = consume(parser, T_IDENTIFIER,
+                             "expected parent class name");
+        }
     }
     if (match(parser, T_IMPLEMENTS)) {
         do {
-            (void)consume(parser, T_IDENTIFIER, "expected interface name");
+            pc_token interface_name = consume(
+                parser, T_IDENTIFIER, "expected interface name");
+            pc_ast_append(&interfaces, &interface_tail,
+                          literal_node(parser, AST_IDENTIFIER,
+                                       interface_name));
         } while (match(parser, T_COMMA));
     }
     (void)consume(parser, T_LBRACE, "expected '{' after class declaration");
@@ -966,6 +1004,16 @@ static pc_ast *parse_class(pc_parser *parser, pc_token keyword, uint8_t flags) {
         if (match(parser, T_FUNCTION)) {
             pc_ast *method = parse_function(parser, parser->previous);
             if (method != NULL) {
+                if ((flags & PC_MOD_INTERFACE) != 0U) {
+                    if ((member_flags & (PC_MOD_PRIVATE | PC_MOD_PROTECTED |
+                                         PC_MOD_FINAL)) != 0U) {
+                        fail_at(parser, method->as.function.name,
+                                "interface methods must be public and non-final");
+                    }
+                    member_flags &= (uint8_t)~(PC_MOD_PRIVATE |
+                                               PC_MOD_PROTECTED);
+                    member_flags |= PC_MOD_PUBLIC | PC_MOD_ABSTRACT;
+                }
                 method->as.function.flags = member_flags;
                 pc_ast_append(&head, &tail, method);
             }
@@ -1002,6 +1050,7 @@ static pc_ast *parse_class(pc_parser *parser, pc_token keyword, uint8_t flags) {
     if (class_node != NULL) {
         class_node->as.class_decl.name = name;
         class_node->as.class_decl.parent = parent;
+        class_node->as.class_decl.interfaces = interfaces;
         class_node->as.class_decl.members = head;
         class_node->as.class_decl.flags = flags;
     }
