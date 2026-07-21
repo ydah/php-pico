@@ -4,6 +4,7 @@
 #include "opcode.h"
 #include "parray.h"
 #include "resource.h"
+#include "pclass.h"
 #include "value_ops.h"
 
 #include <stdarg.h>
@@ -261,6 +262,73 @@ static int call_function(pphp_state *state, pframe *caller, uint16_t name_index,
     state->frames[state->frame_count].pc = 0U;
     state->frames[state->frame_count].base = argument_base;
     state->frames[state->frame_count].line = 1U;
+    state->frames[state->frame_count].has_return_override = 0;
+    state->frames[state->frame_count].return_override = pv_null();
+    state->frames[state->frame_count].called_scope = NULL;
+    state->frame_count++;
+    return 1;
+}
+
+static const pstring *constant_string(pphp_state *state, pframe *frame,
+                                      uint16_t index) {
+    if (index >= frame->proto->constant_count ||
+        frame->proto->constants[index].type != PT_STRING) {
+        pphp_runtime_error(state, frame->line, "name constant is invalid");
+        return NULL;
+    }
+    return (const pstring *)frame->proto->constants[index].as.gc;
+}
+
+static int enter_method(pphp_state *state, pframe *caller, const pmethod *method,
+                        uint8_t argument_count, int constructor) {
+    const pproto *callee = method->proto;
+    size_t base;
+    size_t supplied;
+    size_t i;
+    pvalue object_value;
+    if (method == NULL || callee == NULL || (method->flags & PC_STATIC) != 0U ||
+        state->stack_count < (size_t)argument_count + 1U) {
+        pphp_runtime_error(state, caller->line, "invalid method call");
+        return 0;
+    }
+    base = state->stack_count - argument_count - 1U;
+    object_value = state->stack[base];
+    if (object_value.type != PT_OBJECT) {
+        pphp_runtime_error(state, caller->line, "method call target is not an object");
+        return 0;
+    }
+    if (argument_count < callee->n_required) {
+        pphp_runtime_error(state, caller->line,
+                           "Too few arguments to method %.*s(), %u required, %u given",
+                           (int)method->name->length, method->name->data,
+                           callee->n_required, argument_count);
+        return 0;
+    }
+    if (argument_count > callee->n_params) {
+        release_range(state, base + 1U + callee->n_params, state->stack_count);
+        state->stack_count = base + 1U + callee->n_params;
+    }
+    supplied = argument_count < callee->n_params ? argument_count : callee->n_params;
+    if (base + callee->n_locals >= PPHP_STACK_SLOTS ||
+        state->frame_count >= PPHP_FRAME_MAX) {
+        pphp_runtime_error(state, caller->line, "stack overflow entering method");
+        return 0;
+    }
+    for (i = 1U + supplied; i < callee->n_locals; i++) {
+        state->stack[base + i] = pv_null();
+    }
+    state->stack_count = base + callee->n_locals;
+    state->frames[state->frame_count].proto = callee;
+    state->frames[state->frame_count].pc = 0U;
+    state->frames[state->frame_count].base = base;
+    state->frames[state->frame_count].line = 1U;
+    state->frames[state->frame_count].has_return_override = constructor;
+    state->frames[state->frame_count].return_override = pv_null();
+    state->frames[state->frame_count].called_scope = method->owner;
+    if (constructor) {
+        state->frames[state->frame_count].return_override = object_value;
+        pv_retain(object_value);
+    }
     state->frame_count++;
     return 1;
 }
@@ -268,6 +336,12 @@ static int call_function(pphp_state *state, pframe *caller, uint16_t name_index,
 static int return_from_function(pphp_state *state, pvalue result) {
     pframe *frame = &state->frames[state->frame_count - 1U];
     size_t base = frame->base;
+    if (frame->has_return_override) {
+        pv_release(result);
+        result = frame->return_override;
+        frame->return_override = pv_null();
+        frame->has_return_override = 0;
+    }
     release_range(state, base, state->stack_count);
     state->stack_count = base;
     state->frame_count--;
@@ -291,6 +365,9 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
     state->frames[0].pc = 0U;
     state->frames[0].base = 0U;
     state->frames[0].line = 1U;
+    state->frames[0].has_return_override = 0;
+    state->frames[0].return_override = pv_null();
+    state->frames[0].called_scope = NULL;
     for (i = 0U; i < state->stack_count; i++) {
         state->stack[i] = pv_null();
     }
@@ -586,6 +663,231 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                     pv_release(pop(state));
                 }
                 break;
+            case OP_DEF_CLASS: {
+                uint16_t name_index = read_u16(state, frame);
+                uint16_t parent_index = read_u16(state, frame);
+                uint8_t flags = read_u8(state, frame);
+                const pstring *name = constant_string(state, frame, name_index);
+                pclass *parent = NULL;
+                if (state->building_class != NULL || name == NULL) {
+                    pphp_runtime_error(state, frame->line, "invalid nested class definition");
+                    break;
+                }
+                if (parent_index != UINT16_MAX) {
+                    const pstring *parent_name = constant_string(state, frame, parent_index);
+                    if (parent_name == NULL ||
+                        (parent = pphp_find_class(state, parent_name->data,
+                                                  parent_name->length)) == NULL) {
+                        pphp_runtime_error(state, frame->line, "parent class is not defined");
+                        break;
+                    }
+                    if ((parent->flags & PC_FINAL) != 0U) {
+                        pphp_runtime_error(state, frame->line, "cannot extend final class");
+                        break;
+                    }
+                }
+                state->building_class = pclass_new(name->data, name->length, parent, flags);
+                if (state->building_class == NULL) {
+                    pphp_runtime_error(state, frame->line, "cannot create class definition");
+                }
+                break;
+            }
+            case OP_DEF_PROP: {
+                uint16_t name_index = read_u16(state, frame);
+                uint8_t flags = read_u8(state, frame);
+                const pstring *name = constant_string(state, frame, name_index);
+                pvalue default_value = pop(state);
+                if (state->building_class == NULL || name == NULL ||
+                    !pclass_add_property(state->building_class, name->data,
+                                         name->length, flags, default_value)) {
+                    pphp_runtime_error(state, frame->line, "cannot define property");
+                }
+                pv_release(default_value);
+                break;
+            }
+            case OP_DEF_METHOD: {
+                uint16_t name_index = read_u16(state, frame);
+                uint16_t proto_index = read_u16(state, frame);
+                uint8_t flags = read_u8(state, frame);
+                const pstring *name = constant_string(state, frame, name_index);
+                if (state->building_class == NULL || name == NULL ||
+                    proto_index >= state->module->count ||
+                    !pclass_add_method(state->building_class, name->data, name->length,
+                                       flags, state->module->protos[proto_index])) {
+                    pphp_runtime_error(state, frame->line, "cannot define method");
+                }
+                break;
+            }
+            case OP_DEF_END:
+                if (state->building_class == NULL ||
+                    !pphp_register_class(state, state->building_class)) {
+                    pphp_runtime_error(state, frame->line, "cannot register class");
+                } else {
+                    state->building_class = NULL;
+                }
+                break;
+            case OP_NEW_OBJ: {
+                uint16_t name_index = read_u16(state, frame);
+                uint8_t argument_count = read_u8(state, frame);
+                const pstring *name = constant_string(state, frame, name_index);
+                pclass *class_entry;
+                pobject *object;
+                const pmethod *constructor;
+                size_t base;
+                if (name == NULL || state->stack_count < argument_count) break;
+                class_entry = pphp_find_class(state, name->data, name->length);
+                if (class_entry == NULL) {
+                    pphp_runtime_error(state, frame->line, "Class %.*s not found",
+                                       (int)name->length, name->data);
+                    break;
+                }
+                object = pobject_new(class_entry);
+                if (object == NULL) {
+                    pphp_runtime_error(state, frame->line, "cannot instantiate class %.*s",
+                                       (int)name->length, name->data);
+                    break;
+                }
+                base = state->stack_count - argument_count;
+                if (state->stack_count + 1U >= PPHP_STACK_SLOTS) {
+                    pv_release(pv_heap(PT_OBJECT, &object->header));
+                    pphp_runtime_error(state, frame->line, "stack overflow constructing object");
+                    break;
+                }
+                memmove(state->stack + base + 1U, state->stack + base,
+                        argument_count * sizeof(*state->stack));
+                state->stack[base] = pv_heap(PT_OBJECT, &object->header);
+                state->stack_count++;
+                constructor = pclass_find_method(class_entry, "__construct", 11U);
+                if (constructor != NULL) {
+                    if (!pclass_member_visible(constructor->flags, constructor->owner,
+                                               frame->called_scope)) {
+                        pphp_runtime_error(state, frame->line,
+                                           "cannot access non-public constructor");
+                    } else {
+                        (void)enter_method(state, frame, constructor, argument_count, 1);
+                    }
+                } else if (argument_count != 0U) {
+                    pphp_runtime_error(state, frame->line,
+                                       "Class %.*s has no constructor",
+                                       (int)name->length, name->data);
+                }
+                break;
+            }
+            case OP_PROP_GET: {
+                uint16_t name_index = read_u16(state, frame);
+                const pstring *name = constant_string(state, frame, name_index);
+                pvalue object_value = pop(state);
+                if (name == NULL || object_value.type != PT_OBJECT) {
+                    pv_release(object_value);
+                    pphp_runtime_error(state, frame->line, "property access on non-object");
+                    break;
+                }
+                {
+                    pobject *object = (pobject *)object_value.as.gc;
+                    const pproperty *property = pclass_find_property(
+                        object->class_entry, name->data, name->length);
+                    if (property == NULL) {
+                        pphp_runtime_error(state, frame->line, "undefined property %.*s",
+                                           (int)name->length, name->data);
+                    } else if (!pclass_member_visible(property->flags, property->owner,
+                                                      frame->called_scope)) {
+                        pphp_runtime_error(state, frame->line,
+                                           "cannot access non-public property %.*s",
+                                           (int)name->length, name->data);
+                    } else {
+                        pvalue value = object->slots[property->slot];
+                        pv_retain(value);
+                        (void)push(state, value);
+                    }
+                }
+                pv_release(object_value);
+                break;
+            }
+            case OP_PROP_SET: {
+                uint16_t name_index = read_u16(state, frame);
+                const pstring *name = constant_string(state, frame, name_index);
+                pvalue value = pop(state);
+                pvalue object_value = pop(state);
+                if (name == NULL || object_value.type != PT_OBJECT) {
+                    pv_release(object_value);
+                    pv_release(value);
+                    pphp_runtime_error(state, frame->line, "property assignment on non-object");
+                    break;
+                }
+                {
+                    pobject *object = (pobject *)object_value.as.gc;
+                    const pproperty *property = pclass_find_property(
+                        object->class_entry, name->data, name->length);
+                    if (property == NULL) {
+                        pphp_runtime_error(state, frame->line, "undefined property %.*s",
+                                           (int)name->length, name->data);
+                    } else if (!pclass_member_visible(property->flags, property->owner,
+                                                      frame->called_scope)) {
+                        pphp_runtime_error(state, frame->line,
+                                           "cannot access non-public property %.*s",
+                                           (int)name->length, name->data);
+                    } else if ((property->flags & PC_READONLY) != 0U &&
+                               (frame->called_scope != property->owner ||
+                                pobject_property_written(object, property->slot))) {
+                        pphp_runtime_error(state, frame->line,
+                                           "cannot modify readonly property %.*s",
+                                           (int)name->length, name->data);
+                    } else {
+                        pv_retain(value);
+                        pv_release(object->slots[property->slot]);
+                        object->slots[property->slot] = value;
+                        pobject_mark_property_written(object, property->slot);
+                        (void)push(state, value);
+                        value = pv_null();
+                    }
+                }
+                pv_release(object_value);
+                pv_release(value);
+                break;
+            }
+            case OP_MCALL: {
+                uint16_t name_index = read_u16(state, frame);
+                uint8_t argument_count = read_u8(state, frame);
+                const pstring *name = constant_string(state, frame, name_index);
+                size_t base;
+                pobject *object;
+                const pmethod *method;
+                if (name == NULL || state->stack_count < (size_t)argument_count + 1U) break;
+                base = state->stack_count - argument_count - 1U;
+                if (state->stack[base].type != PT_OBJECT) {
+                    pphp_runtime_error(state, frame->line, "method call on non-object");
+                    break;
+                }
+                object = (pobject *)state->stack[base].as.gc;
+                method = pclass_find_method(object->class_entry, name->data, name->length);
+                if (method == NULL) {
+                    pphp_runtime_error(state, frame->line, "undefined method %.*s()",
+                                       (int)name->length, name->data);
+                    break;
+                } else if (!pclass_member_visible(method->flags, method->owner,
+                                                  frame->called_scope)) {
+                    pphp_runtime_error(state, frame->line,
+                                       "cannot access non-public method %.*s()",
+                                       (int)name->length, name->data);
+                } else {
+                    (void)enter_method(state, frame, method, argument_count, 0);
+                }
+                break;
+            }
+            case OP_INSTANCEOF: {
+                uint16_t name_index = read_u16(state, frame);
+                const pstring *name = constant_string(state, frame, name_index);
+                pvalue value = pop(state);
+                int matches = 0;
+                if (name != NULL && value.type == PT_OBJECT) {
+                    pclass *expected = pphp_find_class(state, name->data, name->length);
+                    matches = expected != NULL &&
+                              pclass_is_a(((pobject *)value.as.gc)->class_entry, expected);
+                }
+                pv_release(value);
+                (void)push(state, pv_bool(matches));
+                break;
+            }
             case OP_LINE:
                 frame->line = read_u16(state, frame);
                 break;
@@ -595,6 +897,12 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
         }
     }
     if (state->error[0] != '\0') {
+        for (i = 0U; i < state->frame_count; i++) {
+            if (state->frames[i].has_return_override) {
+                pv_release(state->frames[i].return_override);
+                state->frames[i].has_return_override = 0;
+            }
+        }
         release_range(state, 0U, state->stack_count);
         state->stack_count = 0U;
         state->frame_count = 0U;

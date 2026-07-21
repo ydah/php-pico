@@ -142,6 +142,29 @@ TEST(parser_reports_first_syntax_error_with_line) {
     pc_arena_destroy(&arena);
 }
 
+TEST(classes_properties_methods_and_new_parse) {
+    const char *source =
+        "final class Counter extends Base {"
+        " private int $value = 0;"
+        " public function inc(int $by): int { $this->value += $by; return $this->value; }"
+        "}"
+        "$counter = new Counter(1); $counter->inc(2);";
+    pc_arena arena;
+    pc_parser parser;
+    pc_ast *program = parse_source(source, &arena, &parser);
+    pc_ast *class_node;
+    ASSERT_TRUE(program != NULL);
+    class_node = program->as.list.items;
+    ASSERT_EQ(AST_CLASS, class_node->kind);
+    ASSERT_TRUE((class_node->as.class_decl.flags & PC_MOD_FINAL) != 0U);
+    ASSERT_EQ(AST_PROPERTY, class_node->as.class_decl.members->kind);
+    ASSERT_EQ(AST_FUNCTION, class_node->as.class_decl.members->next->kind);
+    ASSERT_EQ(AST_ASSIGN, class_node->next->as.expression.expression->kind);
+    ASSERT_EQ(AST_NEW,
+              class_node->next->as.expression.expression->as.binary.right->kind);
+    pc_arena_destroy(&arena);
+}
+
 int main(void) {
     static const test_case tests[] = {
         {"operator precedence", operator_precedence_matches_php_8},
@@ -151,7 +174,8 @@ int main(void) {
         {"inline HTML", inline_html_and_short_echo_become_echo_nodes},
         {"unsupported syntax", parser_rejects_unsupported_reserved_syntax},
         {"parser depth", parser_enforces_nesting_limit},
-        {"syntax diagnostics", parser_reports_first_syntax_error_with_line}
+        {"syntax diagnostics", parser_reports_first_syntax_error_with_line},
+        {"class syntax", classes_properties_methods_and_new_parse}
     };
     return run_tests(tests, sizeof(tests) / sizeof(tests[0]));
 }

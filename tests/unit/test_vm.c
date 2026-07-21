@@ -171,6 +171,57 @@ TEST(foreach_uses_snapshot_when_array_is_modified) {
     ASSERT_STR("12:4", output.bytes);
 }
 
+TEST(classes_construct_objects_and_dispatch_methods) {
+    const char *source =
+        "class Counter {"
+        " private int $value = 0;"
+        " public function __construct($start) { $this->value = $start; }"
+        " public function add($amount) {"
+        "   $this->value = $this->value + $amount; return $this->value;"
+        " }"
+        "}"
+        "$counter = new Counter(2); $alias = $counter;"
+        "echo $counter->add(3), ':', $alias->add(4), ':', ($counter instanceof Counter);";
+    output_buffer output;
+    char error[256];
+    int result = execute(source, &output, error, sizeof(error));
+    if (result != PPHP_OK) fprintf(stderr, "class error: %s\n", error);
+    ASSERT_EQ(PPHP_OK, result);
+    ASSERT_STR("5:9:1", output.bytes);
+}
+
+TEST(class_inheritance_reuses_properties_and_methods) {
+    const char *source =
+        "class Base { public $value = 7; public function get() { return $this->value; } }"
+        "class Child extends Base {}"
+        "$child = new Child(); echo $child->get(), ':', ($child instanceof Base);";
+    output_buffer output;
+    char error[256];
+    int result = execute(source, &output, error, sizeof(error));
+    if (result != PPHP_OK) fprintf(stderr, "inheritance error: %s\n", error);
+    ASSERT_EQ(PPHP_OK, result);
+    ASSERT_STR("7:1", output.bytes);
+}
+
+TEST(class_visibility_and_readonly_are_enforced) {
+    output_buffer output;
+    char error[256];
+    const char *private_source =
+        "class Box { private $value = 1; } $box = new Box(); echo $box->value;";
+    ASSERT_EQ(PPHP_E_RUNTIME,
+              execute(private_source, &output, error, sizeof(error)));
+    ASSERT_TRUE(strstr(error, "non-public property") != NULL);
+    {
+        const char *readonly_source =
+            "class Id { public readonly int $value;"
+            " public function set($v) { $this->value = $v; } }"
+            "$id = new Id(); $id->set(1); $id->set(2);";
+        ASSERT_EQ(PPHP_E_RUNTIME,
+                  execute(readonly_source, &output, error, sizeof(error)));
+        ASSERT_TRUE(strstr(error, "readonly property") != NULL);
+    }
+}
+
 int main(void) {
     static const test_case tests[] = {
         {"arithmetic VM", arithmetic_runs_through_compiler_and_vm},
@@ -183,7 +234,10 @@ int main(void) {
         {"PBC round trip", pbc_serialization_round_trips_through_loader},
         {"array COW runtime", arrays_use_copy_on_write_and_normalized_keys},
         {"foreach runtime", foreach_preserves_insertion_order_and_supports_break_continue},
-        {"foreach snapshot", foreach_uses_snapshot_when_array_is_modified}
+        {"foreach snapshot", foreach_uses_snapshot_when_array_is_modified},
+        {"object methods", classes_construct_objects_and_dispatch_methods},
+        {"class inheritance", class_inheritance_reuses_properties_and_methods},
+        {"visibility and readonly", class_visibility_and_readonly_are_enforced}
     };
     return run_tests(tests, sizeof(tests) / sizeof(tests[0]));
 }

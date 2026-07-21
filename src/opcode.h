@@ -68,6 +68,15 @@ typedef enum pphp_opcode {
     OP_FE_INIT = 0x66,
     OP_FE_NEXT = 0x67,
     OP_FE_FREE = 0x68,
+    OP_NEW_OBJ = 0x70,
+    OP_PROP_GET = 0x71,
+    OP_PROP_SET = 0x72,
+    OP_MCALL = 0x73,
+    OP_INSTANCEOF = 0x78,
+    OP_DEF_CLASS = 0x86,
+    OP_DEF_METHOD = 0x87,
+    OP_DEF_PROP = 0x88,
+    OP_DEF_END = 0x8a,
     OP_LINE = 0x90
 } pphp_opcode;
 

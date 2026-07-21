@@ -345,7 +345,8 @@ int pphp_pbc_write_file(const pmodule *module, const char *path) {
         if (!string_index(&strings, proto->name, &name_sid)) goto done;
         bytes[offset] = proto->n_params;
         bytes[offset + 1U] = proto->n_required;
-        bytes[offset + 2U] = proto->variadic;
+        bytes[offset + 2U] = (uint8_t)((proto->variadic ? 1U : 0U) |
+                                        (proto->is_method ? 2U : 0U));
         bytes[offset + 3U] = proto->n_locals;
         put_u16(bytes, offset + 6U, proto->max_stack);
         put_u16(bytes, offset + 8U, (uint16_t)proto->code_length);
@@ -491,7 +492,8 @@ int pphp_pbc_load(const void *data, size_t length, pmodule *module) {
         }
         proto->n_params = bytes[offset];
         proto->n_required = bytes[offset + 1U];
-        proto->variadic = bytes[offset + 2U];
+        proto->variadic = (uint8_t)(bytes[offset + 2U] & 1U);
+        proto->is_method = (uint8_t)((bytes[offset + 2U] & 2U) != 0U);
         proto->n_locals = bytes[offset + 3U];
         proto->max_stack = get_u16(bytes, offset + 6U);
         proto->code = pphp_alloc(code_length);
@@ -613,6 +615,15 @@ const char *pphp_opcode_name(uint8_t opcode) {
         case OP_FE_INIT: return "FE_INIT";
         case OP_FE_NEXT: return "FE_NEXT";
         case OP_FE_FREE: return "FE_FREE";
+        case OP_NEW_OBJ: return "NEW_OBJ";
+        case OP_PROP_GET: return "PROP_GET";
+        case OP_PROP_SET: return "PROP_SET";
+        case OP_MCALL: return "MCALL";
+        case OP_INSTANCEOF: return "INSTANCEOF";
+        case OP_DEF_CLASS: return "DEF_CLASS";
+        case OP_DEF_METHOD: return "DEF_METHOD";
+        case OP_DEF_PROP: return "DEF_PROP";
+        case OP_DEF_END: return "DEF_END";
         case OP_LINE: return "LINE";
         default: return "UNKNOWN";
     }

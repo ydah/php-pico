@@ -92,7 +92,8 @@ const char *pc_ast_kind_name(pc_ast_kind kind) {
         "CALL", "INDEX", "MEMBER", "ARRAY", "ARRAY_ITEM", "EXPR_STMT",
         "ECHO", "IF", "WHILE", "DO_WHILE", "FOR", "FOREACH", "SWITCH",
         "CASE", "BREAK", "CONTINUE", "RETURN", "THROW", "GLOBAL", "STATIC",
-        "CONST", "FUNCTION", "PARAM", "INCLUDE", "UNSET", "ISSET", "EMPTY"
+        "CONST", "FUNCTION", "PARAM", "INCLUDE", "UNSET", "ISSET", "EMPTY",
+        "CLASS", "PROPERTY", "NEW"
     };
     if ((size_t)kind >= sizeof(names) / sizeof(names[0])) {
         return "UNKNOWN";
@@ -156,6 +157,12 @@ static void dump_node(FILE *stream, const pc_ast *node, unsigned depth) {
             break;
         case AST_PARAM:
             dump_token(stream, node->as.parameter.name);
+            break;
+        case AST_CLASS:
+            dump_token(stream, node->as.class_decl.name);
+            break;
+        case AST_PROPERTY:
+            dump_token(stream, node->as.property.name);
             break;
         case AST_CONST:
         case AST_STATIC:
@@ -253,6 +260,16 @@ static void dump_node(FILE *stream, const pc_ast *node, unsigned depth) {
         case AST_INCLUDE:
             dump_node(stream, node->as.include_stmt.path, depth + 1U);
             break;
+        case AST_CLASS:
+            dump_list(stream, node->as.class_decl.members, depth + 1U);
+            break;
+        case AST_PROPERTY:
+            dump_node(stream, node->as.property.default_value, depth + 1U);
+            break;
+        case AST_NEW:
+            dump_node(stream, node->as.new_expr.class_name, depth + 1U);
+            dump_list(stream, node->as.new_expr.arguments, depth + 1U);
+            break;
         default:
             break;
     }
@@ -261,4 +278,3 @@ static void dump_node(FILE *stream, const pc_ast *node, unsigned depth) {
 void pc_ast_dump(FILE *stream, const pc_ast *node) {
     dump_node(stream, node, 0U);
 }
-

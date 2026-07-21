@@ -3,6 +3,7 @@
 #include "codegen.h"
 #include "parser.h"
 #include "vm.h"
+#include "pclass.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -36,8 +37,67 @@ void pphp_close(pphp_state *state) {
     if (state == NULL) {
         return;
     }
+    pphp_clear_classes(state);
     psymbol_destroy(&state->symbols);
     pphp_free(state);
+}
+
+static int class_name_equal(const pstring *name, const char *other, size_t length) {
+    size_t i;
+    if (name->length != length) return 0;
+    for (i = 0U; i < length; i++) {
+        unsigned char a = (unsigned char)name->data[i];
+        unsigned char b = (unsigned char)other[i];
+        if (a >= 'A' && a <= 'Z') a = (unsigned char)(a + ('a' - 'A'));
+        if (b >= 'A' && b <= 'Z') b = (unsigned char)(b + ('a' - 'A'));
+        if (a != b) return 0;
+    }
+    return 1;
+}
+
+pclass *pphp_find_class(const pphp_state *state, const char *name, size_t length) {
+    size_t i;
+    if (state == NULL) return NULL;
+    for (i = 0U; i < state->class_count; i++) {
+        if (class_name_equal(state->classes[i]->name, name, length)) {
+            return state->classes[i];
+        }
+    }
+    return NULL;
+}
+
+int pphp_register_class(pphp_state *state, pclass *class_entry) {
+    pclass **classes;
+    size_t capacity;
+    if (state == NULL || class_entry == NULL ||
+        pphp_find_class(state, class_entry->name->data, class_entry->name->length) != NULL) {
+        return 0;
+    }
+    if (state->class_count == state->class_capacity) {
+        capacity = state->class_capacity == 0U ? 8U : state->class_capacity * 2U;
+        classes = pphp_realloc(state->classes, capacity * sizeof(*classes));
+        if (classes == NULL) return 0;
+        state->classes = classes;
+        state->class_capacity = capacity;
+    }
+    state->classes[state->class_count++] = class_entry;
+    return 1;
+}
+
+void pphp_clear_classes(pphp_state *state) {
+    size_t i;
+    if (state == NULL) return;
+    if (state->building_class != NULL) {
+        pclass_destroy(state->building_class);
+        state->building_class = NULL;
+    }
+    for (i = state->class_count; i > 0U; i--) {
+        pclass_destroy(state->classes[i - 1U]);
+    }
+    pphp_free(state->classes);
+    state->classes = NULL;
+    state->class_count = 0U;
+    state->class_capacity = 0U;
 }
 
 void pphp_set_output(pphp_state *state, pphp_output_fn output, void *context) {
@@ -97,6 +157,7 @@ int pphp_exec_source_mode(pphp_state *state, const char *source, size_t length,
     }
     pc_arena_destroy(&arena);
     result = pphp_vm_execute(state, &module);
+    pphp_clear_classes(state);
     pmodule_destroy(&module);
     return result;
 }
@@ -120,6 +181,7 @@ int pphp_exec_pbc(pphp_state *state, const void *pbc, size_t length) {
         return result == PPHP_E_NOMEM ? PPHP_E_RUNTIME : PPHP_E_PARSE;
     }
     result = pphp_vm_execute(state, &module);
+    pphp_clear_classes(state);
     pmodule_destroy(&module);
     return result;
 }

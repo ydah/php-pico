@@ -7,6 +7,17 @@
 
 #include "lexer.h"
 
+enum {
+    PC_MOD_PUBLIC = 1U << 0,
+    PC_MOD_PROTECTED = 1U << 1,
+    PC_MOD_PRIVATE = 1U << 2,
+    PC_MOD_STATIC = 1U << 3,
+    PC_MOD_ABSTRACT = 1U << 4,
+    PC_MOD_FINAL = 1U << 5,
+    PC_MOD_READONLY = 1U << 6,
+    PC_MOD_INTERFACE = 1U << 7
+};
+
 typedef enum pc_ast_kind {
     AST_PROGRAM = 0,
     AST_BLOCK,
@@ -47,7 +58,10 @@ typedef enum pc_ast_kind {
     AST_INCLUDE,
     AST_UNSET,
     AST_ISSET,
-    AST_EMPTY
+    AST_EMPTY,
+    AST_CLASS,
+    AST_PROPERTY,
+    AST_NEW
 } pc_ast_kind;
 
 typedef struct pc_ast pc_ast;
@@ -145,6 +159,7 @@ struct pc_ast {
             pc_ast *parameters;
             pc_ast *body;
             size_t parameter_count;
+            uint8_t flags;
         } function;
         struct {
             pc_token name;
@@ -155,6 +170,22 @@ struct pc_ast {
             pc_token_type mode;
             pc_ast *path;
         } include_stmt;
+        struct {
+            pc_token name;
+            pc_token parent;
+            pc_ast *members;
+            uint8_t flags;
+        } class_decl;
+        struct {
+            pc_token name;
+            pc_ast *default_value;
+            uint8_t flags;
+        } property;
+        struct {
+            pc_ast *class_name;
+            pc_ast *arguments;
+            size_t count;
+        } new_expr;
     } as;
 };
 
@@ -174,4 +205,3 @@ const char *pc_ast_kind_name(pc_ast_kind kind);
 void pc_ast_dump(FILE *stream, const pc_ast *node);
 
 #endif
-

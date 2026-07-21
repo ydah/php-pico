@@ -34,10 +34,19 @@ static size_t operand_size(uint8_t opcode) {
         case OP_LINE:
         case OP_NEW_ARRAY:
             return 2U;
+        case OP_CALL:
+        case OP_NEW_OBJ:
+        case OP_MCALL:
+        case OP_DEF_PROP:
         case OP_FE_NEXT:
             return 3U;
-        case OP_CALL:
-            return 3U;
+        case OP_PROP_GET:
+        case OP_PROP_SET:
+        case OP_INSTANCEOF:
+            return 2U;
+        case OP_DEF_CLASS:
+        case OP_DEF_METHOD:
+            return 5U;
         case OP_LOAD_I32:
             return 4U;
         default:
@@ -113,6 +122,42 @@ static int disassemble_proto(FILE *stream, const pproto *proto, size_t index) {
             case OP_CALL: {
                 uint16_t constant = code_u16(proto->code, pc);
                 fprintf(stream, " name=%u argc=%u", constant, proto->code[pc + 2U]);
+                print_constant(stream, proto, constant);
+                break;
+            }
+            case OP_NEW_OBJ:
+            case OP_MCALL: {
+                uint16_t constant = code_u16(proto->code, pc);
+                fprintf(stream, " name=%u argc=%u", constant, proto->code[pc + 2U]);
+                print_constant(stream, proto, constant);
+                break;
+            }
+            case OP_PROP_GET:
+            case OP_PROP_SET:
+            case OP_INSTANCEOF: {
+                uint16_t constant = code_u16(proto->code, pc);
+                fprintf(stream, " name=%u", constant);
+                print_constant(stream, proto, constant);
+                break;
+            }
+            case OP_DEF_CLASS: {
+                uint16_t constant = code_u16(proto->code, pc);
+                fprintf(stream, " name=%u parent=%u flags=0x%02x", constant,
+                        code_u16(proto->code, pc + 2U), proto->code[pc + 4U]);
+                print_constant(stream, proto, constant);
+                break;
+            }
+            case OP_DEF_METHOD: {
+                uint16_t constant = code_u16(proto->code, pc);
+                fprintf(stream, " name=%u proto=%u flags=0x%02x", constant,
+                        code_u16(proto->code, pc + 2U), proto->code[pc + 4U]);
+                print_constant(stream, proto, constant);
+                break;
+            }
+            case OP_DEF_PROP: {
+                uint16_t constant = code_u16(proto->code, pc);
+                fprintf(stream, " name=%u flags=0x%02x", constant,
+                        proto->code[pc + 2U]);
                 print_constant(stream, proto, constant);
                 break;
             }

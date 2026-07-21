@@ -2,6 +2,7 @@
 
 #include "opcode.h"
 #include "pphp/pphp.h"
+#include "pclass.h"
 
 #include <limits.h>
 #include <stdarg.h>
@@ -264,6 +265,22 @@ static void emit_constant(generator *gen, pvalue value, uint32_t line) {
     emit_u16(gen, index, line);
 }
 
+static uint16_t name_constant(generator *gen, pc_token token) {
+    pstring *name = ps_new(token.start, token.length);
+    pvalue value;
+    uint16_t index = UINT16_MAX;
+    if (name == NULL) {
+        fail(gen, token.line, "out of memory for name");
+        return index;
+    }
+    value = pv_heap(PT_STRING, &name->header);
+    if (!pproto_add_constant(gen->proto, value, &index)) {
+        fail(gen, token.line, "constant pool limit exceeded");
+    }
+    pv_release(value);
+    return index;
+}
+
 static int variable_slot(generator *gen, pc_token token, uint8_t *slot) {
     const char *name = token.start;
     size_t length = token.length;
@@ -280,6 +297,7 @@ static int variable_slot(generator *gen, pc_token token, uint8_t *slot) {
 
 static void compile_expression(generator *gen, const pc_ast *node);
 static void compile_statement(generator *gen, const pc_ast *node);
+static void compile_class_definition(generator *gen, const pc_ast *class_node);
 
 static pphp_opcode binary_opcode(pc_token_type type) {
     switch (type) {
@@ -348,6 +366,20 @@ static void compile_assignment(generator *gen, const pc_ast *node) {
         emit_byte(gen, OP_SWAP, node->line);
         emit_byte(gen, OP_STORE_LOCAL, node->line);
         emit_byte(gen, array_slot, node->line);
+        return;
+    }
+    if (node->as.binary.left->kind == AST_MEMBER) {
+        const pc_ast *member = node->as.binary.left;
+        uint16_t name;
+        if (operation != T_EQUAL || member->as.member.op != T_ARROW) {
+            fail(gen, node->line, "complex property assignment is not supported");
+            return;
+        }
+        compile_expression(gen, member->as.member.base);
+        compile_expression(gen, node->as.binary.right);
+        name = name_constant(gen, member->as.member.name);
+        emit_byte(gen, OP_PROP_SET, node->line);
+        emit_u16(gen, name, node->line);
         return;
     }
     if (node->as.binary.left->kind != AST_VARIABLE) {
@@ -478,6 +510,17 @@ static void compile_expression(generator *gen, const pc_ast *node) {
                 emit_byte(gen, OP_NOT, node->line);
                 emit_byte(gen, OP_NOT, node->line);
                 emit_byte(gen, OP_BXOR, node->line);
+            } else if (node->as.binary.op == T_INSTANCEOF) {
+                uint16_t class_name;
+                if (node->as.binary.right->kind != AST_IDENTIFIER) {
+                    fail(gen, node->line, "dynamic instanceof is not supported");
+                    break;
+                }
+                compile_expression(gen, node->as.binary.left);
+                class_name = name_constant(gen,
+                    node->as.binary.right->as.literal.token);
+                emit_byte(gen, OP_INSTANCEOF, node->line);
+                emit_u16(gen, class_name, node->line);
             } else {
                 pphp_opcode opcode = binary_opcode(node->as.binary.op);
                 if (opcode == OP_NOP) {
@@ -527,6 +570,20 @@ static void compile_expression(generator *gen, const pc_ast *node) {
             pstring *name;
             pvalue name_value;
             uint16_t name_index;
+            if (node->as.call.callee->kind == AST_MEMBER &&
+                node->as.call.callee->as.member.op == T_ARROW) {
+                uint16_t method_name;
+                compile_expression(gen, node->as.call.callee->as.member.base);
+                while (argument != NULL) {
+                    compile_expression(gen, argument);
+                    argument = argument->next;
+                }
+                method_name = name_constant(gen, node->as.call.callee->as.member.name);
+                emit_byte(gen, OP_MCALL, node->line);
+                emit_u16(gen, method_name, node->line);
+                emit_byte(gen, (uint8_t)node->as.call.count, node->line);
+                break;
+            }
             if (node->as.call.callee->kind != AST_IDENTIFIER || node->as.call.count > 255U) {
                 fail(gen, node->line, "only named function calls are supported");
                 break;
@@ -553,6 +610,37 @@ static void compile_expression(generator *gen, const pc_ast *node) {
             emit_byte(gen, OP_CALL, node->line);
             emit_u16(gen, name_index, node->line);
             emit_byte(gen, (uint8_t)node->as.call.count, node->line);
+            break;
+        }
+        case AST_MEMBER: {
+            uint16_t name;
+            if (node->as.member.op != T_ARROW) {
+                fail(gen, node->line, "static member access is not supported yet");
+                break;
+            }
+            compile_expression(gen, node->as.member.base);
+            name = name_constant(gen, node->as.member.name);
+            emit_byte(gen, OP_PROP_GET, node->line);
+            emit_u16(gen, name, node->line);
+            break;
+        }
+        case AST_NEW: {
+            const pc_ast *argument = node->as.new_expr.arguments;
+            uint16_t class_name;
+            if (node->as.new_expr.class_name == NULL ||
+                node->as.new_expr.class_name->kind != AST_IDENTIFIER ||
+                node->as.new_expr.count > 255U) {
+                fail(gen, node->line, "invalid class construction");
+                break;
+            }
+            while (argument != NULL) {
+                compile_expression(gen, argument);
+                argument = argument->next;
+            }
+            class_name = name_constant(gen, node->as.new_expr.class_name->as.literal.token);
+            emit_byte(gen, OP_NEW_OBJ, node->line);
+            emit_u16(gen, class_name, node->line);
+            emit_byte(gen, (uint8_t)node->as.new_expr.count, node->line);
             break;
         }
         case AST_ARRAY: {
@@ -854,6 +942,9 @@ static void compile_statement(generator *gen, const pc_ast *node) {
             break;
         case AST_FUNCTION:
             break;
+        case AST_CLASS:
+            compile_class_definition(gen, node);
+            break;
         case AST_STATIC:
             if (node->as.binding.value != NULL) {
                 pc_ast variable;
@@ -940,6 +1031,144 @@ static int compile_function(generator *gen, const pc_ast *function) {
     return 1;
 }
 
+static int compile_method(generator *gen, pc_token class_name,
+                          const pc_ast *method) {
+    size_t qualified_length = class_name.length + 2U + method->as.function.name.length;
+    char *qualified = pphp_alloc(qualified_length);
+    pproto *proto;
+    const pc_ast *parameter;
+    generator child;
+    int saw_default = 0;
+    uint8_t ignored;
+    if (qualified == NULL) {
+        fail(gen, method->line, "out of memory creating method name");
+        return 0;
+    }
+    memcpy(qualified, class_name.start, class_name.length);
+    memcpy(qualified + class_name.length, "::", 2U);
+    memcpy(qualified + class_name.length + 2U, method->as.function.name.start,
+           method->as.function.name.length);
+    proto = pproto_new(qualified, qualified_length);
+    pphp_free(qualified);
+    if (proto == NULL || !pmodule_add(gen->module, proto)) {
+        pproto_destroy(proto);
+        fail(gen, method->line, "out of memory creating method");
+        return 0;
+    }
+    proto->is_method = (uint8_t)((method->as.function.flags & PC_MOD_STATIC) == 0U);
+    if (proto->is_method && !pproto_add_local(proto, "this", 4U, &ignored)) {
+        fail(gen, method->line, "cannot allocate $this slot");
+        return 0;
+    }
+    parameter = method->as.function.parameters;
+    while (parameter != NULL) {
+        pc_token name = parameter->as.parameter.name;
+        uint8_t slot;
+        if (name.length != 0U && name.start[0] == '$') {
+            name.start++;
+            name.length--;
+        }
+        if (!pproto_add_local(proto, name.start, name.length, &slot)) {
+            fail(gen, parameter->line, "too many method parameters");
+            return 0;
+        }
+        proto->n_params++;
+        if (parameter->as.parameter.default_value == NULL && !parameter->as.parameter.variadic) {
+            if (saw_default) {
+                fail(gen, parameter->line, "required parameter follows optional parameter");
+                return 0;
+            }
+            proto->n_required++;
+        } else {
+            saw_default = 1;
+        }
+        proto->variadic = (uint8_t)parameter->as.parameter.variadic;
+        parameter = parameter->next;
+    }
+    memset(&child, 0, sizeof(child));
+    child.module = gen->module;
+    child.proto = proto;
+    child.error = gen->error;
+    compile_statement(&child, method->as.function.body);
+    if (!child.failed) {
+        emit_byte(&child, OP_RET_NULL, method->line);
+        proto->max_stack = PPHP_STACK_SLOTS;
+    }
+    if (child.failed) {
+        gen->failed = 1;
+        return 0;
+    }
+    return 1;
+}
+
+static int method_proto_index(const pmodule *module, pc_token class_name,
+                              pc_token method_name, uint16_t *index) {
+    size_t i;
+    size_t length = class_name.length + 2U + method_name.length;
+    for (i = 1U; i < module->count && i <= UINT16_MAX; i++) {
+        const pstring *name = module->protos[i]->name;
+        if (name->length == length &&
+            memcmp(name->data, class_name.start, class_name.length) == 0 &&
+            memcmp(name->data + class_name.length, "::", 2U) == 0 &&
+            memcmp(name->data + class_name.length + 2U, method_name.start,
+                   method_name.length) == 0) {
+            *index = (uint16_t)i;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void compile_class_definition(generator *gen, const pc_ast *class_node) {
+    const pc_ast *member = class_node->as.class_decl.members;
+    uint16_t class_name = name_constant(gen, class_node->as.class_decl.name);
+    uint16_t parent_name = UINT16_MAX;
+    if (class_node->as.class_decl.parent.length != 0U) {
+        parent_name = name_constant(gen, class_node->as.class_decl.parent);
+    }
+    emit_byte(gen, OP_DEF_CLASS, class_node->line);
+    emit_u16(gen, class_name, class_node->line);
+    emit_u16(gen, parent_name, class_node->line);
+    emit_byte(gen, class_node->as.class_decl.flags, class_node->line);
+    while (member != NULL && !gen->failed) {
+        if (member->kind == AST_PROPERTY) {
+            uint16_t name;
+            pc_token property_name = member->as.property.name;
+            if ((member->as.property.flags & PC_MOD_STATIC) != 0U) {
+                fail(gen, member->line, "static properties are not supported yet");
+                break;
+            }
+            if (member->as.property.default_value != NULL) {
+                compile_expression(gen, member->as.property.default_value);
+            } else {
+                emit_byte(gen, OP_LOAD_NULL, member->line);
+            }
+            if (property_name.length != 0U && property_name.start[0] == '$') {
+                property_name.start++;
+                property_name.length--;
+            }
+            name = name_constant(gen, property_name);
+            emit_byte(gen, OP_DEF_PROP, member->line);
+            emit_u16(gen, name, member->line);
+            emit_byte(gen, member->as.property.flags, member->line);
+        } else if (member->kind == AST_FUNCTION) {
+            uint16_t name = name_constant(gen, member->as.function.name);
+            uint16_t proto_index;
+            if (!method_proto_index(gen->module, class_node->as.class_decl.name,
+                                    member->as.function.name, &proto_index)) {
+                fail(gen, member->line, "method prototype is missing");
+                break;
+            }
+            emit_byte(gen, OP_DEF_METHOD, member->line);
+            emit_u16(gen, name, member->line);
+            emit_u16(gen, proto_index, member->line);
+            emit_byte(gen, member->as.function.flags, member->line);
+        }
+        member = member->next;
+    }
+    emit_byte(gen, OP_DEF_END, class_node->line);
+}
+
 int pc_codegen_program(const pc_ast *program, pmodule *module,
                        pc_codegen_error *error) {
     generator gen;
@@ -973,6 +1202,14 @@ int pc_codegen_program(const pc_ast *program, pmodule *module,
             }
             if (!gen.failed) {
                 (void)compile_function(&gen, statement);
+            }
+        } else if (statement->kind == AST_CLASS) {
+            const pc_ast *member = statement->as.class_decl.members;
+            while (member != NULL && !gen.failed) {
+                if (member->kind == AST_FUNCTION) {
+                    (void)compile_method(&gen, statement->as.class_decl.name, member);
+                }
+                member = member->next;
             }
         }
         statement = statement->next;
