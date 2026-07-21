@@ -1,0 +1,38 @@
+#ifndef PPHP_STATE_H
+#define PPHP_STATE_H
+
+#include <stddef.h>
+#include <stdint.h>
+
+#include "pbc.h"
+#include "pphp/pphp.h"
+#include "symbol.h"
+
+typedef struct pframe {
+    const pproto *proto;
+    size_t pc;
+    size_t base;
+    uint32_t line;
+} pframe;
+
+struct pphp_state {
+    pvalue stack[PPHP_STACK_SLOTS];
+    pframe frames[PPHP_FRAME_MAX];
+    size_t stack_count;
+    size_t frame_count;
+    const pmodule *module;
+    psymbol_table symbols;
+    pphp_output_fn output;
+    void *output_context;
+    uint32_t error_line;
+    uint32_t ticks;
+    char error[256];
+};
+
+void pphp_output(pphp_state *state, const char *bytes, size_t length);
+void pphp_runtime_error(pphp_state *state, uint32_t line, const char *format, ...);
+int pphp_exec_source_mode(pphp_state *state, const char *source, size_t length,
+                          const char *chunk_name, int repl);
+
+#endif
+

@@ -24,6 +24,7 @@ typedef struct pphp_state pphp_state;
 typedef struct pphp_ctx pphp_ctx;
 typedef struct pclass pclass;
 typedef struct pobject pobject;
+typedef void (*pphp_output_fn)(void *context, const char *bytes, size_t length);
 
 typedef struct pphp_pool_stats {
     size_t total;
@@ -45,10 +46,12 @@ int pphp_exec_source(pphp_state *state, const char *source, size_t length,
                      const char *chunk_name);
 int pphp_exec_pbc(pphp_state *state, const void *pbc, size_t length);
 void pphp_tick(pphp_state *state);
+void pphp_set_output(pphp_state *state, pphp_output_fn output, void *context);
+const char *pphp_last_error(const pphp_state *state);
+uint32_t pphp_last_error_line(const pphp_state *state);
 
 #ifdef __cplusplus
 }
 #endif
 
 #endif
-

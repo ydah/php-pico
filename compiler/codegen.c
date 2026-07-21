@@ -1,0 +1,864 @@
+#include "codegen.h"
+
+#include "opcode.h"
+#include "pphp/pphp.h"
+
+#include <limits.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <string.h>
+
+typedef struct loop_context {
+    size_t continue_target;
+} loop_context;
+
+typedef struct jump_record {
+    size_t operand;
+    unsigned loop_index;
+    int is_continue;
+} jump_record;
+
+typedef struct generator {
+    pmodule *module;
+    pproto *proto;
+    pc_codegen_error *error;
+    loop_context loops[PPHP_PARSE_DEPTH_MAX];
+    unsigned loop_count;
+    jump_record jumps[256];
+    size_t jump_count;
+    int failed;
+} generator;
+
+static void fail(generator *gen, uint32_t line, const char *format, ...) {
+    va_list arguments;
+    if (gen->failed) {
+        return;
+    }
+    gen->failed = 1;
+    gen->error->line = line;
+    va_start(arguments, format);
+    (void)vsnprintf(gen->error->message, sizeof(gen->error->message), format, arguments);
+    va_end(arguments);
+}
+
+static void emit_byte(generator *gen, uint8_t byte, uint32_t line) {
+    if (!gen->failed && !pproto_emit_u8(gen->proto, byte)) {
+        fail(gen, line, "out of memory while emitting bytecode");
+    }
+}
+
+static void emit_u16(generator *gen, uint16_t value, uint32_t line) {
+    if (!gen->failed && !pproto_emit_u16(gen->proto, value)) {
+        fail(gen, line, "out of memory while emitting bytecode");
+    }
+}
+
+static void emit_i32(generator *gen, int32_t value, uint32_t line) {
+    if (!gen->failed && !pproto_emit_i32(gen->proto, value)) {
+        fail(gen, line, "out of memory while emitting bytecode");
+    }
+}
+
+static size_t emit_jump(generator *gen, pphp_opcode opcode, uint32_t line) {
+    size_t operand;
+    emit_byte(gen, (uint8_t)opcode, line);
+    operand = gen->proto->code_length;
+    emit_u16(gen, 0U, line);
+    return operand;
+}
+
+static void patch_jump(generator *gen, size_t operand, size_t target,
+                       uint32_t line) {
+    if (!gen->failed && !pproto_patch_i16(gen->proto, operand, target)) {
+        fail(gen, line, "jump exceeds 16-bit bytecode range");
+    }
+}
+
+static void emit_back_jump(generator *gen, size_t target, uint32_t line) {
+    size_t operand = emit_jump(gen, OP_JMP, line);
+    patch_jump(gen, operand, target, line);
+}
+
+static int token_equal(pc_token token, const pstring *string) {
+    return ps_equal_bytes(string, token.start, token.length);
+}
+
+static pphp_int parse_integer_token(pc_token token, int *overflow) {
+    size_t i = 0U;
+    unsigned base = 10U;
+    uint64_t value = 0U;
+    *overflow = 0;
+    if (token.length >= 2U && token.start[0] == '0') {
+        if (token.start[1] == 'x' || token.start[1] == 'X') {
+            base = 16U;
+            i = 2U;
+        } else if (token.start[1] == 'b' || token.start[1] == 'B') {
+            base = 2U;
+            i = 2U;
+        } else if (token.start[1] == 'o' || token.start[1] == 'O') {
+            base = 8U;
+            i = 2U;
+        } else if (token.start[1] >= '0' && token.start[1] <= '7') {
+            base = 8U;
+            i = 1U;
+        }
+    }
+    for (; i < token.length; i++) {
+        unsigned digit;
+        char value_char = token.start[i];
+        if (value_char == '_') {
+            continue;
+        }
+        if (value_char >= '0' && value_char <= '9') {
+            digit = (unsigned)(value_char - '0');
+        } else if (value_char >= 'a' && value_char <= 'f') {
+            digit = (unsigned)(value_char - 'a') + 10U;
+        } else {
+            digit = (unsigned)(value_char - 'A') + 10U;
+        }
+        if (value > (uint64_t)INT32_MAX / base ||
+            value * base > (uint64_t)INT32_MAX - digit) {
+            *overflow = 1;
+        }
+        value = value * base + digit;
+    }
+    return (pphp_int)value;
+}
+
+static pphp_float parse_float_token(pc_token token) {
+    size_t i = 0U;
+    pphp_float value = 0;
+    pphp_float fraction = (pphp_float)0.1;
+    int after_dot = 0;
+    int exponent = 0;
+    int exponent_sign = 1;
+    while (i < token.length && token.start[i] != 'e' && token.start[i] != 'E') {
+        char c = token.start[i++];
+        if (c == '_') {
+            continue;
+        }
+        if (c == '.') {
+            after_dot = 1;
+            continue;
+        }
+        if (after_dot) {
+            value += (pphp_float)(c - '0') * fraction;
+            fraction *= (pphp_float)0.1;
+        } else {
+            value = value * (pphp_float)10 + (pphp_float)(c - '0');
+        }
+    }
+    if (i < token.length) {
+        i++;
+        if (i < token.length && (token.start[i] == '+' || token.start[i] == '-')) {
+            exponent_sign = token.start[i++] == '-' ? -1 : 1;
+        }
+        while (i < token.length) {
+            char c = token.start[i++];
+            if (c != '_') {
+                exponent = exponent * 10 + (c - '0');
+            }
+        }
+    }
+    while (exponent-- > 0) {
+        value *= exponent_sign > 0 ? (pphp_float)10 : (pphp_float)0.1;
+    }
+    return value;
+}
+
+static pstring *decode_string(pc_token token) {
+    const char *source = token.start;
+    size_t length = token.length;
+    size_t begin = 0U;
+    size_t end = length;
+    char *decoded;
+    size_t output = 0U;
+    size_t i;
+    int escapes = token.type == T_DOUBLE_QUOTED || token.type == T_INTERP_PART;
+
+    if ((token.type == T_SINGLE_QUOTED || token.type == T_DOUBLE_QUOTED) && length >= 2U) {
+        begin = 1U;
+        end = length - 1U;
+        escapes = token.type == T_DOUBLE_QUOTED;
+    } else if (token.type == T_HEREDOC || token.type == T_NOWDOC) {
+        const char *first_newline = memchr(source, '\n', length);
+        const char *last_newline = NULL;
+        if (first_newline != NULL) {
+            const char *cursor = source + length;
+            while (cursor > first_newline + 1) {
+                cursor--;
+                if (*cursor == '\n') {
+                    last_newline = cursor;
+                    break;
+                }
+            }
+            begin = (size_t)(first_newline + 1 - source);
+            end = last_newline != NULL ? (size_t)(last_newline - source) : length;
+        }
+        escapes = token.type == T_HEREDOC;
+    }
+    decoded = pphp_alloc(end - begin + 1U);
+    if (decoded == NULL) {
+        return NULL;
+    }
+    for (i = begin; i < end; i++) {
+        char c = source[i];
+        if (c != '\\' || i + 1U >= end) {
+            decoded[output++] = c;
+            continue;
+        }
+        if (!escapes && token.type != T_SINGLE_QUOTED) {
+            decoded[output++] = c;
+            continue;
+        }
+        c = source[++i];
+        if (token.type == T_SINGLE_QUOTED && c != '\\' && c != '\'') {
+            decoded[output++] = '\\';
+            decoded[output++] = c;
+            continue;
+        }
+        switch (c) {
+            case 'n': decoded[output++] = '\n'; break;
+            case 'r': decoded[output++] = '\r'; break;
+            case 't': decoded[output++] = '\t'; break;
+            case 'v': decoded[output++] = '\v'; break;
+            case 'f': decoded[output++] = '\f'; break;
+            case 'e': decoded[output++] = 27; break;
+            case '\\': decoded[output++] = '\\'; break;
+            case '\'': decoded[output++] = '\''; break;
+            case '"': decoded[output++] = '"'; break;
+            case '$': decoded[output++] = '$'; break;
+            default: decoded[output++] = c; break;
+        }
+    }
+    {
+        pstring *string = ps_new(decoded, output);
+        pphp_free(decoded);
+        return string;
+    }
+}
+
+static void emit_constant(generator *gen, pvalue value, uint32_t line) {
+    uint16_t index;
+    if (!pproto_add_constant(gen->proto, value, &index)) {
+        fail(gen, line, "constant pool limit exceeded");
+        return;
+    }
+    emit_byte(gen, OP_LOAD_CONST, line);
+    emit_u16(gen, index, line);
+}
+
+static int variable_slot(generator *gen, pc_token token, uint8_t *slot) {
+    const char *name = token.start;
+    size_t length = token.length;
+    if (length != 0U && *name == '$') {
+        name++;
+        length--;
+    }
+    if (!pproto_add_local(gen->proto, name, length, slot)) {
+        fail(gen, token.line, "too many local variables or out of memory");
+        return 0;
+    }
+    return 1;
+}
+
+static void compile_expression(generator *gen, const pc_ast *node);
+static void compile_statement(generator *gen, const pc_ast *node);
+
+static pphp_opcode binary_opcode(pc_token_type type) {
+    switch (type) {
+        case T_PLUS: return OP_ADD;
+        case T_MINUS: return OP_SUB;
+        case T_STAR: return OP_MUL;
+        case T_SLASH: return OP_DIV;
+        case T_PERCENT: return OP_MOD;
+        case T_POW: return OP_POW;
+        case T_DOT: return OP_CONCAT;
+        case T_AMP: return OP_BAND;
+        case T_PIPE: return OP_BOR;
+        case T_CARET: return OP_BXOR;
+        case T_SHIFT_LEFT: return OP_SHL;
+        case T_SHIFT_RIGHT: return OP_SHR;
+        case T_EQUAL_EQUAL: return OP_EQ;
+        case T_NOT_EQUAL: return OP_NE;
+        case T_IDENTICAL: return OP_IDENT;
+        case T_NOT_IDENTICAL: return OP_NIDENT;
+        case T_LT: return OP_LT;
+        case T_LT_EQUAL: return OP_LE;
+        case T_GT: return OP_GT;
+        case T_GT_EQUAL: return OP_GE;
+        case T_SPACESHIP: return OP_CMP;
+        default: return OP_NOP;
+    }
+}
+
+static pc_token_type compound_operator(pc_token_type type) {
+    switch (type) {
+        case T_PLUS_EQUAL: return T_PLUS;
+        case T_MINUS_EQUAL: return T_MINUS;
+        case T_STAR_EQUAL: return T_STAR;
+        case T_SLASH_EQUAL: return T_SLASH;
+        case T_DOT_EQUAL: return T_DOT;
+        case T_PERCENT_EQUAL: return T_PERCENT;
+        case T_POW_EQUAL: return T_POW;
+        case T_AMP_EQUAL: return T_AMP;
+        case T_PIPE_EQUAL: return T_PIPE;
+        case T_CARET_EQUAL: return T_CARET;
+        case T_SHIFT_LEFT_EQUAL: return T_SHIFT_LEFT;
+        case T_SHIFT_RIGHT_EQUAL: return T_SHIFT_RIGHT;
+        default: return type;
+    }
+}
+
+static void compile_assignment(generator *gen, const pc_ast *node) {
+    uint8_t slot;
+    pc_token_type operation = node->as.binary.op;
+    if (node->as.binary.left->kind != AST_VARIABLE) {
+        fail(gen, node->line, "only local variable assignment is executable in this milestone");
+        return;
+    }
+    if (!variable_slot(gen, node->as.binary.left->as.literal.token, &slot)) {
+        return;
+    }
+    if (operation != T_EQUAL) {
+        emit_byte(gen, OP_LOAD_LOCAL, node->line);
+        emit_byte(gen, slot, node->line);
+    }
+    compile_expression(gen, node->as.binary.right);
+    if (operation != T_EQUAL) {
+        pphp_opcode opcode = binary_opcode(compound_operator(operation));
+        if (opcode == OP_NOP) {
+            fail(gen, node->line, "unsupported compound assignment");
+            return;
+        }
+        emit_byte(gen, (uint8_t)opcode, node->line);
+    }
+    emit_byte(gen, OP_DUP, node->line);
+    emit_byte(gen, OP_STORE_LOCAL, node->line);
+    emit_byte(gen, slot, node->line);
+}
+
+static void compile_increment(generator *gen, const pc_ast *node) {
+    uint8_t slot;
+    if (node->as.unary.operand->kind != AST_VARIABLE ||
+        !variable_slot(gen, node->as.unary.operand->as.literal.token, &slot)) {
+        fail(gen, node->line, "only local variables can be incremented");
+        return;
+    }
+    emit_byte(gen, OP_LOAD_LOCAL, node->line);
+    emit_byte(gen, slot, node->line);
+    if (node->as.unary.postfix) {
+        emit_byte(gen, OP_DUP, node->line);
+    }
+    emit_byte(gen, OP_LOAD_I8, node->line);
+    emit_byte(gen, 1U, node->line);
+    emit_byte(gen, node->as.unary.op == T_PLUS_PLUS ? OP_ADD : OP_SUB, node->line);
+    if (!node->as.unary.postfix) {
+        emit_byte(gen, OP_DUP, node->line);
+    }
+    emit_byte(gen, OP_STORE_LOCAL, node->line);
+    emit_byte(gen, slot, node->line);
+}
+
+static void compile_short_circuit(generator *gen, const pc_ast *node) {
+    pphp_opcode opcode;
+    size_t jump;
+    compile_expression(gen, node->as.binary.left);
+    if (node->as.binary.op == T_COALESCE) {
+        opcode = OP_JMP_NOTNULL_KEEP;
+    } else if (node->as.binary.op == T_BOOL_OR || node->as.binary.op == T_OR) {
+        opcode = OP_JMP_IF_KEEP;
+    } else {
+        opcode = OP_JMP_UNLESS_KEEP;
+    }
+    jump = emit_jump(gen, opcode, node->line);
+    compile_expression(gen, node->as.binary.right);
+    patch_jump(gen, jump, gen->proto->code_length, node->line);
+}
+
+static void compile_expression(generator *gen, const pc_ast *node) {
+    if (node == NULL || gen->failed) {
+        return;
+    }
+    switch (node->kind) {
+        case AST_NULL:
+            emit_byte(gen, OP_LOAD_NULL, node->line);
+            break;
+        case AST_BOOL:
+            emit_byte(gen, node->as.literal.token.type == T_TRUE ? OP_LOAD_TRUE : OP_LOAD_FALSE,
+                      node->line);
+            break;
+        case AST_INT: {
+            int overflow;
+            pphp_int value = parse_integer_token(node->as.literal.token, &overflow);
+            if (!overflow && value >= INT8_MIN && value <= INT8_MAX) {
+                emit_byte(gen, OP_LOAD_I8, node->line);
+                emit_byte(gen, (uint8_t)(int8_t)value, node->line);
+            } else if (!overflow) {
+                emit_byte(gen, OP_LOAD_I32, node->line);
+                emit_i32(gen, (int32_t)value, node->line);
+            } else {
+                emit_constant(gen, pv_float((pphp_float)(uint32_t)value), node->line);
+            }
+            break;
+        }
+        case AST_FLOAT:
+            emit_constant(gen, pv_float(parse_float_token(node->as.literal.token)), node->line);
+            break;
+        case AST_STRING: {
+            pstring *string = decode_string(node->as.literal.token);
+            pvalue value;
+            if (string == NULL) {
+                fail(gen, node->line, "out of memory while decoding string");
+                break;
+            }
+            value = pv_heap(PT_STRING, &string->header);
+            emit_constant(gen, value, node->line);
+            pv_release(value);
+            break;
+        }
+        case AST_VARIABLE: {
+            uint8_t slot;
+            if (variable_slot(gen, node->as.literal.token, &slot)) {
+                emit_byte(gen, OP_LOAD_LOCAL, node->line);
+                emit_byte(gen, slot, node->line);
+            }
+            break;
+        }
+        case AST_ASSIGN:
+            compile_assignment(gen, node);
+            break;
+        case AST_BINARY:
+            if (node->as.binary.op == T_BOOL_AND || node->as.binary.op == T_BOOL_OR ||
+                node->as.binary.op == T_AND || node->as.binary.op == T_OR ||
+                node->as.binary.op == T_COALESCE) {
+                compile_short_circuit(gen, node);
+            } else if (node->as.binary.op == T_XOR) {
+                compile_expression(gen, node->as.binary.left);
+                emit_byte(gen, OP_NOT, node->line);
+                emit_byte(gen, OP_NOT, node->line);
+                compile_expression(gen, node->as.binary.right);
+                emit_byte(gen, OP_NOT, node->line);
+                emit_byte(gen, OP_NOT, node->line);
+                emit_byte(gen, OP_BXOR, node->line);
+            } else {
+                pphp_opcode opcode = binary_opcode(node->as.binary.op);
+                if (opcode == OP_NOP) {
+                    fail(gen, node->line, "unsupported binary operator %s",
+                         pc_token_name(node->as.binary.op));
+                    break;
+                }
+                compile_expression(gen, node->as.binary.left);
+                compile_expression(gen, node->as.binary.right);
+                emit_byte(gen, (uint8_t)opcode, node->line);
+            }
+            break;
+        case AST_UNARY:
+            if (node->as.unary.op == T_PLUS_PLUS || node->as.unary.op == T_MINUS_MINUS) {
+                compile_increment(gen, node);
+                break;
+            }
+            compile_expression(gen, node->as.unary.operand);
+            if (node->as.unary.op == T_MINUS) emit_byte(gen, OP_NEG, node->line);
+            else if (node->as.unary.op == T_BANG) emit_byte(gen, OP_NOT, node->line);
+            else if (node->as.unary.op == T_TILDE) emit_byte(gen, OP_BNOT, node->line);
+            else if (node->as.unary.op != T_PLUS) {
+                fail(gen, node->line, "unsupported unary operator");
+            }
+            break;
+        case AST_TERNARY:
+            if (node->as.ternary.then_expr == NULL) {
+                size_t end;
+                compile_expression(gen, node->as.ternary.condition);
+                end = emit_jump(gen, OP_JMP_IF_KEEP, node->line);
+                compile_expression(gen, node->as.ternary.else_expr);
+                patch_jump(gen, end, gen->proto->code_length, node->line);
+            } else {
+                size_t otherwise;
+                size_t end;
+                compile_expression(gen, node->as.ternary.condition);
+                otherwise = emit_jump(gen, OP_JMP_UNLESS, node->line);
+                compile_expression(gen, node->as.ternary.then_expr);
+                end = emit_jump(gen, OP_JMP, node->line);
+                patch_jump(gen, otherwise, gen->proto->code_length, node->line);
+                compile_expression(gen, node->as.ternary.else_expr);
+                patch_jump(gen, end, gen->proto->code_length, node->line);
+            }
+            break;
+        case AST_CALL: {
+            const pc_ast *argument = node->as.call.arguments;
+            pstring *name;
+            pvalue name_value;
+            uint16_t name_index;
+            if (node->as.call.callee->kind != AST_IDENTIFIER || node->as.call.count > 255U) {
+                fail(gen, node->line, "only named function calls are supported");
+                break;
+            }
+            while (argument != NULL) {
+                if (argument->kind == AST_UNARY && argument->as.unary.op == T_ELLIPSIS) {
+                    fail(gen, argument->line, "argument unpacking requires array runtime");
+                    break;
+                }
+                compile_expression(gen, argument);
+                argument = argument->next;
+            }
+            name = ps_new(node->as.call.callee->as.literal.token.start,
+                          node->as.call.callee->as.literal.token.length);
+            if (name == NULL) {
+                fail(gen, node->line, "out of memory for function name");
+                break;
+            }
+            name_value = pv_heap(PT_STRING, &name->header);
+            if (!pproto_add_constant(gen->proto, name_value, &name_index)) {
+                fail(gen, node->line, "constant pool limit exceeded");
+            }
+            pv_release(name_value);
+            emit_byte(gen, OP_CALL, node->line);
+            emit_u16(gen, name_index, node->line);
+            emit_byte(gen, (uint8_t)node->as.call.count, node->line);
+            break;
+        }
+        case AST_ISSET:
+            compile_expression(gen, node->as.unary.operand);
+            emit_byte(gen, OP_LOAD_NULL, node->line);
+            emit_byte(gen, OP_NIDENT, node->line);
+            break;
+        case AST_EMPTY:
+            compile_expression(gen, node->as.unary.operand);
+            emit_byte(gen, OP_NOT, node->line);
+            break;
+        case AST_UNSET:
+            if (node->as.unary.operand->kind == AST_VARIABLE) {
+                uint8_t slot;
+                if (variable_slot(gen, node->as.unary.operand->as.literal.token, &slot)) {
+                    emit_byte(gen, OP_LOAD_NULL, node->line);
+                    emit_byte(gen, OP_DUP, node->line);
+                    emit_byte(gen, OP_STORE_LOCAL, node->line);
+                    emit_byte(gen, slot, node->line);
+                }
+            } else {
+                fail(gen, node->line, "unset target is not supported");
+            }
+            break;
+        default:
+            fail(gen, node->line, "AST node %s is not executable yet",
+                 pc_ast_kind_name(node->kind));
+            break;
+    }
+}
+
+static void record_loop_jump(generator *gen, const pc_ast *node, int is_continue) {
+    unsigned level = node->as.jump.level;
+    size_t operand;
+    jump_record *record;
+    if (level == 0U || level > gen->loop_count) {
+        fail(gen, node->line, "%s %u is outside a loop",
+             is_continue ? "continue" : "break", level);
+        return;
+    }
+    if (gen->jump_count >= sizeof(gen->jumps) / sizeof(gen->jumps[0])) {
+        fail(gen, node->line, "too many loop exits in one function");
+        return;
+    }
+    operand = emit_jump(gen, OP_JMP, node->line);
+    record = &gen->jumps[gen->jump_count++];
+    record->operand = operand;
+    record->loop_index = gen->loop_count - level;
+    record->is_continue = is_continue;
+}
+
+static void patch_loop_jumps(generator *gen, unsigned index, size_t break_target,
+                             size_t continue_target, uint32_t line) {
+    size_t i;
+    for (i = 0U; i < gen->jump_count; i++) {
+        if (gen->jumps[i].loop_index == index) {
+            patch_jump(gen, gen->jumps[i].operand,
+                       gen->jumps[i].is_continue ? continue_target : break_target,
+                       line);
+        }
+    }
+}
+
+static void compile_statement_list(generator *gen, const pc_ast *node) {
+    while (node != NULL && !gen->failed) {
+        compile_statement(gen, node);
+        node = node->next;
+    }
+}
+
+static void compile_statement(generator *gen, const pc_ast *node) {
+    if (node == NULL || gen->failed) {
+        return;
+    }
+#if PPHP_LINE_INFO
+    emit_byte(gen, OP_LINE, node->line);
+    emit_u16(gen, (uint16_t)(node->line > UINT16_MAX ? UINT16_MAX : node->line), node->line);
+#endif
+    switch (node->kind) {
+        case AST_PROGRAM:
+        case AST_BLOCK:
+            compile_statement_list(gen, node->as.list.items);
+            break;
+        case AST_EXPR_STMT:
+            compile_expression(gen, node->as.expression.expression);
+            emit_byte(gen, OP_POP, node->line);
+            break;
+        case AST_ECHO: {
+            const pc_ast *expression = node->as.list.items;
+            while (expression != NULL) {
+                compile_expression(gen, expression);
+                expression = expression->next;
+            }
+            emit_byte(gen, OP_ECHO, node->line);
+            emit_byte(gen, (uint8_t)node->as.list.count, node->line);
+            break;
+        }
+        case AST_IF: {
+            size_t otherwise;
+            size_t end = SIZE_MAX;
+            compile_expression(gen, node->as.if_stmt.condition);
+            otherwise = emit_jump(gen, OP_JMP_UNLESS, node->line);
+            compile_statement(gen, node->as.if_stmt.then_branch);
+            if (node->as.if_stmt.else_branch != NULL) {
+                end = emit_jump(gen, OP_JMP, node->line);
+            }
+            patch_jump(gen, otherwise, gen->proto->code_length, node->line);
+            if (node->as.if_stmt.else_branch != NULL) {
+                compile_statement(gen, node->as.if_stmt.else_branch);
+                patch_jump(gen, end, gen->proto->code_length, node->line);
+            }
+            break;
+        }
+        case AST_WHILE: {
+            size_t start = gen->proto->code_length;
+            size_t exit;
+            unsigned index = gen->loop_count;
+            compile_expression(gen, node->as.loop.condition);
+            exit = emit_jump(gen, OP_JMP_UNLESS, node->line);
+            if (gen->loop_count >= PPHP_PARSE_DEPTH_MAX) {
+                fail(gen, node->line, "loop nesting limit exceeded");
+                break;
+            }
+            gen->loops[gen->loop_count++].continue_target = start;
+            compile_statement(gen, node->as.loop.body);
+            emit_back_jump(gen, start, node->line);
+            patch_jump(gen, exit, gen->proto->code_length, node->line);
+            patch_loop_jumps(gen, index, gen->proto->code_length, start, node->line);
+            gen->loop_count--;
+            break;
+        }
+        case AST_DO_WHILE: {
+            size_t start = gen->proto->code_length;
+            size_t condition;
+            unsigned index = gen->loop_count;
+            if (gen->loop_count >= PPHP_PARSE_DEPTH_MAX) {
+                fail(gen, node->line, "loop nesting limit exceeded");
+                break;
+            }
+            gen->loops[gen->loop_count++].continue_target = SIZE_MAX;
+            compile_statement(gen, node->as.loop.body);
+            condition = gen->proto->code_length;
+            compile_expression(gen, node->as.loop.condition);
+            {
+                size_t jump = emit_jump(gen, OP_JMP_IF, node->line);
+                patch_jump(gen, jump, start, node->line);
+            }
+            patch_loop_jumps(gen, index, gen->proto->code_length, condition, node->line);
+            gen->loop_count--;
+            break;
+        }
+        case AST_FOR: {
+            const pc_ast *expression;
+            size_t condition_start;
+            size_t exit = SIZE_MAX;
+            size_t increment_start;
+            unsigned index = gen->loop_count;
+            expression = node->as.for_stmt.initializers;
+            while (expression != NULL) {
+                compile_expression(gen, expression);
+                emit_byte(gen, OP_POP, node->line);
+                expression = expression->next;
+            }
+            condition_start = gen->proto->code_length;
+            expression = node->as.for_stmt.conditions;
+            if (expression != NULL) {
+                while (expression->next != NULL) {
+                    compile_expression(gen, expression);
+                    emit_byte(gen, OP_POP, node->line);
+                    expression = expression->next;
+                }
+                compile_expression(gen, expression);
+                exit = emit_jump(gen, OP_JMP_UNLESS, node->line);
+            }
+            if (gen->loop_count >= PPHP_PARSE_DEPTH_MAX) {
+                fail(gen, node->line, "loop nesting limit exceeded");
+                break;
+            }
+            gen->loops[gen->loop_count++].continue_target = SIZE_MAX;
+            compile_statement(gen, node->as.for_stmt.body);
+            increment_start = gen->proto->code_length;
+            expression = node->as.for_stmt.increments;
+            while (expression != NULL) {
+                compile_expression(gen, expression);
+                emit_byte(gen, OP_POP, node->line);
+                expression = expression->next;
+            }
+            emit_back_jump(gen, condition_start, node->line);
+            if (exit != SIZE_MAX) {
+                patch_jump(gen, exit, gen->proto->code_length, node->line);
+            }
+            patch_loop_jumps(gen, index, gen->proto->code_length, increment_start, node->line);
+            gen->loop_count--;
+            break;
+        }
+        case AST_BREAK:
+            record_loop_jump(gen, node, 0);
+            break;
+        case AST_CONTINUE:
+            record_loop_jump(gen, node, 1);
+            break;
+        case AST_RETURN:
+            if (node->as.expression.expression != NULL) {
+                compile_expression(gen, node->as.expression.expression);
+                emit_byte(gen, OP_RET, node->line);
+            } else {
+                emit_byte(gen, OP_RET_NULL, node->line);
+            }
+            break;
+        case AST_FUNCTION:
+            break;
+        case AST_STATIC:
+            if (node->as.binding.value != NULL) {
+                pc_ast variable;
+                pc_ast assignment;
+                memset(&variable, 0, sizeof(variable));
+                memset(&assignment, 0, sizeof(assignment));
+                variable.kind = AST_VARIABLE;
+                variable.line = node->line;
+                variable.as.literal.token = node->as.binding.name;
+                assignment.kind = AST_ASSIGN;
+                assignment.line = node->line;
+                assignment.as.binary.op = T_EQUAL;
+                assignment.as.binary.left = &variable;
+                assignment.as.binary.right = node->as.binding.value;
+                compile_expression(gen, &assignment);
+                emit_byte(gen, OP_POP, node->line);
+            }
+            break;
+        case AST_GLOBAL:
+            break;
+        case AST_CONST:
+        case AST_FOREACH:
+        case AST_SWITCH:
+        case AST_INCLUDE:
+        case AST_THROW:
+            fail(gen, node->line, "%s requires a later runtime milestone",
+                 pc_ast_kind_name(node->kind));
+            break;
+        default:
+            fail(gen, node->line, "statement node %s is not executable",
+                 pc_ast_kind_name(node->kind));
+            break;
+    }
+}
+
+static int compile_function(generator *gen, const pc_ast *function) {
+    pproto *proto = pproto_new(function->as.function.name.start,
+                               function->as.function.name.length);
+    const pc_ast *parameter;
+    generator child;
+    int saw_default = 0;
+    if (proto == NULL || !pmodule_add(gen->module, proto)) {
+        pproto_destroy(proto);
+        fail(gen, function->line, "out of memory while creating function");
+        return 0;
+    }
+    parameter = function->as.function.parameters;
+    while (parameter != NULL) {
+        uint8_t slot;
+        pc_token name = parameter->as.parameter.name;
+        if (name.length != 0U && name.start[0] == '$') {
+            name.start++;
+            name.length--;
+        }
+        if (!pproto_add_local(proto, name.start, name.length, &slot)) {
+            fail(gen, parameter->line, "too many function parameters");
+            return 0;
+        }
+        proto->n_params++;
+        if (parameter->as.parameter.default_value == NULL && !parameter->as.parameter.variadic) {
+            if (saw_default) {
+                fail(gen, parameter->line, "required parameter follows optional parameter");
+                return 0;
+            }
+            proto->n_required++;
+        } else {
+            saw_default = 1;
+        }
+        proto->variadic = (uint8_t)parameter->as.parameter.variadic;
+        parameter = parameter->next;
+    }
+    memset(&child, 0, sizeof(child));
+    child.module = gen->module;
+    child.proto = proto;
+    child.error = gen->error;
+    compile_statement(&child, function->as.function.body);
+    if (!child.failed) {
+        emit_byte(&child, OP_RET_NULL, function->line);
+        proto->max_stack = PPHP_STACK_SLOTS;
+    }
+    if (child.failed) {
+        gen->failed = 1;
+        return 0;
+    }
+    return 1;
+}
+
+int pc_codegen_program(const pc_ast *program, pmodule *module,
+                       pc_codegen_error *error) {
+    generator gen;
+    const pc_ast *statement;
+    pproto *entry;
+    memset(error, 0, sizeof(*error));
+    if (!pmodule_init(module)) {
+        return 0;
+    }
+    entry = pproto_new("{main}", 6U);
+    if (entry == NULL || !pmodule_add(module, entry)) {
+        pproto_destroy(entry);
+        (void)snprintf(error->message, sizeof(error->message), "out of memory creating module");
+        return 0;
+    }
+    memset(&gen, 0, sizeof(gen));
+    gen.module = module;
+    gen.proto = entry;
+    gen.error = error;
+    statement = program->as.list.items;
+    while (statement != NULL && !gen.failed) {
+        if (statement->kind == AST_FUNCTION) {
+            size_t i;
+            for (i = 1U; i < module->count; i++) {
+                if (token_equal(statement->as.function.name, module->protos[i]->name)) {
+                    fail(&gen, statement->line, "function %.*s is already defined",
+                         (int)statement->as.function.name.length,
+                         statement->as.function.name.start);
+                    break;
+                }
+            }
+            if (!gen.failed) {
+                (void)compile_function(&gen, statement);
+            }
+        }
+        statement = statement->next;
+    }
+    if (!gen.failed) {
+        compile_statement(&gen, program);
+        emit_byte(&gen, OP_HALT, program->line);
+        entry->max_stack = PPHP_STACK_SLOTS;
+    }
+    if (gen.failed) {
+        pmodule_destroy(module);
+        return 0;
+    }
+    return 1;
+}

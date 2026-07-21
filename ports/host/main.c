@@ -2,6 +2,7 @@
 #include "ast.h"
 #include "lexer.h"
 #include "parser.h"
+#include "state.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -13,7 +14,9 @@ static void print_usage(FILE *stream) {
     fprintf(stream,
             "Usage: php-pico [--version]\n"
             "       php-pico --tokens file.php\n"
-            "       php-pico --ast file.php\n");
+            "       php-pico --ast file.php\n"
+            "       php-pico -r 'code'\n"
+            "       php-pico file.php\n");
 }
 
 static char *read_file(const char *path, size_t *length) {
@@ -110,6 +113,29 @@ static int dump_ast(const char *source, size_t length, const char *path) {
     return PPHP_OK;
 }
 
+static void write_stdout(void *context, const char *bytes, size_t length) {
+    FILE *stream = context;
+    (void)fwrite(bytes, 1U, length, stream);
+}
+
+static int execute_source(const char *source, size_t length, const char *name,
+                          int repl) {
+    pphp_state *state = pphp_open(NULL, 0U);
+    int result;
+    if (state == NULL) {
+        fprintf(stderr, "php-pico: cannot initialize VM\n");
+        return 255;
+    }
+    pphp_set_output(state, write_stdout, stdout);
+    result = pphp_exec_source_mode(state, source, length, name, repl);
+    if (result != PPHP_OK) {
+        fprintf(stderr, "%s on line %u\n", pphp_last_error(state),
+                pphp_last_error_line(state));
+    }
+    pphp_close(state);
+    return result == PPHP_OK ? 0 : (result == PPHP_E_PARSE ? 1 : 255);
+}
+
 int main(int argc, char **argv) {
     pphp_pool_init(host_pool, sizeof(host_pool));
     if (argc == 2 && strcmp(argv[1], "--version") == 0) {
@@ -127,6 +153,20 @@ int main(int argc, char **argv) {
         result = strcmp(argv[1], "--tokens") == 0
                      ? dump_tokens(source, length)
                      : dump_ast(source, length, argv[2]);
+        pphp_free(source);
+        return result;
+    }
+    if (argc == 3 && strcmp(argv[1], "-r") == 0) {
+        return execute_source(argv[2], strlen(argv[2]), "Command line code", 1);
+    }
+    if (argc == 2) {
+        size_t length = 0U;
+        char *source = read_file(argv[1], &length);
+        int result;
+        if (source == NULL) {
+            return PPHP_E_IO;
+        }
+        result = execute_source(source, length, argv[1], 0);
         pphp_free(source);
         return result;
     }

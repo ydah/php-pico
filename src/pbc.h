@@ -1,0 +1,52 @@
+#ifndef PPHP_PBC_H
+#define PPHP_PBC_H
+
+#include <stddef.h>
+#include <stdint.h>
+
+#include "pstring.h"
+#include "value.h"
+
+typedef struct pproto {
+    pstring *name;
+    uint8_t n_params;
+    uint8_t n_required;
+    uint8_t variadic;
+    uint8_t n_locals;
+    uint16_t max_stack;
+    uint8_t *code;
+    size_t code_length;
+    size_t code_capacity;
+    pvalue *constants;
+    size_t constant_count;
+    size_t constant_capacity;
+    pstring **locals;
+} pproto;
+
+typedef struct pmodule {
+    pproto **protos;
+    size_t count;
+    size_t capacity;
+} pmodule;
+
+pproto *pproto_new(const char *name, size_t length);
+void pproto_destroy(pproto *proto);
+int pproto_emit_u8(pproto *proto, uint8_t value);
+int pproto_emit_u16(pproto *proto, uint16_t value);
+int pproto_emit_i32(pproto *proto, int32_t value);
+int pproto_patch_i16(pproto *proto, size_t operand_offset, size_t target);
+int pproto_add_constant(pproto *proto, pvalue value, uint16_t *index);
+int pproto_add_local(pproto *proto, const char *name, size_t length, uint8_t *slot);
+int pproto_find_local(const pproto *proto, const char *name, size_t length,
+                      uint8_t *slot);
+
+int pmodule_init(pmodule *module);
+void pmodule_destroy(pmodule *module);
+int pmodule_add(pmodule *module, pproto *proto);
+const pproto *pmodule_find(const pmodule *module, const pstring *name);
+
+int pphp_pbc_write_file(const pmodule *module, const char *path);
+int pphp_pbc_read_file(const char *path, pmodule *module);
+
+#endif
+
