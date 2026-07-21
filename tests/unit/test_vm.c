@@ -489,6 +489,31 @@ TEST(math_builtins_cover_integer_float_and_collection_forms) {
     ASSERT_STR("caught", output.bytes);
 }
 
+TEST(string_builtins_cover_search_transform_split_and_join) {
+    const char *source =
+        "$parts = explode(',', 'a,b,c'); $chunks = str_split('abcd', 2);"
+        "echo substr('abcdef', -4, 2), ':', strpos('banana', 'na'), ':',"
+        " strrpos('banana', 'na'), ':',"
+        " (str_contains('pico php', 'php') ? 1 : 0),"
+        " (str_starts_with('pico', 'pi') ? 1 : 0),"
+        " (str_ends_with('pico', 'co') ? 1 : 0), ':',"
+        " strtoupper('abc'), ':', strtolower('ABC'), ':',"
+        " ucfirst('hello'), ':', lcfirst('Hello'), ':', trim(\"  x \\n\"), ':',"
+        " str_repeat('ab', 2), ':', strrev('abc'), ':',"
+        " (strcmp('a', 'b') < 0 ? 1 : 0),"
+        " (strcasecmp('A', 'a') === 0 ? 1 : 0),"
+        " (strncmp('abc', 'abd', 2) === 0 ? 1 : 0), ':',"
+        " bin2hex('AB'), ':', hex2bin('4142'), ':', chr(65), ':', ord('Z'), ':',"
+        " str_replace('a', 'A', 'banana'), ':', implode('-', $parts), ':',"
+        " count($parts), ':', $parts[1], ':', $chunks[1], ':',"
+        " str_pad('x', 5, '-', 2), ':', dechex(255), ':', hexdec('ff'), ':',"
+        " decbin(10), ':', bindec('1010'), ':', decoct(8), ':', octdec('10');";
+    output_buffer output;
+    ASSERT_EQ(PPHP_OK, execute(source, &output, NULL, 0U));
+    ASSERT_STR("cd:2:4:111:ABC:abc:Hello:hello:x:abab:cba:111:4142:AB:A:90:bAnAnA:a-b-c:3:b:cd:--x--:ff:255:1010:10:10:8",
+               output.bytes);
+}
+
 int main(void) {
     static const test_case tests[] = {
         {"arithmetic VM", arithmetic_runs_through_compiler_and_vm},
@@ -523,7 +548,8 @@ int main(void) {
         {"static closure this", static_closures_reject_this_binding},
         {"object clone", clone_copies_property_slots_and_invokes_clone_hook},
         {"type builtins", type_conversion_and_predicate_builtins_follow_php_values},
-        {"math builtins", math_builtins_cover_integer_float_and_collection_forms}
+        {"math builtins", math_builtins_cover_integer_float_and_collection_forms},
+        {"string builtins", string_builtins_cover_search_transform_split_and_join}
     };
     return run_tests(tests, sizeof(tests) / sizeof(tests[0]));
 }
