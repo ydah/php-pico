@@ -733,7 +733,7 @@ static int call_value(pphp_state *state, pframe *caller,
     state->frames[state->frame_count].argument_count = argument_count;
     state->frames[state->frame_count].has_return_override = 0;
     state->frames[state->frame_count].return_override = pv_null();
-    state->frames[state->frame_count].called_scope = caller->called_scope;
+    state->frames[state->frame_count].called_scope = closure->called_scope;
     state->frame_count++;
     return 1;
 }
@@ -1015,6 +1015,11 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                 if (state->frame_count != 1U) {
                     pphp_runtime_error(state, frame->line, "HALT inside function");
                     break;
+                }
+                if (state->capture_halt_result && state->halt_result != NULL &&
+                    state->stack_count > frame->base + frame->proto->n_locals) {
+                    *state->halt_result = state->stack[state->stack_count - 1U];
+                    pv_retain(*state->halt_result);
                 }
                 release_range(state, 0U, state->stack_count);
                 state->stack_count = 0U;
@@ -1338,6 +1343,30 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                 }
                 break;
             }
+            case OP_ARR_SEPARATE: {
+                pvalue array_value = pop(state);
+                parray *original;
+                parray *writable;
+                if (array_value.type != PT_ARRAY) {
+                    pv_release(array_value);
+                    pphp_runtime_error(state, frame->line,
+                                       "array mutation expects an array");
+                    break;
+                }
+                original = (parray *)array_value.as.gc;
+                writable = array_for_write(array_value);
+                if (writable == NULL) {
+                    pv_release(array_value);
+                    pphp_runtime_error(state, frame->line,
+                                       "out of memory separating array");
+                } else if (writable != original) {
+                    pv_release(array_value);
+                    (void)push(state, pv_heap(PT_ARRAY, &writable->header));
+                } else {
+                    (void)push(state, array_value);
+                }
+                break;
+            }
             case OP_IDX_GET: {
                 pvalue key = pop(state);
                 pvalue base = pop(state);
@@ -1646,7 +1675,8 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                     break;
                 }
                 closure = pclosure_new(frame->module->protos[proto_index],
-                                       frame->module, captures, capture_count);
+                                       frame->module, frame->called_scope,
+                                       captures, capture_count);
                 for (capture = 0U; capture < capture_count; capture++) {
                     pv_release(captures[capture]);
                 }
@@ -1735,4 +1765,77 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
         state->frame_count = 0U;
     }
     return PPHP_OK;
+}
+
+int pphp_vm_invoke(pphp_state *state, pvalue callable,
+                   const pvalue *arguments, size_t count, pvalue *result) {
+    pphp_state child;
+    pmodule module;
+    pproto *entry;
+    pmodule **modules = NULL;
+    size_t module_count;
+    size_t i;
+    uint16_t constant;
+    int status = PPHP_E_RUNTIME;
+    if (state == NULL || result == NULL || count > 31U) return 0;
+    *result = pv_null();
+    if (!pmodule_init(&module)) return 0;
+    entry = pproto_new("{callback}", 10U);
+    if (entry == NULL || !pmodule_add(&module, entry)) {
+        pproto_destroy(entry);
+        return 0;
+    }
+    if (!pproto_add_constant(entry, callable, &constant) ||
+        !pproto_emit_u8(entry, OP_LOAD_CONST) ||
+        !pproto_emit_u16(entry, constant)) goto done;
+    for (i = 0U; i < count; i++) {
+        if (!pproto_add_constant(entry, arguments[i], &constant) ||
+            !pproto_emit_u8(entry, OP_LOAD_CONST) ||
+            !pproto_emit_u16(entry, constant)) goto done;
+    }
+    if (!pproto_emit_u8(entry, OP_CALL_VALUE) ||
+        !pproto_emit_u8(entry, (uint8_t)count) ||
+        !pproto_emit_u8(entry, OP_HALT)) goto done;
+    entry->max_stack = (uint16_t)(count + 2U);
+    module_count = state->repl_module_count +
+                   (state->module == NULL ? 0U : 1U);
+    if (module_count != 0U) {
+        modules = pphp_alloc(module_count * sizeof(*modules));
+        if (modules == NULL) goto done;
+        for (i = 0U; i < state->repl_module_count; i++) {
+            modules[i] = state->repl_modules[i];
+        }
+        if (state->module != NULL) {
+            modules[module_count - 1U] = (pmodule *)state->module;
+        }
+    }
+    child = *state;
+    child.stack_count = 0U;
+    child.frame_count = 0U;
+    child.module = NULL;
+    child.repl_modules = modules;
+    child.repl_module_count = module_count;
+    child.repl_module_capacity = module_count;
+    child.repl_mode = 1;
+    child.capture_halt_result = 1;
+    child.halt_result = result;
+    child.exit_requested = 0;
+    child.exit_status = 0;
+    child.error[0] = '\0';
+    child.error_line = 0U;
+    status = pphp_vm_execute(&child, &module);
+    if (status != PPHP_OK) {
+        (void)snprintf(state->error, sizeof(state->error), "%s", child.error);
+        state->error_line = child.error_line;
+        pv_release(*result);
+        *result = pv_null();
+    }
+    if (child.exit_requested) {
+        state->exit_requested = 1;
+        state->exit_status = child.exit_status;
+    }
+done:
+    pphp_free(modules);
+    pmodule_destroy(&module);
+    return status == PPHP_OK;
 }

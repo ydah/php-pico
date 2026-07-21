@@ -76,6 +76,7 @@ typedef enum pphp_opcode {
     OP_FE_NEXT = 0x67,
     OP_FE_FREE = 0x68,
     OP_ARR_EXTEND = 0x69,
+    OP_ARR_SEPARATE = 0x6a,
     OP_NEW_OBJ = 0x70,
     OP_PROP_GET = 0x71,
     OP_PROP_SET = 0x72,

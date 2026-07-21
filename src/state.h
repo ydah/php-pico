@@ -51,6 +51,8 @@ struct pphp_state {
     int exit_requested;
     int exit_status;
     int repl_mode;
+    int capture_halt_result;
+    pvalue *halt_result;
     char error[256];
 };
 

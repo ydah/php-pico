@@ -901,6 +901,30 @@ static int argument_list_has_spread(const pc_ast *argument) {
     return 0;
 }
 
+static int token_is_array_mutator(pc_token token) {
+    static const char names[] =
+        "array_pop\0array_push\0array_shift\0array_unshift\0"
+        "arsort\0asort\0krsort\0ksort\0rsort\0sort\0"
+        "uasort\0uksort\0usort\0";
+    const char *name = names;
+    while (*name != '\0') {
+        size_t length = strlen(name);
+        size_t i;
+        int equal = length == token.length;
+        for (i = 0U; equal && i < length; i++) {
+            unsigned char left = (unsigned char)token.start[i];
+            unsigned char right = (unsigned char)name[i];
+            if (left >= 'A' && left <= 'Z') {
+                left = (unsigned char)(left + ('a' - 'A'));
+            }
+            equal = left == right;
+        }
+        if (equal) return 1;
+        name += length + 1U;
+    }
+    return 0;
+}
+
 static void compile_argument_array(generator *gen, const pc_ast *argument,
                                    size_t count, uint32_t line) {
     emit_byte(gen, OP_NEW_ARRAY, line);
@@ -1129,6 +1153,7 @@ static void compile_expression(generator *gen, const pc_ast *node) {
             pvalue name_value;
             uint16_t name_index;
             int has_spread = argument_list_has_spread(argument);
+            int separated_array = 0;
             if (node->as.call.count > 31U) {
                 fail(gen, node->line, "a call may have at most 31 arguments");
                 break;
@@ -1170,6 +1195,25 @@ static void compile_expression(generator *gen, const pc_ast *node) {
                 }
                 break;
             }
+            if (!has_spread && argument != NULL &&
+                token_is_array_mutator(
+                    node->as.call.callee->as.literal.token)) {
+                uint8_t slot;
+                if (argument->kind != AST_VARIABLE ||
+                    !variable_slot(gen, argument->as.literal.token, &slot)) {
+                    fail(gen, node->line,
+                         "array mutation target must be a variable");
+                    break;
+                }
+                emit_byte(gen, OP_LOAD_LOCAL, node->line);
+                emit_byte(gen, slot, node->line);
+                emit_byte(gen, OP_ARR_SEPARATE, node->line);
+                emit_byte(gen, OP_DUP, node->line);
+                emit_byte(gen, OP_STORE_LOCAL, node->line);
+                emit_byte(gen, slot, node->line);
+                argument = argument->next;
+                separated_array = 1;
+            }
             if (has_spread) {
                 compile_argument_array(gen, argument, node->as.call.count,
                                        node->line);
@@ -1195,6 +1239,7 @@ static void compile_expression(generator *gen, const pc_ast *node) {
             if (!has_spread) {
                 emit_byte(gen, (uint8_t)node->as.call.count, node->line);
             }
+            (void)separated_array;
             break;
         }
         case AST_MEMBER: {

@@ -42,7 +42,12 @@ static int initialize_constants(pphp_state *state) {
          set_constant(state, "INF", pv_float((pphp_float)INFINITY)) &&
          set_constant(state, "PHP_EOL", newline_value) &&
          set_constant(state, "JSON_PRETTY_PRINT", pv_int(128)) &&
-         set_constant(state, "FILE_APPEND", pv_int(8));
+         set_constant(state, "FILE_APPEND", pv_int(8)) &&
+         set_constant(state, "ARRAY_FILTER_USE_BOTH", pv_int(1)) &&
+         set_constant(state, "ARRAY_FILTER_USE_KEY", pv_int(2)) &&
+         set_constant(state, "SORT_REGULAR", pv_int(0)) &&
+         set_constant(state, "SORT_NUMERIC", pv_int(1)) &&
+         set_constant(state, "SORT_STRING", pv_int(2));
     pv_release(newline_value);
     return ok;
 }

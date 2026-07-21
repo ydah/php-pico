@@ -605,8 +605,9 @@ static int call_str_split(pphp_state *state, const pstring *name,
     return 1;
 }
 
-static int call_replace(pphp_state *state, const pstring *name,
-                        const pvalue *arguments, size_t count, pvalue *result) {
+static int replace_scalar(pphp_state *state, const pstring *name,
+                          pvalue search_value, pvalue replacement_value,
+                          pvalue subject_value, pvalue *result) {
     pstring *search;
     pstring *replacement;
     pstring *subject;
@@ -616,10 +617,9 @@ static int call_replace(pphp_state *state, const pstring *name,
     size_t length;
     char *bytes;
     size_t output = 0U;
-    if (count != 3U) return fail_arguments(state, name);
-    search = argument_string(state, name, arguments[0]);
-    replacement = argument_string(state, name, arguments[1]);
-    subject = argument_string(state, name, arguments[2]);
+    search = argument_string(state, name, search_value);
+    replacement = argument_string(state, name, replacement_value);
+    subject = argument_string(state, name, subject_value);
     if (search == NULL || replacement == NULL || subject == NULL) {
         ps_destroy(search);
         ps_destroy(replacement);
@@ -672,6 +672,104 @@ static int call_replace(pphp_state *state, const pstring *name,
         ps_destroy(subject);
         return handled;
     }
+}
+
+static int replace_value(pphp_state *state, const pstring *name,
+                         pvalue search, pvalue replacement, pvalue subject,
+                         pvalue *result) {
+    if (subject.type == PT_ARRAY) {
+        const parray *source = (const parray *)subject.as.gc;
+        parray *output = pa_new(source->size);
+        size_t position = 0U;
+        if (output == NULL) goto replace_oom;
+        while (position < source->used) {
+            pvalue key;
+            pvalue item;
+            pvalue replaced = pv_null();
+            size_t next;
+            if (!pa_entry_at(source, position, &key, &item, &next)) break;
+            if (!replace_value(state, name, search, replacement, item,
+                               &replaced) ||
+                !pa_set(output, key, replaced)) {
+                pv_release(key);
+                pv_release(item);
+                pv_release(replaced);
+                pv_release(pv_heap(PT_ARRAY, &output->header));
+                if (state->error[0] == '\0') goto replace_oom;
+                return 0;
+            }
+            pv_release(key);
+            pv_release(item);
+            pv_release(replaced);
+            position = next;
+        }
+        *result = pv_heap(PT_ARRAY, &output->header);
+        return 1;
+    }
+    if (search.type == PT_ARRAY) {
+        const parray *searches = (const parray *)search.as.gc;
+        const parray *replacements = replacement.type == PT_ARRAY
+                                         ? (const parray *)replacement.as.gc
+                                         : NULL;
+        size_t position = 0U;
+        pphp_int replacement_index = 0;
+        pvalue current = subject;
+        pv_retain(current);
+        while (position < searches->used) {
+            pvalue key;
+            pvalue needle;
+            pvalue replacement_item = replacement;
+            pvalue replaced = pv_null();
+            size_t next;
+            if (!pa_entry_at(searches, position, &key, &needle, &next)) break;
+            if (replacements != NULL &&
+                !pa_get(replacements, pv_int(replacement_index),
+                        &replacement_item)) {
+                replacement_item = pv_null();
+            } else if (replacements == NULL) {
+                pv_retain(replacement_item);
+            }
+            if (replace_scalar(state, name, needle, replacement_item,
+                               current, &replaced) <= 0) {
+                pv_release(key);
+                pv_release(needle);
+                pv_release(replacement_item);
+                pv_release(current);
+                return 0;
+            }
+            pv_release(key);
+            pv_release(needle);
+            pv_release(replacement_item);
+            pv_release(current);
+            current = replaced;
+            replacement_index++;
+            position = next;
+        }
+        if (searches->size == 0U) {
+            pstring *string = pv_to_string(current);
+            pv_release(current);
+            if (string == NULL) return 0;
+            current = pv_heap(PT_STRING, &string->header);
+        }
+        *result = current;
+        return 1;
+    }
+    if (replacement.type == PT_ARRAY) return 0;
+    return replace_scalar(state, name, search, replacement, subject, result) > 0;
+replace_oom:
+    pphp_runtime_error(state, 0U, "out of memory replacing string array");
+    return 0;
+}
+
+static int call_replace(pphp_state *state, const pstring *name,
+                        const pvalue *arguments, size_t count, pvalue *result) {
+    if (count != 3U ||
+        !replace_value(state, name, arguments[0], arguments[1], arguments[2],
+                       result)) {
+        if (state->error[0] == '\0') return fail_arguments(state, name);
+        return -1;
+    }
+    return 1;
 }
 
 static int call_str_pad(pphp_state *state, const pstring *name,

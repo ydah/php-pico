@@ -725,6 +725,7 @@ const char *pphp_opcode_name(uint8_t opcode) {
         case OP_FE_NEXT: return "FE_NEXT";
         case OP_FE_FREE: return "FE_FREE";
         case OP_ARR_EXTEND: return "ARR_EXTEND";
+        case OP_ARR_SEPARATE: return "ARR_SEPARATE";
         case OP_NEW_OBJ: return "NEW_OBJ";
         case OP_PROP_GET: return "PROP_GET";
         case OP_PROP_SET: return "PROP_SET";

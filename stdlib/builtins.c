@@ -20,19 +20,19 @@ static int name_is(const pstring *name, const char *expected) {
 int pphp_builtin_exists(const pstring *name) {
     static const char names[] =
         "abs\0acos\0array_combine\0array_fill\0array_fill_keys\0array_flip\0"
-        "array_is_list\0array_key_exists\0array_keys\0array_merge\0array_product\0"
-        "array_reverse\0array_search\0array_slice\0array_sum\0array_values\0"
+        "array_filter\0array_is_list\0array_key_exists\0array_keys\0array_map\0array_merge\0array_pop\0array_product\0array_push\0array_reduce\0"
+        "array_reverse\0array_search\0array_shift\0array_slice\0array_sum\0array_unshift\0array_values\0arsort\0asort\0"
         "asin\0atan\0atan2\0bin2hex\0bindec\0boolval\0ceil\0chr\0class_exists\0"
         "constant\0cos\0count\0date\0decbin\0dechex\0decoct\0define\0defined\0die\0error_log\0exit\0exp\0"
         "explode\0fdiv\0floatval\0floor\0fmod\0function_exists\0get_class\0"
         "gc_collect_cycles\0gettype\0hex2bin\0hexdec\0hrtime\0implode\0in_array\0intdiv\0intval\0is_array\0"
         "is_bool\0is_callable\0is_float\0is_int\0is_null\0is_numeric\0is_object\0"
         "is_string\0join\0json_decode\0json_encode\0key_exists\0lcfirst\0log\0log10\0ltrim\0max\0"
-        "memory_get_usage\0method_exists\0microtime\0min\0mt_rand\0octdec\0ord\0pi\0pow\0print_r\0printf\0rand\0random_int\0range\0"
+        "krsort\0ksort\0memory_get_usage\0method_exists\0microtime\0min\0mt_rand\0octdec\0ord\0pi\0pow\0print_r\0printf\0rand\0random_int\0range\0rsort\0"
         "round\0rtrim\0sin\0sqrt\0str_contains\0str_ends_with\0str_pad\0"
         "str_repeat\0str_replace\0str_split\0str_starts_with\0strcasecmp\0strcmp\0"
         "strlen\0strncmp\0strpos\0strrev\0strrpos\0strtolower\0strtoupper\0"
-        "srand\0strval\0substr\0sprintf\0tan\0time\0trim\0ucfirst\0usleep\0var_dump\0sleep\0";
+        "sort\0srand\0strval\0substr\0sprintf\0tan\0time\0trim\0uasort\0ucfirst\0uksort\0usleep\0usort\0var_dump\0sleep\0";
     const char *candidate = names;
     while (*candidate != '\0') {
         if (name_is(name, candidate)) return 1;

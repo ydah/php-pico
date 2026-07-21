@@ -3,7 +3,8 @@
 #include "pphp/pphp.h"
 
 pclosure *pclosure_new(const pproto *proto, const pmodule *module,
-                       const pvalue *captures, size_t capture_count) {
+                       struct pclass *called_scope, const pvalue *captures,
+                       size_t capture_count) {
     pclosure *closure;
     size_t i;
     if (proto == NULL || capture_count > UINT8_MAX ||
@@ -15,6 +16,7 @@ pclosure *pclosure_new(const pproto *proto, const pmodule *module,
     closure->header.flags = 0U;
     closure->proto = proto;
     closure->module = module;
+    closure->called_scope = called_scope;
     closure->capture_count = (uint8_t)capture_count;
     for (i = 0U; i < capture_count; i++) {
         closure->captures[i] = captures[i];

@@ -726,6 +726,38 @@ TEST(time_random_and_system_builtins_use_portable_runtime_services) {
     pphp_close(state);
 }
 
+TEST(array_mutators_callbacks_and_sorts_preserve_cow_semantics) {
+    const char *source =
+        "$original = [3, 1, 2]; $work = $original; sort($work);"
+        "echo implode(',', $original), ':', implode(',', $work), ':';"
+        "echo array_push($work, 4, 5), ':', array_pop($work), ':',"
+        " array_shift($work), ':', array_unshift($work, 9), ':',"
+        " implode(',', $work), ':';"
+        "$mapped = array_map(fn($v) => $v * 2, $work);"
+        "$filtered = array_filter($mapped, fn($v) => $v % 4 === 0);"
+        "echo implode(',', $mapped), ':', implode(',', $filtered), ':';"
+        "function total($carry, $value) { return $carry + $value; }"
+        "echo array_reduce($work, 'TOTAL', 0), ':';"
+        "$descending = [1, 3, 2];"
+        "usort($descending, fn($left, $right) => $right <=> $left);"
+        "echo implode(',', $descending);";
+    output_buffer output;
+    ASSERT_EQ(PPHP_OK, execute(source, &output, NULL, 0U));
+    ASSERT_STR("3,1,2:1,2,3:5:5:1:4:9,2,3,4:18,4,6,8:4,8:18:3,2,1",
+               output.bytes);
+}
+
+TEST(str_replace_accepts_array_search_replacement_and_subject_values) {
+    const char *source =
+        "$result = str_replace(['red', 'green', 'blue'],"
+        " ['R', 'G'], ['first' => 'red green blue', 'blue-red']);"
+        "echo $result['first'], ':', $result[0], ':',"
+        " str_replace(['a', 'b'], '-', 'abc');";
+    output_buffer output;
+    ASSERT_EQ(PPHP_OK, execute(source, &output, NULL, 0U));
+    ASSERT_STR("R G :-R:--c", output.bytes);
+}
+
 int main(void) {
     static const test_case tests[] = {
         {"arithmetic VM", arithmetic_runs_through_compiler_and_vm},
@@ -771,7 +803,9 @@ int main(void) {
         {"constant and reflection builtins", constant_and_reflection_builtins_share_runtime_registries},
         {"formatting builtins", formatting_builtins_cover_width_precision_bases_and_print_r},
         {"JSON builtins", json_builtins_round_trip_ordered_arrays_and_pretty_output},
-        {"time, random, and system builtins", time_random_and_system_builtins_use_portable_runtime_services}
+        {"time, random, and system builtins", time_random_and_system_builtins_use_portable_runtime_services},
+        {"array mutation, callbacks, and sorts", array_mutators_callbacks_and_sorts_preserve_cow_semantics},
+        {"array string replacement", str_replace_accepts_array_search_replacement_and_subject_values}
     };
     return run_tests(tests, sizeof(tests) / sizeof(tests[0]));
 }

@@ -2,6 +2,7 @@
 
 #include "parray.h"
 #include "value_ops.h"
+#include "vm.h"
 
 #include <limits.h>
 #include <string.h>
@@ -556,9 +557,448 @@ static int call_array_is_list(pphp_state *state, const pstring *name,
     return 1;
 }
 
+static void release_array_storage(parray *array) {
+    size_t i;
+    for (i = 0U; i < array->used; i++) {
+        if (array->entries[i].key.type != PT_NULL) {
+            pv_release(array->entries[i].key);
+            pv_release(array->entries[i].value);
+        }
+    }
+    pphp_free(array->entries);
+    pphp_free(array->buckets);
+}
+
+static void replace_array_storage(parray *target, parray *replacement) {
+    uint16_t references = target->header.refcnt;
+    release_array_storage(target);
+    target->header.flags = replacement->header.flags;
+    target->size = replacement->size;
+    target->used = replacement->used;
+    target->capacity = replacement->capacity;
+    target->bucket_count = replacement->bucket_count;
+    target->next_index = replacement->next_index;
+    target->entries = replacement->entries;
+    target->buckets = replacement->buckets;
+    target->header.refcnt = references;
+    replacement->entries = NULL;
+    replacement->buckets = NULL;
+    replacement->size = 0U;
+    replacement->used = 0U;
+    pphp_free(replacement);
+}
+
+static int append_source_entry(pphp_state *state, parray *output, pvalue key,
+                               pvalue value, int reindex_integer) {
+    int ok = reindex_integer && key.type == PT_INT
+                 ? pa_push(output, value) : pa_set(output, key, value);
+    if (!ok) pphp_runtime_error(state, 0U, "out of memory rebuilding array");
+    return ok;
+}
+
+static int call_array_mutator(pphp_state *state, const pstring *name,
+                              const pvalue *arguments, size_t count,
+                              pvalue *result) {
+    parray *array;
+    if (count == 0U || arguments[0].type != PT_ARRAY) {
+        return fail_arguments(state, name);
+    }
+    array = (parray *)arguments[0].as.gc;
+    if (name_is(name, "array_push")) {
+        size_t i;
+        if (count < 2U) return fail_arguments(state, name);
+        for (i = 1U; i < count; i++) {
+            if (!pa_push(array, arguments[i])) {
+                pphp_runtime_error(state, 0U, "out of memory pushing array value");
+                return -1;
+            }
+        }
+        *result = pv_int((pphp_int)array->size);
+        return 1;
+    }
+    if (name_is(name, "array_unshift")) {
+        parray *replacement;
+        size_t i;
+        size_t position = 0U;
+        if (count < 2U) return fail_arguments(state, name);
+        replacement = pa_new(array->size + count - 1U);
+        if (replacement == NULL) goto mutation_oom;
+        for (i = 1U; i < count; i++) {
+            if (!pa_push(replacement, arguments[i])) goto rebuild_failed;
+        }
+        while (position < array->used) {
+            pvalue key;
+            pvalue value;
+            size_t next;
+            if (!pa_entry_at(array, position, &key, &value, &next)) break;
+            if (!append_source_entry(state, replacement, key, value, 1)) {
+                pv_release(key);
+                pv_release(value);
+                goto rebuild_failed;
+            }
+            pv_release(key);
+            pv_release(value);
+            position = next;
+        }
+        replace_array_storage(array, replacement);
+        *result = pv_int((pphp_int)array->size);
+        return 1;
+rebuild_failed:
+        pv_release(pv_heap(PT_ARRAY, &replacement->header));
+        return -1;
+    }
+    if (name_is(name, "array_pop") || name_is(name, "array_shift")) {
+        int shift = name_is(name, "array_shift");
+        parray *replacement;
+        size_t position = 0U;
+        size_t selected_position = SIZE_MAX;
+        pvalue selected = pv_null();
+        if (count != 1U) return fail_arguments(state, name);
+        while (position < array->used) {
+            pvalue key;
+            pvalue value;
+            size_t next;
+            if (!pa_entry_at(array, position, &key, &value, &next)) break;
+            if (selected_position == SIZE_MAX || !shift) {
+                pv_release(selected);
+                selected = value;
+                selected_position = position;
+            } else {
+                pv_release(value);
+            }
+            pv_release(key);
+            if (shift) break;
+            position = next;
+        }
+        if (selected_position == SIZE_MAX) {
+            *result = pv_null();
+            return 1;
+        }
+        replacement = pa_new(array->size - 1U);
+        if (replacement == NULL) {
+            pv_release(selected);
+            goto mutation_oom;
+        }
+        position = 0U;
+        while (position < array->used) {
+            pvalue key;
+            pvalue value;
+            size_t next;
+            if (!pa_entry_at(array, position, &key, &value, &next)) break;
+            if (position != selected_position &&
+                !append_source_entry(state, replacement, key, value, shift)) {
+                pv_release(key);
+                pv_release(value);
+                pv_release(selected);
+                pv_release(pv_heap(PT_ARRAY, &replacement->header));
+                return -1;
+            }
+            pv_release(key);
+            pv_release(value);
+            position = next;
+        }
+        replace_array_storage(array, replacement);
+        *result = selected;
+        return 1;
+    }
+    return 0;
+mutation_oom:
+    pphp_runtime_error(state, 0U, "out of memory mutating array");
+    return -1;
+}
+
+static int invoke_callback(pphp_state *state, pvalue callback,
+                           const pvalue *arguments, size_t count,
+                           pvalue *result) {
+    if (pphp_vm_invoke(state, callback, arguments, count, result)) return 1;
+    if (state->error[0] == '\0') {
+        pphp_runtime_error(state, 0U, "array callback invocation failed");
+    }
+    return 0;
+}
+
+static int call_array_map(pphp_state *state, const pstring *name,
+                          const pvalue *arguments, size_t count,
+                          pvalue *result) {
+    const parray *source;
+    parray *output;
+    size_t position = 0U;
+    if (count != 2U || arguments[1].type != PT_ARRAY) {
+        return fail_arguments(state, name);
+    }
+    source = (const parray *)arguments[1].as.gc;
+    output = pa_new(source->size);
+    if (output == NULL) goto callback_oom;
+    while (position < source->used) {
+        pvalue key;
+        pvalue value;
+        pvalue mapped = pv_null();
+        size_t next;
+        if (!pa_entry_at(source, position, &key, &value, &next)) break;
+        if (!invoke_callback(state, arguments[0], &value, 1U, &mapped) ||
+            !pa_set(output, key, mapped)) {
+            pv_release(key);
+            pv_release(value);
+            pv_release(mapped);
+            pv_release(pv_heap(PT_ARRAY, &output->header));
+            if (state->error[0] == '\0') goto callback_oom;
+            return -1;
+        }
+        pv_release(key);
+        pv_release(value);
+        pv_release(mapped);
+        position = next;
+    }
+    *result = pv_heap(PT_ARRAY, &output->header);
+    return 1;
+callback_oom:
+    pphp_runtime_error(state, 0U, "out of memory creating callback result");
+    return -1;
+}
+
+static int call_array_filter(pphp_state *state, const pstring *name,
+                             const pvalue *arguments, size_t count,
+                             pvalue *result) {
+    const parray *source;
+    parray *output;
+    size_t position = 0U;
+    int mode = 0;
+    int has_callback;
+    if (count < 1U || count > 3U || arguments[0].type != PT_ARRAY ||
+        (count == 3U && arguments[2].type != PT_INT)) {
+        return fail_arguments(state, name);
+    }
+    has_callback = count >= 2U && arguments[1].type != PT_NULL;
+    if (count == 3U) mode = arguments[2].as.i;
+    if (mode < 0 || mode > 2) return fail_arguments(state, name);
+    source = (const parray *)arguments[0].as.gc;
+    output = pa_new(source->size);
+    if (output == NULL) goto filter_oom;
+    while (position < source->used) {
+        pvalue key;
+        pvalue value;
+        pvalue callback_result = pv_null();
+        size_t next;
+        int keep;
+        if (!pa_entry_at(source, position, &key, &value, &next)) break;
+        if (!has_callback) {
+            keep = pv_is_truthy(value);
+        } else if (mode == 1) {
+            pvalue callback_arguments[2] = {value, key};
+            if (!invoke_callback(state, arguments[1], callback_arguments, 2U,
+                                 &callback_result)) goto filter_failed;
+            keep = pv_is_truthy(callback_result);
+        } else {
+            pvalue callback_argument = mode == 2 ? key : value;
+            if (!invoke_callback(state, arguments[1], &callback_argument, 1U,
+                                 &callback_result)) goto filter_failed;
+            keep = pv_is_truthy(callback_result);
+        }
+        if (keep && !pa_set(output, key, value)) goto filter_failed;
+        pv_release(callback_result);
+        pv_release(key);
+        pv_release(value);
+        position = next;
+        continue;
+filter_failed:
+        pv_release(callback_result);
+        pv_release(key);
+        pv_release(value);
+        pv_release(pv_heap(PT_ARRAY, &output->header));
+        if (state->error[0] == '\0') goto filter_oom;
+        return -1;
+    }
+    *result = pv_heap(PT_ARRAY, &output->header);
+    return 1;
+filter_oom:
+    pphp_runtime_error(state, 0U, "out of memory filtering array");
+    return -1;
+}
+
+static int call_array_reduce(pphp_state *state, const pstring *name,
+                             const pvalue *arguments, size_t count,
+                             pvalue *result) {
+    const parray *source;
+    size_t position = 0U;
+    pvalue carry;
+    if (count < 2U || count > 3U || arguments[0].type != PT_ARRAY) {
+        return fail_arguments(state, name);
+    }
+    source = (const parray *)arguments[0].as.gc;
+    carry = count == 3U ? arguments[2] : pv_null();
+    pv_retain(carry);
+    while (position < source->used) {
+        pvalue key;
+        pvalue value;
+        pvalue next_carry = pv_null();
+        pvalue callback_arguments[2];
+        size_t next;
+        if (!pa_entry_at(source, position, &key, &value, &next)) break;
+        callback_arguments[0] = carry;
+        callback_arguments[1] = value;
+        if (!invoke_callback(state, arguments[1], callback_arguments, 2U,
+                             &next_carry)) {
+            pv_release(key);
+            pv_release(value);
+            pv_release(carry);
+            return -1;
+        }
+        pv_release(key);
+        pv_release(value);
+        pv_release(carry);
+        carry = next_carry;
+        position = next;
+    }
+    *result = carry;
+    return 1;
+}
+
+typedef struct sortable_entry {
+    pvalue key;
+    pvalue value;
+} sortable_entry;
+
+static void release_sortable(sortable_entry *entries, size_t count) {
+    size_t i;
+    for (i = 0U; i < count; i++) {
+        pv_release(entries[i].key);
+        pv_release(entries[i].value);
+    }
+    pphp_free(entries);
+}
+
+static int compare_sortable(pphp_state *state, const sortable_entry *left,
+                            const sortable_entry *right, int keys,
+                            int descending, int user, pvalue callback,
+                            int *compared) {
+    const char *error = NULL;
+    if (user) {
+        pvalue callback_arguments[2];
+        pvalue callback_result = pv_null();
+        pphp_float number;
+        int integer;
+        callback_arguments[0] = keys ? left->key : left->value;
+        callback_arguments[1] = keys ? right->key : right->value;
+        if (!invoke_callback(state, callback, callback_arguments, 2U,
+                             &callback_result) ||
+            !pv_to_number(callback_result, &number, &integer)) {
+            pv_release(callback_result);
+            if (state->error[0] == '\0') {
+                pphp_runtime_error(state, 0U,
+                                   "sort callback must return a number");
+            }
+            return 0;
+        }
+        *compared = number < 0 ? -1 : (number > 0 ? 1 : 0);
+        pv_release(callback_result);
+    } else if (!pv_compare(keys ? left->key : left->value,
+                           keys ? right->key : right->value, 0,
+                           compared, &error)) {
+        pphp_runtime_error(state, 0U, "%s",
+                           error == NULL ? "array comparison failed" : error);
+        return 0;
+    }
+    if (descending) *compared = -*compared;
+    return 1;
+}
+
+static int call_array_sort(pphp_state *state, const pstring *name,
+                           const pvalue *arguments, size_t count,
+                           pvalue *result) {
+    parray *array;
+    sortable_entry *entries;
+    size_t position = 0U;
+    size_t used = 0U;
+    size_t i;
+    int user = name_is(name, "usort") || name_is(name, "uasort") ||
+               name_is(name, "uksort");
+    int keys = name_is(name, "ksort") || name_is(name, "krsort") ||
+               name_is(name, "uksort");
+    int preserve = keys || name_is(name, "asort") || name_is(name, "arsort") ||
+                   name_is(name, "uasort");
+    int descending = name_is(name, "rsort") || name_is(name, "arsort") ||
+                     name_is(name, "krsort");
+    pvalue callback = pv_null();
+    parray *replacement;
+    if ((!user && (count < 1U || count > 2U)) ||
+        (user && count != 2U) || arguments[0].type != PT_ARRAY ||
+        (!user && count == 2U && arguments[1].type != PT_INT)) {
+        return fail_arguments(state, name);
+    }
+    if (user) callback = arguments[1];
+    array = (parray *)arguments[0].as.gc;
+    entries = array->size == 0U
+                  ? NULL : pphp_alloc(array->size * sizeof(*entries));
+    if (array->size != 0U && entries == NULL) goto sort_oom;
+    while (position < array->used) {
+        size_t next;
+        if (!pa_entry_at(array, position, &entries[used].key,
+                         &entries[used].value, &next)) break;
+        used++;
+        position = next;
+    }
+    for (i = 1U; i < used; i++) {
+        sortable_entry current = entries[i];
+        size_t insert = i;
+        while (insert > 0U) {
+            int compared;
+            if (!compare_sortable(state, &entries[insert - 1U], &current,
+                                  keys, descending, user, callback, &compared)) {
+                release_sortable(entries, used);
+                return -1;
+            }
+            if (compared <= 0) break;
+            entries[insert] = entries[insert - 1U];
+            insert--;
+        }
+        entries[insert] = current;
+    }
+    replacement = pa_new(used);
+    if (replacement == NULL) {
+        release_sortable(entries, used);
+        goto sort_oom;
+    }
+    for (i = 0U; i < used; i++) {
+        int ok = preserve ? pa_set(replacement, entries[i].key, entries[i].value)
+                          : pa_push(replacement, entries[i].value);
+        if (!ok) {
+            pv_release(pv_heap(PT_ARRAY, &replacement->header));
+            release_sortable(entries, used);
+            goto sort_oom;
+        }
+    }
+    replace_array_storage(array, replacement);
+    release_sortable(entries, used);
+    *result = pv_bool(1);
+    return 1;
+sort_oom:
+    pphp_runtime_error(state, 0U, "out of memory sorting array");
+    return -1;
+}
+
 int pphp_call_array_builtin(pphp_state *state, const pstring *name,
                             const pvalue *arguments, size_t count,
                             pvalue *result) {
+    if (name_is(name, "array_push") || name_is(name, "array_pop") ||
+        name_is(name, "array_shift") || name_is(name, "array_unshift")) {
+        return call_array_mutator(state, name, arguments, count, result);
+    }
+    if (name_is(name, "array_map")) {
+        return call_array_map(state, name, arguments, count, result);
+    }
+    if (name_is(name, "array_filter")) {
+        return call_array_filter(state, name, arguments, count, result);
+    }
+    if (name_is(name, "array_reduce")) {
+        return call_array_reduce(state, name, arguments, count, result);
+    }
+    if (name_is(name, "sort") || name_is(name, "rsort") ||
+        name_is(name, "usort") || name_is(name, "asort") ||
+        name_is(name, "arsort") || name_is(name, "ksort") ||
+        name_is(name, "krsort") || name_is(name, "uasort") ||
+        name_is(name, "uksort")) {
+        return call_array_sort(state, name, arguments, count, result);
+    }
     if (name_is(name, "in_array") || name_is(name, "array_search")) {
         return call_array_search(state, name, arguments, count, result);
     }
