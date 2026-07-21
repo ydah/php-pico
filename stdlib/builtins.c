@@ -14,6 +14,142 @@ static int name_is(const pstring *name, const char *expected) {
     return ps_equal_bytes(name, expected, strlen(expected));
 }
 
+int pphp_builtin_exists(const pstring *name) {
+    static const char names[] =
+        "abs\0acos\0array_combine\0array_fill\0array_fill_keys\0array_flip\0"
+        "array_is_list\0array_key_exists\0array_keys\0array_merge\0array_product\0"
+        "array_reverse\0array_search\0array_slice\0array_sum\0array_values\0"
+        "asin\0atan\0atan2\0bin2hex\0bindec\0boolval\0ceil\0chr\0class_exists\0"
+        "constant\0cos\0count\0decbin\0dechex\0decoct\0define\0defined\0exp\0"
+        "explode\0fdiv\0floatval\0floor\0fmod\0function_exists\0get_class\0"
+        "gettype\0hex2bin\0hexdec\0implode\0in_array\0intdiv\0intval\0is_array\0"
+        "is_bool\0is_callable\0is_float\0is_int\0is_null\0is_numeric\0is_object\0"
+        "is_string\0join\0key_exists\0lcfirst\0log\0log10\0ltrim\0max\0"
+        "memory_get_usage\0method_exists\0min\0octdec\0ord\0pi\0pow\0range\0"
+        "round\0rtrim\0sin\0sqrt\0str_contains\0str_ends_with\0str_pad\0"
+        "str_repeat\0str_replace\0str_split\0str_starts_with\0strcasecmp\0strcmp\0"
+        "strlen\0strncmp\0strpos\0strrev\0strrpos\0strtolower\0strtoupper\0"
+        "strval\0substr\0tan\0trim\0ucfirst\0var_dump\0";
+    const char *candidate = names;
+    while (*candidate != '\0') {
+        if (name_is(name, candidate)) return 1;
+        candidate += strlen(candidate) + 1U;
+    }
+    return 0;
+}
+
+static int call_reflection_builtin(pphp_state *state, const pstring *name,
+                                   const pvalue *arguments, size_t count,
+                                   pvalue *result) {
+    const pstring *subject;
+    if (name_is(name, "define")) {
+        pvalue existing = pv_null();
+        if (count < 2U || count > 3U || arguments[0].type != PT_STRING) {
+            pphp_runtime_error(state, 0U,
+                               "define() expects a string name and a value");
+            return -1;
+        }
+        subject = (const pstring *)arguments[0].as.gc;
+        if (pa_get(state->constants, arguments[0], &existing)) {
+            pv_release(existing);
+            *result = pv_bool(0);
+            return 1;
+        }
+        if (!pa_set(state->constants, arguments[0], arguments[1])) {
+            pphp_runtime_error(state, 0U, "out of memory defining constant");
+            return -1;
+        }
+        (void)subject;
+        *result = pv_bool(1);
+        return 1;
+    }
+    if (name_is(name, "defined") || name_is(name, "constant")) {
+        pvalue value = pv_null();
+        int found;
+        if (count != 1U || arguments[0].type != PT_STRING) {
+            pphp_runtime_error(state, 0U,
+                               "%.*s() expects one string name",
+                               (int)name->length, name->data);
+            return -1;
+        }
+        found = pa_get(state->constants, arguments[0], &value);
+        if (name_is(name, "defined")) {
+            pv_release(value);
+            *result = pv_bool(found);
+            return 1;
+        }
+        if (!found) {
+            pphp_runtime_error(state, 0U, "undefined constant %.*s",
+                               (int)((const pstring *)arguments[0].as.gc)->length,
+                               ((const pstring *)arguments[0].as.gc)->data);
+            return -1;
+        }
+        *result = value;
+        return 1;
+    }
+    if (name_is(name, "function_exists")) {
+        pstring *function_name;
+        if (count != 1U || arguments[0].type != PT_STRING) {
+            pphp_runtime_error(state, 0U,
+                               "function_exists() expects one string name");
+            return -1;
+        }
+        function_name = (pstring *)arguments[0].as.gc;
+        *result = pv_bool(pphp_builtin_exists(function_name) ||
+                          (state->module != NULL &&
+                           pmodule_find(state->module, function_name) != NULL));
+        return 1;
+    }
+    if (name_is(name, "class_exists")) {
+        if (count < 1U || count > 2U || arguments[0].type != PT_STRING) {
+            pphp_runtime_error(state, 0U,
+                               "class_exists() expects a string class name");
+            return -1;
+        }
+        subject = (const pstring *)arguments[0].as.gc;
+        *result = pv_bool(pphp_find_class(state, subject->data,
+                                          subject->length) != NULL);
+        return 1;
+    }
+    if (name_is(name, "method_exists")) {
+        pclass *class_entry = NULL;
+        const pstring *method_name;
+        if (count != 2U || arguments[1].type != PT_STRING) {
+            pphp_runtime_error(state, 0U,
+                               "method_exists() expects object/class and method name");
+            return -1;
+        }
+        if (arguments[0].type == PT_OBJECT) {
+            class_entry = ((pobject *)arguments[0].as.gc)->class_entry;
+        } else if (arguments[0].type == PT_STRING) {
+            subject = (const pstring *)arguments[0].as.gc;
+            class_entry = pphp_find_class(state, subject->data, subject->length);
+        }
+        method_name = (const pstring *)arguments[1].as.gc;
+        *result = pv_bool(class_entry != NULL &&
+                          pclass_find_method(class_entry, method_name->data,
+                                             method_name->length) != NULL);
+        return 1;
+    }
+    if (name_is(name, "get_class")) {
+        const pstring *class_name;
+        pstring *copy;
+        if (count != 1U || arguments[0].type != PT_OBJECT) {
+            pphp_runtime_error(state, 0U, "get_class() expects one object");
+            return -1;
+        }
+        class_name = ((pobject *)arguments[0].as.gc)->class_entry->name;
+        copy = ps_new(class_name->data, class_name->length);
+        if (copy == NULL) {
+            pphp_runtime_error(state, 0U, "out of memory returning class name");
+            return -1;
+        }
+        *result = pv_heap(PT_STRING, &copy->header);
+        return 1;
+    }
+    return 0;
+}
+
 static void output_integer(pphp_state *state, pphp_int value) {
     char buffer[32];
     int length = snprintf(buffer, sizeof(buffer), "%lld", (long long)value);
@@ -402,7 +538,9 @@ static int call_math_builtin(pphp_state *state, const pstring *name,
 
 int pphp_call_builtin(pphp_state *state, const pstring *name,
                       const pvalue *arguments, size_t count, pvalue *result) {
-    int handled = pphp_call_array_builtin(state, name, arguments, count, result);
+    int handled = call_reflection_builtin(state, name, arguments, count, result);
+    if (handled != 0) return handled;
+    handled = pphp_call_array_builtin(state, name, arguments, count, result);
     if (handled != 0) return handled;
     handled = pphp_call_string_builtin(state, name, arguments, count, result);
     if (handled != 0) return handled;

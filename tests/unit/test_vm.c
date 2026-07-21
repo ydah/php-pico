@@ -629,6 +629,24 @@ TEST(repl_chunks_retain_globals_and_constants_by_name) {
     pphp_close(state);
 }
 
+TEST(constant_and_reflection_builtins_share_runtime_registries) {
+    const char *source =
+        "function reflectedFunction() { return 1; }"
+        "class ReflectedClass { public function work() { return 2; } }"
+        "$object = new ReflectedClass();"
+        "echo (define('DYNAMIC_VALUE', 7) ? 1 : 0), ':',"
+        " (defined('DYNAMIC_VALUE') ? 1 : 0), ':', constant('DYNAMIC_VALUE'), ':',"
+        " (function_exists('strlen') ? 1 : 0),"
+        " (function_exists('reflectedFunction') ? 1 : 0), ':',"
+        " (class_exists('ReflectedClass') ? 1 : 0), ':',"
+        " (method_exists($object, 'work') ? 1 : 0),"
+        " (method_exists('ReflectedClass', 'missing') ? 1 : 0), ':',"
+        " get_class($object);";
+    output_buffer output;
+    ASSERT_EQ(PPHP_OK, execute(source, &output, NULL, 0U));
+    ASSERT_STR("1:1:7:11:1:10:ReflectedClass", output.bytes);
+}
+
 int main(void) {
     static const test_case tests[] = {
         {"arithmetic VM", arithmetic_runs_through_compiler_and_vm},
@@ -669,7 +687,8 @@ int main(void) {
         {"default and variadic parameters", default_and_variadic_parameters_work_for_all_callable_forms},
         {"array and argument unpacking", array_and_argument_unpacking_preserve_evaluation_order},
         {"persistent language bindings", global_static_and_named_constants_use_persistent_storage},
-        {"REPL global persistence", repl_chunks_retain_globals_and_constants_by_name}
+        {"REPL global persistence", repl_chunks_retain_globals_and_constants_by_name},
+        {"constant and reflection builtins", constant_and_reflection_builtins_share_runtime_registries}
     };
     return run_tests(tests, sizeof(tests) / sizeof(tests[0]));
 }
