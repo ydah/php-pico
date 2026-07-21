@@ -504,6 +504,14 @@ TEST(clone_copies_property_slots_and_invokes_clone_hook) {
 
 TEST(type_conversion_and_predicate_builtins_follow_php_values) {
     const char *source =
+        "function callable_fn() {}"
+        "class CallableTarget {"
+        " public static function run() {}"
+        " private static function hidden() {}"
+        " public static function checksHidden() {"
+        "  return is_callable([self::class, 'hidden']);"
+        " }"
+        "}"
         "$callable = fn() => 1;"
         "echo intval('ff', 16), ':', floatval('1.5'), ':',"
         " ((strval(false) === '') ? 1 : 0), ':',"
@@ -512,10 +520,15 @@ TEST(type_conversion_and_predicate_builtins_follow_php_values) {
         " (is_string('x') ? 1 : 0), (is_bool(false) ? 1 : 0),"
         " (is_array([]) ? 1 : 0), (is_object($callable) ? 1 : 0),"
         " (is_null(null) ? 1 : 0), (is_numeric('1.5e2') ? 1 : 0),"
-        " (is_numeric('no') ? 1 : 0), (is_callable($callable) ? 1 : 0);";
+        " (is_numeric('no') ? 1 : 0), (is_callable($callable) ? 1 : 0), ':';"
+        "echo (is_callable('callable_fn') ? 1 : 0),"
+        " (is_callable('missing_callable') ? 1 : 0),"
+        " (is_callable([CallableTarget::class, 'run']) ? 1 : 0),"
+        " (is_callable([CallableTarget::class, 'hidden']) ? 1 : 0),"
+        " (CallableTarget::checksHidden() ? 1 : 0);";
     output_buffer output;
     ASSERT_EQ(PPHP_OK, execute(source, &output, NULL, 0U));
-    ASSERT_STR("255:1.5:1:0:1111111101", output.bytes);
+    ASSERT_STR("255:1.5:1:0:1111111101:10101", output.bytes);
 }
 
 TEST(math_builtins_cover_integer_float_and_collection_forms) {
@@ -860,6 +873,30 @@ TEST(interfaces_and_abstract_final_contracts_are_enforced) {
     ASSERT_TRUE(strstr(error, "cannot define method") != NULL);
 }
 
+TEST(static_property_visibility_is_enforced) {
+    const char *source =
+        "class StaticBase {"
+        " protected static $value = 3; private static $secret = 4;"
+        " public static function secret() { return self::$secret; }"
+        "}"
+        "class StaticChild extends StaticBase {"
+        " public static function read() { return self::$value; }"
+        "}"
+        "echo StaticBase::secret(), ':', StaticChild::read(), ':';"
+        "try { echo StaticBase::$secret; } catch (Error) { echo 'private'; }";
+    output_buffer output;
+    ASSERT_EQ(PPHP_OK, execute(source, &output, NULL, 0U));
+    ASSERT_STR("4:3:private", output.bytes);
+
+    source =
+        "class StaticCase {"
+        " public static $value = 1; public static $Value = 2;"
+        "}"
+        "echo StaticCase::$value, StaticCase::$Value;";
+    ASSERT_EQ(PPHP_OK, execute(source, &output, NULL, 0U));
+    ASSERT_STR("12", output.bytes);
+}
+
 TEST(cycle_collector_reclaims_self_and_mutual_object_cycles) {
     const char *source =
         "class Node { public $next; }"
@@ -898,11 +935,13 @@ TEST(file_builtins_cover_whole_file_stream_and_path_operations) {
         " fseek($file, 0, SEEK_SET), ':', fgets($file), ':',"
         " fread($file, 1), ':', feof($file), ':', fclose($file), ':';"
         "echo rename($path, $moved), ':', file_exists($moved), ':',"
-        " unlink($moved), ':', mkdir($dir), ':', rmdir($dir), ':',"
+        " unlink($moved), ':', mkdir($dir), ':',"
+        " implode(',', scandir($dir)), ':', rmdir($dir), ':',"
         " function_exists('file_get_contents');";
     output_buffer output;
     ASSERT_EQ(PPHP_OK, execute(source, &output, NULL, 0U));
-    ASSERT_STR("3:1:4:abcd:ab:2:0:abcd::1:1:1:1:1:1:1:1", output.bytes);
+    ASSERT_STR("3:1:4:abcd:ab:2:0:abcd::1:1:1:1:1:1:.,..:1:1",
+               output.bytes);
 }
 
 TEST(include_once_loads_definitions_and_require_reports_missing_files) {
@@ -1068,6 +1107,7 @@ int main(void) {
         {"array string replacement", str_replace_accepts_array_search_replacement_and_subject_values},
         {"static and magic class features", static_class_members_promotion_and_magic_methods_execute},
         {"interface, abstract, and final contracts", interfaces_and_abstract_final_contracts_are_enforced},
+        {"static property visibility", static_property_visibility_is_enforced},
         {"object cycle collection", cycle_collector_reclaims_self_and_mutual_object_cycles},
         {"mixed container cycle collection", cycle_collector_traverses_closure_captures},
         {"file builtins", file_builtins_cover_whole_file_stream_and_path_operations},

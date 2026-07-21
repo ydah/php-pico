@@ -1743,6 +1743,7 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                     ((flags & PC_STATIC) != 0U
                          ? !pclass_add_static_property(state->building_class,
                                                       name->data, name->length,
+                                                      flags,
                                                       default_value)
                          : !pclass_add_property(state->building_class,
                                                 name->data, name->length,
@@ -2015,10 +2016,24 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                 }
                 if (opcode == OP_SPROP_GET) {
                     pvalue value = pv_null();
-                    if (!pclass_get_static_property(class_entry,
-                                                    member_name->data,
-                                                    member_name->length,
-                                                    &value)) {
+                    const pproperty *property = pclass_find_static_property(
+                        class_entry, member_name->data, member_name->length);
+                    if (property == NULL) {
+                        pphp_runtime_error(state, frame->line,
+                                           "undefined static property %.*s",
+                                           (int)member_name->length,
+                                           member_name->data);
+                    } else if (!pclass_member_visible(
+                                   property->flags, property->owner,
+                                   frame->called_scope)) {
+                        pphp_runtime_error(state, frame->line,
+                                           "cannot access non-public static "
+                                           "property %.*s",
+                                           (int)member_name->length,
+                                           member_name->data);
+                    } else if (!pclass_get_static_property(
+                                   class_entry, member_name->data,
+                                   member_name->length, &value)) {
                         pphp_runtime_error(state, frame->line,
                                            "undefined static property %.*s",
                                            (int)member_name->length,
@@ -2028,10 +2043,26 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                     }
                 } else if (opcode == OP_SPROP_SET) {
                     pvalue value = pop(state);
-                    if (!pclass_set_static_property(class_entry,
-                                                    member_name->data,
-                                                    member_name->length,
-                                                    value)) {
+                    const pproperty *property = pclass_find_static_property(
+                        class_entry, member_name->data, member_name->length);
+                    if (property == NULL) {
+                        pv_release(value);
+                        pphp_runtime_error(state, frame->line,
+                                           "undefined static property %.*s",
+                                           (int)member_name->length,
+                                           member_name->data);
+                    } else if (!pclass_member_visible(
+                                   property->flags, property->owner,
+                                   frame->called_scope)) {
+                        pv_release(value);
+                        pphp_runtime_error(state, frame->line,
+                                           "cannot access non-public static "
+                                           "property %.*s",
+                                           (int)member_name->length,
+                                           member_name->data);
+                    } else if (!pclass_set_static_property(
+                                   class_entry, member_name->data,
+                                   member_name->length, value)) {
                         pv_release(value);
                         pphp_runtime_error(state, frame->line,
                                            "undefined static property %.*s",

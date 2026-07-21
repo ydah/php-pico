@@ -376,24 +376,51 @@ static int call_type_builtin(pphp_state *state, const pstring *name,
                    arguments[0].type == PT_STRING) &&
                   pv_to_number(arguments[0], &number, &integer);
     } else {
-        matches = arguments[0].type == PT_CLOSURE ||
-                  arguments[0].type == PT_STRING;
-        if (arguments[0].type == PT_OBJECT) {
-            matches = pclass_find_method(
+        const pclass *scope = state->frame_count == 0U
+                                  ? NULL
+                                  : state->frames[state->frame_count - 1U]
+                                        .called_scope;
+        matches = arguments[0].type == PT_CLOSURE;
+        if (arguments[0].type == PT_STRING) {
+            const pstring *function_name = (const pstring *)arguments[0].as.gc;
+            matches = pphp_builtin_exists(function_name) ||
+                      pphp_native_function_exists(state, function_name) ||
+                      pphp_find_function(state, function_name, NULL) != NULL;
+        } else if (arguments[0].type == PT_OBJECT) {
+            const pmethod *invoke = pclass_find_method(
                 ((pobject *)arguments[0].as.gc)->class_entry,
-                "__invoke", 8U) != NULL;
+                "__invoke", 8U);
+            matches = invoke != NULL &&
+                      pclass_member_visible(invoke->flags, invoke->owner,
+                                            scope);
         } else if (arguments[0].type == PT_ARRAY) {
             pvalue target = pv_null();
             pvalue method = pv_null();
+            pclass *class_entry = NULL;
+            const pmethod *method_entry = NULL;
             matches = pa_get((const parray *)arguments[0].as.gc,
                              pv_int(0), &target) &&
                       pa_get((const parray *)arguments[0].as.gc,
                              pv_int(1), &method) &&
-                      target.type == PT_OBJECT && method.type == PT_STRING &&
-                      pclass_find_method(
-                          ((pobject *)target.as.gc)->class_entry,
-                          ((pstring *)method.as.gc)->data,
-                          ((pstring *)method.as.gc)->length) != NULL;
+                      method.type == PT_STRING;
+            if (matches && target.type == PT_OBJECT) {
+                class_entry = ((pobject *)target.as.gc)->class_entry;
+            } else if (matches && target.type == PT_STRING) {
+                pstring *class_name = (pstring *)target.as.gc;
+                class_entry = pphp_find_class(state, class_name->data,
+                                               class_name->length);
+            }
+            if (class_entry != NULL) {
+                pstring *method_name = (pstring *)method.as.gc;
+                method_entry = pclass_find_method(class_entry,
+                                                  method_name->data,
+                                                  method_name->length);
+            }
+            matches = method_entry != NULL &&
+                      (target.type == PT_OBJECT ||
+                       (method_entry->flags & PC_STATIC) != 0U) &&
+                      pclass_member_visible(method_entry->flags,
+                                            method_entry->owner, scope);
             pv_release(target);
             pv_release(method);
         }

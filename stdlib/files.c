@@ -383,6 +383,21 @@ static int call_scandir(pphp_state *state, const pstring *name,
         pv_release(value);
     }
     if (scan_result < 0) goto scan_oom;
+    {
+        size_t i;
+        for (i = 1U; i < values->used; i++) {
+            pvalue current = values->entries[i].value;
+            size_t insert = i;
+            while (insert > 0U &&
+                   strcmp(((pstring *)values->entries[insert - 1U].value.as.gc)->data,
+                          ((pstring *)current.as.gc)->data) > 0) {
+                values->entries[insert].value =
+                    values->entries[insert - 1U].value;
+                insert--;
+            }
+            values->entries[insert].value = current;
+        }
+    }
     (void)pphp_fs_dir_close(directory);
     *result = pv_heap(PT_ARRAY, &values->header);
     return 1;
@@ -415,10 +430,10 @@ int pphp_call_file_builtin(pphp_state *state, const pstring *name,
     if (handled != 0) return handled;
     handled = call_path_operation(state, name, arguments, count, result);
     if (handled != 0) return handled;
-    handled = call_stream(state, name, arguments, count, result);
-    if (handled != 0) return handled;
     if (name_is(name, "scandir")) {
         return call_scandir(state, name, arguments, count, result);
     }
+    handled = call_stream(state, name, arguments, count, result);
+    if (handled != 0) return handled;
     return 0;
 }

@@ -71,6 +71,10 @@ void pclass_destroy(pclass *class_entry) {
     pphp_free(class_entry->properties);
     pphp_free(class_entry->methods);
     pphp_free(class_entry->interfaces);
+    for (i = 0U; i < class_entry->static_property_count; i++) {
+        ps_destroy(class_entry->static_property_defs[i].name);
+    }
+    pphp_free(class_entry->static_property_defs);
     pa_destroy(class_entry->static_properties);
     pa_destroy(class_entry->constants);
     pphp_free(class_entry);
@@ -117,10 +121,52 @@ static int class_table_get(const pclass *class_entry, int constants,
 }
 
 int pclass_add_static_property(pclass *class_entry, const char *name,
-                               size_t length, pvalue default_value) {
-    return class_entry != NULL &&
-           class_table_add(&class_entry->static_properties, name, length,
-                           default_value);
+                               size_t length, uint8_t flags,
+                               pvalue default_value) {
+    pproperty *property;
+    size_t i;
+    if (class_entry == NULL) return 0;
+    for (i = 0U; i < class_entry->static_property_count; i++) {
+        if (ps_equal_bytes(class_entry->static_property_defs[i].name,
+                           name, length)) return 0;
+    }
+    if (class_entry->static_property_count ==
+            class_entry->static_property_capacity &&
+        !grow((void **)&class_entry->static_property_defs,
+              sizeof(*class_entry->static_property_defs),
+              &class_entry->static_property_capacity)) return 0;
+    property = &class_entry->static_property_defs[
+        class_entry->static_property_count];
+    memset(property, 0, sizeof(*property));
+    property->name = ps_new(name, length);
+    if (property->name == NULL) return 0;
+    property->flags = flags;
+    property->owner = class_entry;
+    if (!class_table_add(&class_entry->static_properties, name, length,
+                         default_value)) {
+        ps_destroy(property->name);
+        property->name = NULL;
+        return 0;
+    }
+    class_entry->static_property_count++;
+    return 1;
+}
+
+const pproperty *pclass_find_static_property(const pclass *class_entry,
+                                             const char *name,
+                                             size_t length) {
+    const pclass *cursor = class_entry;
+    while (cursor != NULL) {
+        size_t i;
+        for (i = 0U; i < cursor->static_property_count; i++) {
+            if (ps_equal_bytes(cursor->static_property_defs[i].name,
+                               name, length)) {
+                return &cursor->static_property_defs[i];
+            }
+        }
+        cursor = cursor->parent;
+    }
+    return NULL;
 }
 
 int pclass_get_static_property(const pclass *class_entry, const char *name,
@@ -398,12 +444,19 @@ int pclass_is_a(const pclass *class_entry, const pclass *expected) {
 
 int pclass_member_visible(uint8_t flags, const pclass *owner,
                           const pclass *scope) {
+#if !PPHP_VIS_CHECK
+    (void)flags;
+    (void)owner;
+    (void)scope;
+    return 1;
+#else
     if ((flags & PC_PRIVATE) != 0U) return scope == owner;
     if ((flags & PC_PROTECTED) != 0U) {
         return scope != NULL &&
                (pclass_is_a(scope, owner) || pclass_is_a(owner, scope));
     }
     return 1;
+#endif
 }
 
 int pobject_property_written(const pobject *object, uint8_t slot) {

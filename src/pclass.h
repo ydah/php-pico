@@ -47,6 +47,9 @@ struct pclass {
     size_t method_count;
     size_t method_capacity;
     parray *static_properties;
+    pproperty *static_property_defs;
+    size_t static_property_count;
+    size_t static_property_capacity;
     parray *constants;
     pclass **interfaces;
     size_t interface_count;
@@ -77,7 +80,10 @@ int pclass_add_native_method(pclass *class_entry, const char *name,
                              size_t length, uint8_t flags,
                              pphp_cfunc function);
 int pclass_add_static_property(pclass *class_entry, const char *name,
-                               size_t length, pvalue default_value);
+                               size_t length, uint8_t flags,
+                               pvalue default_value);
+const pproperty *pclass_find_static_property(const pclass *class_entry,
+                                             const char *name, size_t length);
 int pclass_get_static_property(const pclass *class_entry, const char *name,
                                size_t length, pvalue *value);
 int pclass_set_static_property(pclass *class_entry, const char *name,
