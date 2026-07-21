@@ -32,7 +32,10 @@ static size_t operand_size(uint8_t opcode) {
         case OP_JMP_UNLESS_KEEP:
         case OP_JMP_NOTNULL_KEEP:
         case OP_LINE:
+        case OP_NEW_ARRAY:
             return 2U;
+        case OP_FE_NEXT:
+            return 3U;
         case OP_CALL:
             return 3U;
         case OP_LOAD_I32:
@@ -114,8 +117,15 @@ static int disassemble_proto(FILE *stream, const pproto *proto, size_t index) {
                 break;
             }
             case OP_LINE:
+            case OP_NEW_ARRAY:
                 fprintf(stream, " %u", code_u16(proto->code, pc));
                 break;
+            case OP_FE_NEXT: {
+                int16_t relative = (int16_t)code_u16(proto->code, pc);
+                fprintf(stream, " %+d -> %td haskey=%u", relative,
+                        (ptrdiff_t)(pc + 3U) + relative, proto->code[pc + 2U]);
+                break;
+            }
             default:
                 break;
         }

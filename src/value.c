@@ -1,6 +1,8 @@
 #include "value.h"
 
 #include "pstring.h"
+#include "parray.h"
+#include "resource.h"
 
 #include <string.h>
 
@@ -53,6 +55,8 @@ int pv_is_truthy(pvalue value) {
             return string != NULL && string->length != 0U &&
                    !(string->length == 1U && string->data[0] == '0');
         }
+        case PT_ARRAY:
+            return value.as.gc != NULL && ((const parray *)value.as.gc)->size != 0U;
         case PT_ROSTRING: {
             const pro_string *string = (const pro_string *)value.as.ptr;
             return string != NULL && string->length != 0U &&
@@ -91,6 +95,12 @@ void pv_release(pvalue value) {
         case PT_STRING:
             ps_destroy((pstring *)header);
             break;
+        case PT_ARRAY:
+            pa_destroy((parray *)header);
+            break;
+        case PT_RESOURCE:
+            presource_destroy((presource *)header);
+            break;
         default:
             break;
     }
@@ -106,4 +116,3 @@ const char *pv_type_name(pvalue_type type) {
     }
     return names[type];
 }
-

@@ -141,6 +141,36 @@ TEST(pbc_serialization_round_trips_through_loader) {
     ASSERT_EQ(0, remove(path));
 }
 
+TEST(arrays_use_copy_on_write_and_normalized_keys) {
+    const char *source =
+        "$a = [1, 2]; $b = $a; $b[] = 3; $b['1'] = 20;"
+        "echo count($a), ':', count($b), ':', $a[1], ':', $b[1], ':', array_sum($b);";
+    output_buffer output;
+    ASSERT_EQ(PPHP_OK, execute(source, &output, NULL, 0U));
+    ASSERT_STR("2:3:2:20:24", output.bytes);
+}
+
+TEST(foreach_preserves_insertion_order_and_supports_break_continue) {
+    const char *source =
+        "$a = ['x' => 1, 4 => 2, 3]; $sum = 0;"
+        "foreach ($a as $k => $v) {"
+        "  if ($v === 2) continue;"
+        "  $sum += $v; echo $k, '=', $v, ';';"
+        "}"
+        "echo $sum;";
+    output_buffer output;
+    ASSERT_EQ(PPHP_OK, execute(source, &output, NULL, 0U));
+    ASSERT_STR("x=1;5=3;4", output.bytes);
+}
+
+TEST(foreach_uses_snapshot_when_array_is_modified) {
+    const char *source =
+        "$a = [1, 2]; foreach ($a as $v) { echo $v; $a[] = 9; } echo ':', count($a);";
+    output_buffer output;
+    ASSERT_EQ(PPHP_OK, execute(source, &output, NULL, 0U));
+    ASSERT_STR("12:4", output.bytes);
+}
+
 int main(void) {
     static const test_case tests[] = {
         {"arithmetic VM", arithmetic_runs_through_compiler_and_vm},
@@ -150,7 +180,10 @@ int main(void) {
         {"strings and builtins", strings_and_initial_builtins_execute},
         {"runtime errors", runtime_errors_stop_execution_cleanly},
         {"argument validation", argument_count_and_stack_limits_are_checked},
-        {"PBC round trip", pbc_serialization_round_trips_through_loader}
+        {"PBC round trip", pbc_serialization_round_trips_through_loader},
+        {"array COW runtime", arrays_use_copy_on_write_and_normalized_keys},
+        {"foreach runtime", foreach_preserves_insertion_order_and_supports_break_continue},
+        {"foreach snapshot", foreach_uses_snapshot_when_array_is_modified}
     };
     return run_tests(tests, sizeof(tests) / sizeof(tests[0]));
 }

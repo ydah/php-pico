@@ -10,6 +10,7 @@
 
 typedef struct loop_context {
     size_t continue_target;
+    int is_foreach;
 } loop_context;
 
 typedef struct jump_record {
@@ -72,6 +73,21 @@ static void patch_jump(generator *gen, size_t operand, size_t target,
     if (!gen->failed && !pproto_patch_i16(gen->proto, operand, target)) {
         fail(gen, line, "jump exceeds 16-bit bytecode range");
     }
+}
+
+static void patch_foreach_jump(generator *gen, size_t operand, size_t target,
+                               uint32_t line) {
+    ptrdiff_t relative = (ptrdiff_t)target - (ptrdiff_t)(operand + 3U);
+    int16_t encoded;
+    if (gen->failed) return;
+    if (operand + 3U > gen->proto->code_length || relative < INT16_MIN ||
+        relative > INT16_MAX) {
+        fail(gen, line, "foreach jump exceeds 16-bit bytecode range");
+        return;
+    }
+    encoded = (int16_t)relative;
+    gen->proto->code[operand] = (uint8_t)((uint16_t)encoded & 0xffU);
+    gen->proto->code[operand + 1U] = (uint8_t)((uint16_t)encoded >> 8U);
 }
 
 static void emit_back_jump(generator *gen, size_t target, uint32_t line) {
@@ -313,8 +329,29 @@ static pc_token_type compound_operator(pc_token_type type) {
 static void compile_assignment(generator *gen, const pc_ast *node) {
     uint8_t slot;
     pc_token_type operation = node->as.binary.op;
+    if (node->as.binary.left->kind == AST_INDEX) {
+        const pc_ast *index = node->as.binary.left;
+        uint8_t array_slot;
+        if (operation != T_EQUAL || index->as.index.base->kind != AST_VARIABLE ||
+            !variable_slot(gen, index->as.index.base->as.literal.token, &array_slot)) {
+            fail(gen, node->line, "complex array assignment is not supported");
+            return;
+        }
+        emit_byte(gen, OP_LOAD_LOCAL, node->line);
+        emit_byte(gen, array_slot, node->line);
+        if (index->as.index.key != NULL) {
+            compile_expression(gen, index->as.index.key);
+        }
+        compile_expression(gen, node->as.binary.right);
+        emit_byte(gen, index->as.index.key == NULL ? OP_IDX_APPEND : OP_IDX_SET,
+                  node->line);
+        emit_byte(gen, OP_SWAP, node->line);
+        emit_byte(gen, OP_STORE_LOCAL, node->line);
+        emit_byte(gen, array_slot, node->line);
+        return;
+    }
     if (node->as.binary.left->kind != AST_VARIABLE) {
-        fail(gen, node->line, "only local variable assignment is executable in this milestone");
+        fail(gen, node->line, "assignment target is not executable");
         return;
     }
     if (!variable_slot(gen, node->as.binary.left->as.literal.token, &slot)) {
@@ -518,6 +555,36 @@ static void compile_expression(generator *gen, const pc_ast *node) {
             emit_byte(gen, (uint8_t)node->as.call.count, node->line);
             break;
         }
+        case AST_ARRAY: {
+            const pc_ast *item = node->as.list.items;
+            emit_byte(gen, OP_NEW_ARRAY, node->line);
+            emit_u16(gen, (uint16_t)node->as.list.count, node->line);
+            while (item != NULL) {
+                if (item->as.array_item.spread) {
+                    fail(gen, item->line, "array spread is not supported yet");
+                    break;
+                }
+                if (item->as.array_item.key != NULL) {
+                    compile_expression(gen, item->as.array_item.key);
+                    compile_expression(gen, item->as.array_item.value);
+                    emit_byte(gen, OP_ARR_SET, item->line);
+                } else {
+                    compile_expression(gen, item->as.array_item.value);
+                    emit_byte(gen, OP_ARR_PUSH, item->line);
+                }
+                item = item->next;
+            }
+            break;
+        }
+        case AST_INDEX:
+            if (node->as.index.key == NULL) {
+                fail(gen, node->line, "cannot read from an empty array index");
+                break;
+            }
+            compile_expression(gen, node->as.index.base);
+            compile_expression(gen, node->as.index.key);
+            emit_byte(gen, OP_IDX_GET, node->line);
+            break;
         case AST_ISSET:
             compile_expression(gen, node->as.unary.operand);
             emit_byte(gen, OP_LOAD_NULL, node->line);
@@ -559,6 +626,16 @@ static void record_loop_jump(generator *gen, const pc_ast *node, int is_continue
     if (gen->jump_count >= sizeof(gen->jumps) / sizeof(gen->jumps[0])) {
         fail(gen, node->line, "too many loop exits in one function");
         return;
+    }
+    if (!is_continue) {
+        unsigned current = gen->loop_count;
+        unsigned target = gen->loop_count - level;
+        while (current > target) {
+            current--;
+            if (gen->loops[current].is_foreach) {
+                emit_byte(gen, OP_FE_FREE, node->line);
+            }
+        }
     }
     operand = emit_jump(gen, OP_JMP, node->line);
     record = &gen->jumps[gen->jump_count++];
@@ -639,7 +716,9 @@ static void compile_statement(generator *gen, const pc_ast *node) {
                 fail(gen, node->line, "loop nesting limit exceeded");
                 break;
             }
-            gen->loops[gen->loop_count++].continue_target = start;
+            gen->loops[gen->loop_count].continue_target = start;
+            gen->loops[gen->loop_count].is_foreach = 0;
+            gen->loop_count++;
             compile_statement(gen, node->as.loop.body);
             emit_back_jump(gen, start, node->line);
             patch_jump(gen, exit, gen->proto->code_length, node->line);
@@ -655,7 +734,9 @@ static void compile_statement(generator *gen, const pc_ast *node) {
                 fail(gen, node->line, "loop nesting limit exceeded");
                 break;
             }
-            gen->loops[gen->loop_count++].continue_target = SIZE_MAX;
+            gen->loops[gen->loop_count].continue_target = SIZE_MAX;
+            gen->loops[gen->loop_count].is_foreach = 0;
+            gen->loop_count++;
             compile_statement(gen, node->as.loop.body);
             condition = gen->proto->code_length;
             compile_expression(gen, node->as.loop.condition);
@@ -694,7 +775,9 @@ static void compile_statement(generator *gen, const pc_ast *node) {
                 fail(gen, node->line, "loop nesting limit exceeded");
                 break;
             }
-            gen->loops[gen->loop_count++].continue_target = SIZE_MAX;
+            gen->loops[gen->loop_count].continue_target = SIZE_MAX;
+            gen->loops[gen->loop_count].is_foreach = 0;
+            gen->loop_count++;
             compile_statement(gen, node->as.for_stmt.body);
             increment_start = gen->proto->code_length;
             expression = node->as.for_stmt.increments;
@@ -717,6 +800,50 @@ static void compile_statement(generator *gen, const pc_ast *node) {
         case AST_CONTINUE:
             record_loop_jump(gen, node, 1);
             break;
+        case AST_FOREACH: {
+            size_t loop_start;
+            size_t exit;
+            uint8_t key_slot = 0U;
+            uint8_t value_slot;
+            unsigned index = gen->loop_count;
+            if (gen->loop_count >= PPHP_PARSE_DEPTH_MAX ||
+                node->as.foreach_stmt.value == NULL ||
+                node->as.foreach_stmt.value->kind != AST_VARIABLE ||
+                !variable_slot(gen, node->as.foreach_stmt.value->as.literal.token,
+                               &value_slot)) {
+                fail(gen, node->line, "invalid foreach target");
+                break;
+            }
+            if (node->as.foreach_stmt.key != NULL &&
+                (node->as.foreach_stmt.key->kind != AST_VARIABLE ||
+                 !variable_slot(gen, node->as.foreach_stmt.key->as.literal.token,
+                                &key_slot))) {
+                fail(gen, node->line, "invalid foreach key target");
+                break;
+            }
+            compile_expression(gen, node->as.foreach_stmt.iterable);
+            emit_byte(gen, OP_FE_INIT, node->line);
+            loop_start = gen->proto->code_length;
+            emit_byte(gen, OP_FE_NEXT, node->line);
+            exit = gen->proto->code_length;
+            emit_u16(gen, 0U, node->line);
+            emit_byte(gen, node->as.foreach_stmt.key != NULL ? 1U : 0U, node->line);
+            emit_byte(gen, OP_STORE_LOCAL, node->line);
+            emit_byte(gen, value_slot, node->line);
+            if (node->as.foreach_stmt.key != NULL) {
+                emit_byte(gen, OP_STORE_LOCAL, node->line);
+                emit_byte(gen, key_slot, node->line);
+            }
+            gen->loops[gen->loop_count].continue_target = loop_start;
+            gen->loops[gen->loop_count].is_foreach = 1;
+            gen->loop_count++;
+            compile_statement(gen, node->as.foreach_stmt.body);
+            emit_back_jump(gen, loop_start, node->line);
+            patch_foreach_jump(gen, exit, gen->proto->code_length, node->line);
+            patch_loop_jumps(gen, index, gen->proto->code_length, loop_start, node->line);
+            gen->loop_count--;
+            break;
+        }
         case AST_RETURN:
             if (node->as.expression.expression != NULL) {
                 compile_expression(gen, node->as.expression.expression);
@@ -748,7 +875,6 @@ static void compile_statement(generator *gen, const pc_ast *node) {
         case AST_GLOBAL:
             break;
         case AST_CONST:
-        case AST_FOREACH:
         case AST_SWITCH:
         case AST_INCLUDE:
         case AST_THROW:

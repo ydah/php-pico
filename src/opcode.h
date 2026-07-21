@@ -16,6 +16,7 @@ typedef enum pphp_opcode {
     OP_HALT = 0x01,
     OP_POP = 0x02,
     OP_DUP = 0x03,
+    OP_SWAP = 0x04,
     OP_LOAD_NULL = 0x10,
     OP_LOAD_TRUE = 0x11,
     OP_LOAD_FALSE = 0x12,
@@ -58,10 +59,18 @@ typedef enum pphp_opcode {
     OP_RET = 0x52,
     OP_RET_NULL = 0x53,
     OP_ECHO = 0x54,
+    OP_NEW_ARRAY = 0x60,
+    OP_ARR_PUSH = 0x61,
+    OP_ARR_SET = 0x62,
+    OP_IDX_GET = 0x63,
+    OP_IDX_SET = 0x64,
+    OP_IDX_APPEND = 0x65,
+    OP_FE_INIT = 0x66,
+    OP_FE_NEXT = 0x67,
+    OP_FE_FREE = 0x68,
     OP_LINE = 0x90
 } pphp_opcode;
 
 const char *pphp_opcode_name(uint8_t opcode);
 
 #endif
-

@@ -1,6 +1,7 @@
 #include "value_ops.h"
 
 #include "pstring.h"
+#include "parray.h"
 #include "pphp/pphp.h"
 
 #include <math.h>
@@ -125,6 +126,8 @@ pstring *pv_to_string(pvalue value) {
         case PT_STRING:
             return ps_new(((const pstring *)value.as.gc)->data,
                           ((const pstring *)value.as.gc)->length);
+        case PT_ARRAY:
+            return ps_new("Array", 5U);
         default:
             return NULL;
     }
@@ -222,6 +225,46 @@ int pv_compare(pvalue left, pvalue right, int strict, int *result,
     (void)error;
     if (strict && left.type != right.type) {
         *result = left.type < right.type ? -1 : 1;
+        return 1;
+    }
+    if (left.type == PT_ARRAY && right.type == PT_ARRAY) {
+        const parray *left_array = (const parray *)left.as.gc;
+        const parray *right_array = (const parray *)right.as.gc;
+        size_t left_position = 0U;
+        size_t right_position = 0U;
+        if (left_array->size != right_array->size) {
+            *result = left_array->size > right_array->size ? 1 : -1;
+            return 1;
+        }
+        while (left_position < left_array->used && right_position < right_array->used) {
+            pvalue left_key;
+            pvalue left_value;
+            pvalue right_key;
+            pvalue right_value;
+            size_t left_next;
+            size_t right_next;
+            int key_result;
+            int value_result;
+            if (!pa_entry_at(left_array, left_position, &left_key, &left_value,
+                             &left_next) ||
+                !pa_entry_at(right_array, right_position, &right_key, &right_value,
+                             &right_next)) {
+                break;
+            }
+            (void)pv_compare(left_key, right_key, strict, &key_result, error);
+            (void)pv_compare(left_value, right_value, strict, &value_result, error);
+            pv_release(left_key);
+            pv_release(left_value);
+            pv_release(right_key);
+            pv_release(right_value);
+            if (key_result != 0 || value_result != 0) {
+                *result = key_result != 0 ? key_result : value_result;
+                return 1;
+            }
+            left_position = left_next;
+            right_position = right_next;
+        }
+        *result = 0;
         return 1;
     }
     if (left.type == PT_TRUE || left.type == PT_FALSE || right.type == PT_TRUE ||

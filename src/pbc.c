@@ -561,6 +561,7 @@ const char *pphp_opcode_name(uint8_t opcode) {
         case OP_HALT: return "HALT";
         case OP_POP: return "POP";
         case OP_DUP: return "DUP";
+        case OP_SWAP: return "SWAP";
         case OP_LOAD_NULL: return "LOAD_NULL";
         case OP_LOAD_TRUE: return "LOAD_TRUE";
         case OP_LOAD_FALSE: return "LOAD_FALSE";
@@ -603,6 +604,15 @@ const char *pphp_opcode_name(uint8_t opcode) {
         case OP_RET: return "RET";
         case OP_RET_NULL: return "RET_NULL";
         case OP_ECHO: return "ECHO";
+        case OP_NEW_ARRAY: return "NEW_ARRAY";
+        case OP_ARR_PUSH: return "ARR_PUSH";
+        case OP_ARR_SET: return "ARR_SET";
+        case OP_IDX_GET: return "IDX_GET";
+        case OP_IDX_SET: return "IDX_SET";
+        case OP_IDX_APPEND: return "IDX_APPEND";
+        case OP_FE_INIT: return "FE_INIT";
+        case OP_FE_NEXT: return "FE_NEXT";
+        case OP_FE_FREE: return "FE_FREE";
         case OP_LINE: return "LINE";
         default: return "UNKNOWN";
     }

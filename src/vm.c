@@ -2,6 +2,8 @@
 
 #include "builtins.h"
 #include "opcode.h"
+#include "parray.h"
+#include "resource.h"
 #include "value_ops.h"
 
 #include <stdarg.h>
@@ -135,6 +137,58 @@ static int execute_compare(pphp_state *state, uint8_t opcode) {
     return push(state, pv_bool(truth));
 }
 
+static parray *array_for_write(pvalue array_value) {
+    parray *array = (parray *)array_value.as.gc;
+    if (array->header.refcnt <= 2U) {
+        return array;
+    }
+    return pa_clone(array);
+}
+
+static int execute_array_set(pphp_state *state, int append) {
+    pvalue value = pop(state);
+    pvalue key = pv_null();
+    pvalue array_value;
+    parray *array;
+    parray *writable;
+    int ok;
+    if (!append) key = pop(state);
+    array_value = pop(state);
+    if (array_value.type != PT_ARRAY) {
+        pv_release(array_value);
+        pv_release(key);
+        pv_release(value);
+        pphp_runtime_error(state, 0U, "Cannot use a non-array value as an array");
+        return 0;
+    }
+    array = (parray *)array_value.as.gc;
+    writable = array_for_write(array_value);
+    if (writable == NULL) {
+        pv_release(array_value);
+        pv_release(key);
+        pv_release(value);
+        pphp_runtime_error(state, 0U, "out of memory separating array");
+        return 0;
+    }
+    if (writable != array) {
+        pv_release(array_value);
+        array_value = pv_heap(PT_ARRAY, &writable->header);
+    }
+    ok = append ? pa_push(writable, value) : pa_set(writable, key, value);
+    pv_release(key);
+    if (!ok) {
+        pv_release(array_value);
+        pv_release(value);
+        pphp_runtime_error(state, 0U, "array update failed");
+        return 0;
+    }
+    if (!push(state, array_value)) {
+        pv_release(value);
+        return 0;
+    }
+    return push(state, value);
+}
+
 static void release_range(pphp_state *state, size_t begin, size_t end) {
     size_t i;
     for (i = begin; i < end; i++) {
@@ -266,6 +320,16 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                     pvalue value = state->stack[state->stack_count - 1U];
                     pv_retain(value);
                     (void)push(state, value);
+                }
+                break;
+            case OP_SWAP:
+                if (state->stack_count < 2U) {
+                    pphp_runtime_error(state, frame->line, "SWAP requires two stack values");
+                } else {
+                    pvalue top = state->stack[state->stack_count - 1U];
+                    state->stack[state->stack_count - 1U] =
+                        state->stack[state->stack_count - 2U];
+                    state->stack[state->stack_count - 2U] = top;
                 }
                 break;
             case OP_LOAD_NULL: (void)push(state, pv_null()); break;
@@ -414,6 +478,114 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                 state->stack_count = base;
                 break;
             }
+            case OP_NEW_ARRAY: {
+                uint16_t hint = read_u16(state, frame);
+                parray *array = pa_new(hint);
+                if (array == NULL) {
+                    pphp_runtime_error(state, frame->line, "out of memory creating array");
+                } else {
+                    (void)push(state, pv_heap(PT_ARRAY, &array->header));
+                }
+                break;
+            }
+            case OP_ARR_PUSH:
+            case OP_ARR_SET: {
+                pvalue value = pop(state);
+                pvalue key = pv_null();
+                pvalue array_value;
+                parray *array;
+                int ok;
+                if (opcode == OP_ARR_SET) key = pop(state);
+                array_value = pop(state);
+                if (array_value.type != PT_ARRAY) {
+                    pv_release(array_value);
+                    pv_release(key);
+                    pv_release(value);
+                    pphp_runtime_error(state, frame->line, "array construction stack is invalid");
+                    break;
+                }
+                array = (parray *)array_value.as.gc;
+                ok = opcode == OP_ARR_PUSH ? pa_push(array, value) : pa_set(array, key, value);
+                pv_release(key);
+                pv_release(value);
+                if (!ok) {
+                    pv_release(array_value);
+                    pphp_runtime_error(state, frame->line, "array construction failed");
+                } else {
+                    (void)push(state, array_value);
+                }
+                break;
+            }
+            case OP_IDX_GET: {
+                pvalue key = pop(state);
+                pvalue base = pop(state);
+                pvalue value = pv_null();
+                if (base.type != PT_ARRAY) {
+                    pphp_runtime_error(state, frame->line, "Cannot use a non-array value as an array");
+                } else {
+                    (void)pa_get((const parray *)base.as.gc, key, &value);
+                    (void)push(state, value);
+                }
+                pv_release(base);
+                pv_release(key);
+                break;
+            }
+            case OP_IDX_SET:
+                (void)execute_array_set(state, 0);
+                break;
+            case OP_IDX_APPEND:
+                (void)execute_array_set(state, 1);
+                break;
+            case OP_FE_INIT: {
+                pvalue iterable = pop(state);
+                parray_iterator *iterator;
+                if (iterable.type != PT_ARRAY) {
+                    pv_release(iterable);
+                    pphp_runtime_error(state, frame->line, "foreach argument must be array");
+                    break;
+                }
+                iterator = pa_iterator_new((parray *)iterable.as.gc);
+                pv_release(iterable);
+                if (iterator == NULL) {
+                    pphp_runtime_error(state, frame->line, "out of memory creating iterator");
+                } else {
+                    (void)push(state, pv_heap(PT_RESOURCE, &iterator->resource.header));
+                }
+                break;
+            }
+            case OP_FE_NEXT: {
+                int16_t relative = read_i16(state, frame);
+                uint8_t has_key = read_u8(state, frame);
+                pvalue iterator_value;
+                pvalue key;
+                pvalue value;
+                if (state->stack_count == 0U ||
+                    state->stack[state->stack_count - 1U].type != PT_RESOURCE) {
+                    pphp_runtime_error(state, frame->line, "invalid foreach iterator");
+                    break;
+                }
+                iterator_value = state->stack[state->stack_count - 1U];
+                if (!pa_iterator_next((parray_iterator *)iterator_value.as.gc, &key, &value)) {
+                    pv_release(pop(state));
+                    (void)jump_relative(state, frame, relative);
+                } else {
+                    if (has_key) {
+                        (void)push(state, key);
+                    } else {
+                        pv_release(key);
+                    }
+                    (void)push(state, value);
+                }
+                break;
+            }
+            case OP_FE_FREE:
+                if (state->stack_count == 0U ||
+                    state->stack[state->stack_count - 1U].type != PT_RESOURCE) {
+                    pphp_runtime_error(state, frame->line, "invalid foreach cleanup");
+                } else {
+                    pv_release(pop(state));
+                }
+                break;
             case OP_LINE:
                 frame->line = read_u16(state, frame);
                 break;
@@ -430,4 +602,3 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
     }
     return PPHP_OK;
 }
-
