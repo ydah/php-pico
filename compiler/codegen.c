@@ -3,6 +3,7 @@
 #include "opcode.h"
 #include "pphp/pphp.h"
 #include "pclass.h"
+#include "value_ops.h"
 
 #include <limits.h>
 #include <stdarg.h>
@@ -114,39 +115,50 @@ static int token_equal(pc_token token, const pstring *string) {
     return 1;
 }
 
-static uint64_t parse_integer_token(pc_token token, int *overflow) {
-    size_t i = 0U;
-    unsigned base = 10U;
-    uint64_t value = 0U;
-    *overflow = 0;
+static void integer_token_prefix(pc_token token, size_t *position,
+                                 unsigned *base) {
+    *position = 0U;
+    *base = 10U;
     if (token.length >= 2U && token.start[0] == '0') {
         if (token.start[1] == 'x' || token.start[1] == 'X') {
-            base = 16U;
-            i = 2U;
+            *base = 16U;
+            *position = 2U;
         } else if (token.start[1] == 'b' || token.start[1] == 'B') {
-            base = 2U;
-            i = 2U;
+            *base = 2U;
+            *position = 2U;
         } else if (token.start[1] == 'o' || token.start[1] == 'O') {
-            base = 8U;
-            i = 2U;
+            *base = 8U;
+            *position = 2U;
         } else if (token.start[1] >= '0' && token.start[1] <= '7') {
-            base = 8U;
-            i = 1U;
+            *base = 8U;
+            *position = 1U;
         }
     }
+}
+
+static unsigned integer_token_digit(char value) {
+    if (value >= '0' && value <= '9') {
+        return (unsigned)(value - '0');
+    }
+    if (value >= 'a' && value <= 'f') {
+        return (unsigned)(value - 'a') + 10U;
+    }
+    return (unsigned)(value - 'A') + 10U;
+}
+
+static uint64_t parse_integer_token(pc_token token, int *overflow) {
+    size_t i;
+    unsigned base;
+    uint64_t value = 0U;
+    *overflow = 0;
+    integer_token_prefix(token, &i, &base);
     for (; i < token.length; i++) {
         unsigned digit;
         char value_char = token.start[i];
         if (value_char == '_') {
             continue;
         }
-        if (value_char >= '0' && value_char <= '9') {
-            digit = (unsigned)(value_char - '0');
-        } else if (value_char >= 'a' && value_char <= 'f') {
-            digit = (unsigned)(value_char - 'a') + 10U;
-        } else {
-            digit = (unsigned)(value_char - 'A') + 10U;
-        }
+        digit = integer_token_digit(value_char);
         if (value > (UINT64_MAX - digit) / base) {
             *overflow = 1;
         } else {
@@ -157,6 +169,14 @@ static uint64_t parse_integer_token(pc_token token, int *overflow) {
 }
 
 #if PPHP_ENABLE_FLOAT
+static pphp_float parse_integer_float_token(pc_token token) {
+    size_t i;
+    unsigned base;
+    integer_token_prefix(token, &i, &base);
+    return pphp_integer_digits_to_float(token.start + i, token.length - i,
+                                        base);
+}
+
 static pphp_float parse_float_token(pc_token token) {
     size_t i = 0U;
     pphp_float value = 0;
@@ -1779,7 +1799,12 @@ static void compile_expression(generator *gen, const pc_ast *node) {
             uint64_t magnitude = parse_integer_token(node->as.literal.token,
                                                      &overflow);
             if (overflow) {
+#if PPHP_ENABLE_FLOAT
+                emit_constant(gen, pv_float(parse_integer_float_token(
+                                  node->as.literal.token)), node->line);
+#else
                 fail(gen, node->line, "integer literal is out of range");
+#endif
             } else if (magnitude <= INT8_MAX) {
                 emit_byte(gen, OP_LOAD_I8, node->line);
                 emit_byte(gen, (uint8_t)magnitude, node->line);
@@ -1790,7 +1815,8 @@ static void compile_expression(generator *gen, const pc_ast *node) {
                 emit_constant(gen, pv_int((pphp_int)magnitude), node->line);
             } else {
 #if PPHP_ENABLE_FLOAT
-                emit_constant(gen, pv_float((pphp_float)magnitude), node->line);
+                emit_constant(gen, pv_float(parse_integer_float_token(
+                                  node->as.literal.token)), node->line);
 #elif PPHP_INT64
                 fail(gen, node->line, "integer literal is out of range");
 #else

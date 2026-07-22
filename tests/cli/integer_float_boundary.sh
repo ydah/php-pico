@@ -63,16 +63,11 @@ double:double:int(-2147483648)'
 test "$(cat "$temporary/exact.out")" = "$expected_exact"
 test ! -s "$temporary/exact.err"
 
-assert_boundaries() {
+assert_program_modes() {
     target=$1
     label=$2
-    maximum=$3
-    positive_out=$4
-    minimum=$5
-    negative_out=$6
-    expected='integer:double:integer:double|integer:double:integer:double|integer:double:integer:double'
-    source="echo gettype($maximum), ':', gettype($positive_out), ':', gettype($minimum), ':', gettype($negative_out), '|'; echo gettype(\"$maximum\" + 0), ':', gettype(\"$positive_out\" + 0), ':', gettype(\"$minimum\" + 0), ':', gettype(\"$negative_out\" + 0), '|'; echo gettype(json_decode(\"$maximum\")), ':', gettype(json_decode(\"$positive_out\")), ':', gettype(json_decode(\"$minimum\")), ':', gettype(json_decode(\"$negative_out\"));"
-
+    source=$3
+    expected=$4
     "$target" -r "$source" > "$temporary/$label-source.out" \
         2> "$temporary/$label-source.err"
     test "$(cat "$temporary/$label-source.out")" = "$expected"
@@ -91,10 +86,81 @@ assert_boundaries() {
     test ! -s "$temporary/$label-pbc.err"
 }
 
+assert_boundaries() {
+    target=$1
+    label=$2
+    maximum=$3
+    positive_out=$4
+    minimum=$5
+    negative_out=$6
+    expected='integer:double:integer:double|integer:double:integer:double|integer:double:integer:double'
+    source="echo gettype($maximum), ':', gettype($positive_out), ':', gettype($minimum), ':', gettype($negative_out), '|'; echo gettype(\"$maximum\" + 0), ':', gettype(\"$positive_out\" + 0), ':', gettype(\"$minimum\" + 0), ':', gettype(\"$negative_out\" + 0), '|'; echo gettype(json_decode(\"$maximum\")), ':', gettype(json_decode(\"$positive_out\")), ':', gettype(json_decode(\"$minimum\")), ':', gettype(json_decode(\"$negative_out\"));"
+    assert_program_modes "$target" "$label" "$source" "$expected"
+}
+
 assert_boundaries "$binary" int32 2147483647 2147483648 \
     -2147483648 -2147483649
 assert_boundaries "$int64_binary" int64 9223372036854775807 \
     9223372036854775808 -9223372036854775808 -9223372036854775809
+
+assert_base_boundaries() {
+    target=$1
+    label=$2
+    hex_maximum=$3
+    hex_out=$4
+    binary_maximum=$5
+    binary_out=$6
+    octal_maximum=$7
+    octal_out=$8
+    expected='integer:double:integer:double|integer:double:integer:double|integer:double:integer:double'
+    source="echo gettype($hex_maximum), ':', gettype($hex_out), ':', gettype(-$hex_out), ':', gettype(-$hex_out - 1), '|'; echo gettype($binary_maximum), ':', gettype($binary_out), ':', gettype(-$binary_out), ':', gettype(-$binary_out - 1), '|'; echo gettype($octal_maximum), ':', gettype($octal_out), ':', gettype(-$octal_out), ':', gettype(-$octal_out - 1);"
+    assert_program_modes "$target" "$label" "$source" "$expected"
+}
+
+assert_base_boundaries "$binary" int32-bases 0x7fffffff 0x80000000 \
+    0b1111111111111111111111111111111 \
+    0b10000000000000000000000000000000 0o17777777777 0o20000000000
+assert_base_boundaries "$int64_binary" int64-bases \
+    0x7fffffffffffffff 0x8000000000000000 \
+    0b111111111111111111111111111111111111111111111111111111111111111 \
+    0b1000000000000000000000000000000000000000000000000000000000000000 \
+    0o777777777777777777777 0o1000000000000000000000
+
+huge=1
+huge_digits=0
+while test "$huge_digits" -lt 400; do
+    huge="${huge}0"
+    huge_digits=$((huge_digits + 1))
+done
+fallback_source="echo gettype(18446744073709551615), ':', gettype(18446744073709551616), ':', gettype(-18446744073709551616), ':', gettype(0xffffffffffffffff), ':', gettype(0x10000000000000000), ':', gettype(0b10000000000000000000000000000000000000000000000000000000000000000), ':', gettype(0o2000000000000000000000), ':', gettype($huge), ':', gettype(-$huge), '|'; echo (18446744073709551615 === \"18446744073709551615\" + 0 ? 1 : 0), ':', (18446744073709551615 === json_decode(\"18446744073709551615\") ? 1 : 0), ':', (18446744073709551616 === \"18446744073709551616\" + 0 ? 1 : 0), ':', (18446744073709551616 === json_decode(\"18446744073709551616\") ? 1 : 0), ':', (-18446744073709551616 === \"-18446744073709551616\" + 0 ? 1 : 0), ':', (-18446744073709551616 === json_decode(\"-18446744073709551616\") ? 1 : 0), ':', ($huge === \"$huge\" + 0 ? 1 : 0), ':', ($huge === json_decode(\"$huge\") ? 1 : 0);"
+fallback_expected='double:double:double:double:double:double:double:double:double|1:1:1:1:1:1:1:1'
+assert_program_modes "$binary" int32-fallback "$fallback_source" \
+    "$fallback_expected"
+assert_program_modes "$int64_binary" int64-fallback "$fallback_source" \
+    "$fallback_expected"
+
+float32_rounding_source='echo (2147483776 === 2147483648 ? 1 : 0), ":", (2147483777 === 2147483904 ? 1 : 0), ":", (2147483776 === "2147483776" + 0 ? 1 : 0), ":", (2147483777 === json_decode("2147483777") ? 1 : 0);'
+assert_program_modes "$binary" int32-rne "$float32_rounding_source" '1:1:1:1'
+
+float64_rounding_source='echo (18446744073709551615 === 18446744073709551616 ? 1 : 0), ":", (18446744073709553664 === 18446744073709551616 ? 1 : 0), ":", (18446744073709553665 === 18446744073709555712 ? 1 : 0), ":", (18446744073709553664 === "18446744073709553664" + 0 ? 1 : 0), ":", (18446744073709553665 === json_decode("18446744073709553665") ? 1 : 0);'
+assert_program_modes "$int64_binary" int64-rne "$float64_rounding_source" \
+    '1:1:1:1:1'
+
+assert_trailing_prefix() {
+    target=$1
+    label=$2
+    literal=$3
+    "$target" -r \
+        "echo ($literal === \"${literal}tail\" + 0 ? 1 : 0);" \
+        > "$temporary/$label.out" 2> "$temporary/$label.err"
+    expected="Warning: A non-numeric value encountered on line 1
+1"
+    test "$(cat "$temporary/$label.out")" = "$expected"
+    test ! -s "$temporary/$label.err"
+}
+
+assert_trailing_prefix "$binary" int32-trailing 18446744073709551616
+assert_trailing_prefix "$int64_binary" int64-trailing 18446744073709553665
 
 assert_integer_conversion_error() {
     target=$1

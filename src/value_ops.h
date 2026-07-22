@@ -55,5 +55,9 @@ int pphp_integer_power(pphp_int base, pphp_int exponent, pphp_int *result);
 int pphp_number_to_integer(pphp_float number, int exact, pphp_int *result);
 int pphp_numeric_to_integer(const pphp_numeric *numeric, int exact,
                             pphp_int *result);
+#if PPHP_ENABLE_FLOAT
+pphp_float pphp_integer_digits_to_float(const char *digits, size_t length,
+                                        unsigned base);
+#endif
 
 #endif

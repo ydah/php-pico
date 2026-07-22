@@ -33,6 +33,12 @@ assert_literal_error() {
 
 assert_literal_error positive_out_of_range 'echo 9223372036854775808;'
 assert_literal_error negative_out_of_range 'echo -9223372036854775809;'
+assert_literal_error uint64_max 'echo 18446744073709551615;'
+assert_literal_error uint64_overflow 'echo 18446744073709551616;'
+assert_literal_error hex_overflow 'echo 0x10000000000000000;'
+assert_literal_error binary_overflow \
+    'echo 0b10000000000000000000000000000000000000000000000000000000000000000;'
+assert_literal_error octal_overflow 'echo 0o2000000000000000000000;'
 
 output=$("$binary" -r \
     'echo PHP_INT_SIZE, ":", 2147483647 + 1, ":", 50000 * 50000, ":", json_decode("2147483648");')

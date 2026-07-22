@@ -15,6 +15,169 @@
 #include <stdio.h>
 #include <string.h>
 
+#if PPHP_ENABLE_FLOAT
+#if PPHP_USE_DOUBLE
+#define PPHP_INTEGER_FLOAT_LIMBS 34U
+#define PPHP_INTEGER_FLOAT_PRECISION 53U
+#define PPHP_INTEGER_FLOAT_MAX_EXPONENT 1023
+#else
+#define PPHP_INTEGER_FLOAT_LIMBS 5U
+#define PPHP_INTEGER_FLOAT_PRECISION 24U
+#define PPHP_INTEGER_FLOAT_MAX_EXPONENT 127
+#endif
+
+typedef struct pphp_integer_float_big {
+    uint32_t limbs[PPHP_INTEGER_FLOAT_LIMBS];
+    size_t used;
+} pphp_integer_float_big;
+
+static unsigned integer_float_digit(char value) {
+    if (value >= '0' && value <= '9') {
+        return (unsigned)(value - '0');
+    }
+    if (value >= 'a' && value <= 'f') {
+        return (unsigned)(value - 'a') + 10U;
+    }
+    return (unsigned)(value - 'A') + 10U;
+}
+
+static int integer_float_append(pphp_integer_float_big *integer,
+                                unsigned base, unsigned digit) {
+    uint64_t carry = digit;
+    size_t i;
+    for (i = 0U; i < integer->used; i++) {
+        uint64_t product = (uint64_t)integer->limbs[i] * base + carry;
+        integer->limbs[i] = (uint32_t)product;
+        carry = product >> 32U;
+    }
+    if (carry != 0U) {
+        if (integer->used == PPHP_INTEGER_FLOAT_LIMBS) return 0;
+        integer->limbs[integer->used++] = (uint32_t)carry;
+    }
+    return 1;
+}
+
+static size_t integer_float_bit_length(
+    const pphp_integer_float_big *integer) {
+    uint32_t top;
+    size_t length;
+    if (integer->used == 0U) return 0U;
+    top = integer->limbs[integer->used - 1U];
+    length = (integer->used - 1U) * 32U;
+    while (top != 0U) {
+        length++;
+        top >>= 1U;
+    }
+    return length;
+}
+
+static int integer_float_bit(const pphp_integer_float_big *integer,
+                             size_t position) {
+    size_t limb = position / 32U;
+    if (limb >= integer->used) return 0;
+    return (integer->limbs[limb] &
+            (UINT32_C(1) << (unsigned)(position % 32U))) != 0U;
+}
+
+static int integer_float_any_bits_below(
+    const pphp_integer_float_big *integer, size_t limit) {
+    size_t whole = limit / 32U;
+    size_t i;
+    for (i = 0U; i < whole && i < integer->used; i++) {
+        if (integer->limbs[i] != 0U) return 1;
+    }
+    if (whole < integer->used && limit % 32U != 0U) {
+        uint32_t mask =
+            (UINT32_C(1) << (unsigned)(limit % 32U)) - 1U;
+        if ((integer->limbs[whole] & mask) != 0U) return 1;
+    }
+    return 0;
+}
+
+static uint64_t integer_float_top_bits(
+    const pphp_integer_float_big *integer, size_t bit_length, size_t count) {
+    uint64_t value = 0U;
+    size_t position;
+    size_t first = bit_length - count;
+    for (position = bit_length; position > first; position--) {
+        value = (value << 1U) |
+                (uint64_t)integer_float_bit(integer, position - 1U);
+    }
+    return value;
+}
+
+static pphp_float integer_float_infinity(void) {
+#if PPHP_USE_DOUBLE
+    uint64_t bits = UINT64_C(0x7ff0000000000000);
+    double number;
+#else
+    uint32_t bits = UINT32_C(0x7f800000);
+    float number;
+#endif
+    memcpy(&number, &bits, sizeof(number));
+    return (pphp_float)number;
+}
+
+pphp_float pphp_integer_digits_to_float(const char *digits, size_t length,
+                                        unsigned base) {
+    pphp_integer_float_big integer;
+    size_t i;
+    size_t bit_length;
+    size_t retained;
+    size_t discarded;
+    uint64_t significand;
+    int exponent;
+    memset(&integer, 0, sizeof(integer));
+    for (i = 0U; i < length; i++) {
+        if (digits[i] != '_' &&
+            !integer_float_append(&integer, base,
+                                  integer_float_digit(digits[i]))) {
+            return integer_float_infinity();
+        }
+    }
+    bit_length = integer_float_bit_length(&integer);
+    if (bit_length == 0U) return (pphp_float)0;
+    retained = bit_length < PPHP_INTEGER_FLOAT_PRECISION
+                   ? bit_length : PPHP_INTEGER_FLOAT_PRECISION;
+    discarded = bit_length - retained;
+    significand = integer_float_top_bits(&integer, bit_length, retained);
+    if (retained < PPHP_INTEGER_FLOAT_PRECISION) {
+        significand <<= PPHP_INTEGER_FLOAT_PRECISION - retained;
+    } else if (discarded != 0U &&
+               integer_float_bit(&integer, discarded - 1U) &&
+               (integer_float_any_bits_below(&integer, discarded - 1U) ||
+                (significand & 1U) != 0U)) {
+        significand++;
+    }
+    exponent = (int)bit_length - 1;
+    if (significand ==
+        (UINT64_C(1) << PPHP_INTEGER_FLOAT_PRECISION)) {
+        significand >>= 1U;
+        exponent++;
+    }
+    if (exponent > PPHP_INTEGER_FLOAT_MAX_EXPONENT) {
+        return integer_float_infinity();
+    }
+#if PPHP_USE_DOUBLE
+    {
+        uint64_t bits = ((uint64_t)(exponent + 1023) << 52U) |
+                        (significand & UINT64_C(0x000fffffffffffff));
+        double number;
+        memcpy(&number, &bits, sizeof(number));
+        return (pphp_float)number;
+    }
+#else
+    {
+        uint32_t bits = ((uint32_t)(exponent + 127) << 23U) |
+                        ((uint32_t)significand & UINT32_C(0x007fffff));
+        float number;
+        memcpy(&number, &bits, sizeof(number));
+        return (pphp_float)number;
+    }
+#endif
+}
+#endif
+
 int pphp_integer_add(pphp_int left, pphp_int right, pphp_int *result) {
     if ((right > 0 && left > PPHP_INT_MAXIMUM - right) ||
         (right < 0 && left < PPHP_INT_MINIMUM - right)) {
@@ -176,10 +339,11 @@ static int integer_binary_float(pv_operation operation, pphp_int left,
 
 static int string_integer_exact(const char *text, size_t length,
                                 int require_complete, pphp_int *result,
-                                int *out_of_range, uint64_t *magnitude_out,
-                                int *magnitude_valid_out, int *negative_out,
+                                int *out_of_range, size_t *digits_start_out,
+                                size_t *digits_length_out, int *negative_out,
                                 size_t *consumed) {
     size_t position = 0U;
+    size_t digits_start;
     int negative = 0;
     int digits = 0;
     int in_range = 1;
@@ -187,8 +351,8 @@ static int string_integer_exact(const char *text, size_t length,
     uint64_t magnitude = 0U;
     uint64_t limit;
     *out_of_range = 0;
-    *magnitude_out = 0U;
-    *magnitude_valid_out = 0;
+    *digits_start_out = 0U;
+    *digits_length_out = 0U;
     *negative_out = 0;
     *consumed = 0U;
     while (position < length &&
@@ -198,6 +362,7 @@ static int string_integer_exact(const char *text, size_t length,
         (text[position] == '+' || text[position] == '-')) {
         negative = text[position++] == '-';
     }
+    digits_start = position;
     limit = (uint64_t)PPHP_INT_MAXIMUM + (negative ? 1U : 0U);
     while (position < length && text[position] >= '0' &&
            text[position] <= '9') {
@@ -221,8 +386,8 @@ static int string_integer_exact(const char *text, size_t length,
             text[position] == '\n' || text[position] == '\r')) position++;
     *consumed = position;
     if (require_complete && position != length) return 0;
-    *magnitude_out = magnitude;
-    *magnitude_valid_out = magnitude_valid;
+    *digits_start_out = digits_start;
+    *digits_length_out = (size_t)digits;
     *negative_out = negative;
     if (!in_range) {
         *out_of_range = 1;
@@ -328,14 +493,14 @@ static int floating_string_number(const char *text, size_t length,
 static int string_numeric(const char *text, size_t length,
                           int require_complete, pphp_numeric *numeric) {
     int out_of_range;
-    uint64_t magnitude;
-    int magnitude_valid;
+    size_t digits_start;
+    size_t digits_length;
     int negative;
     size_t consumed = 0U;
     numeric->string_status = PPHP_NUMERIC_STRING_INVALID;
     if (string_integer_exact(text, length, require_complete,
-                             &numeric->integer, &out_of_range, &magnitude,
-                             &magnitude_valid, &negative, &consumed)) {
+                             &numeric->integer, &out_of_range, &digits_start,
+                             &digits_length, &negative, &consumed)) {
         numeric->number = (pphp_float)numeric->integer;
         numeric->is_integer = 1;
         numeric->integer_exact = 1;
@@ -345,8 +510,9 @@ static int string_numeric(const char *text, size_t length,
         return 1;
     }
 #if PPHP_ENABLE_FLOAT
-    if (out_of_range && magnitude_valid) {
-        numeric->number = (pphp_float)magnitude;
+    if (out_of_range) {
+        numeric->number = pphp_integer_digits_to_float(
+            text + digits_start, digits_length, 10U);
         if (negative) numeric->number = -numeric->number;
         numeric->is_integer = 0;
         numeric->integer_out_of_range = 1;
