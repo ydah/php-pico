@@ -325,7 +325,8 @@ static int shell_php(pphp_state *state, const char *path, FILE *errors) {
         return PPHP_E_IO;
     }
     if (length >= 4U && memcmp(bytes, "PPBC", 4U) == 0) {
-        result = pphp_exec_pbc(state, bytes, length);
+        result = pphp_exec_pbc_owned(state, bytes, length);
+        bytes = NULL;
     } else {
         result = pphp_exec_source_mode(state, bytes, length, path, 1);
     }

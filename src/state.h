@@ -104,6 +104,8 @@ int pphp_exec_source_mode(pphp_state *state, const char *source, size_t length,
                           const char *chunk_name, int repl);
 int pphp_exec_include(pphp_state *state, const char *path, uint8_t mode,
                       pvalue *result);
+/* Internal transfer-of-ownership entry point used by file-backed shells. */
+int pphp_exec_pbc_owned(pphp_state *state, void *pbc, size_t length);
 pclass *pphp_find_class(const pphp_state *state, const char *name, size_t length);
 int pphp_register_class(pphp_state *state, pclass *class_entry);
 void pphp_clear_classes(pphp_state *state);

@@ -167,9 +167,12 @@ int pphp_p2sh_run_file(pphp_state *state, const char *path) {
         write_line("pico: php: unable to read file");
         return PPHP_E_IO;
     }
-    result = length >= 4U && memcmp(bytes, "PPBC", 4U) == 0
-                 ? pphp_exec_pbc(state, bytes, length)
-                 : pphp_exec_source_mode(state, bytes, length, path, 1);
+    if (length >= 4U && memcmp(bytes, "PPBC", 4U) == 0) {
+        result = pphp_exec_pbc_owned(state, bytes, length);
+        bytes = NULL;
+    } else {
+        result = pphp_exec_source_mode(state, bytes, length, path, 1);
+    }
     pphp_free(bytes);
     if (result != PPHP_OK) {
         char message[352];

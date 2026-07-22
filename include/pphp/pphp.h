@@ -58,6 +58,10 @@ pphp_state *pphp_open(void *pool, size_t pool_size);
 void pphp_close(pphp_state *state);
 int pphp_exec_source(pphp_state *state, const char *source, size_t length,
                      const char *chunk_name);
+/*
+ * The PBC image is executed in place and must remain readable until state is
+ * closed. File-backed frontends transfer their buffers to the state instead.
+ */
 int pphp_exec_pbc(pphp_state *state, const void *pbc, size_t length);
 void pphp_tick(pphp_state *state);
 void pphp_set_output(pphp_state *state, pphp_output_fn output, void *context);

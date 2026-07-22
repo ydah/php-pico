@@ -238,8 +238,8 @@ void pphp_remove_module_functions(pphp_state *state, const pmodule *module) {
     root->runtime_function_count = write_index;
 }
 
-static int retain_repl_module(pphp_state *state, pmodule *module,
-                              pmodule **owned) {
+static int retain_module(pphp_state *state, pmodule *module,
+                         pmodule **owned) {
     pmodule **resized;
     size_t capacity;
     *owned = pphp_alloc(sizeof(**owned));
@@ -449,7 +449,7 @@ int pphp_exec_include(pphp_state *state, const char *path, uint8_t mode,
         state->error_line = owner->error_line;
         return PPHP_E_RUNTIME;
     }
-    if (!retain_repl_module(owner, &module, &execution_module)) {
+    if (!retain_module(owner, &module, &execution_module)) {
         pmodule_destroy(&module);
         pv_release(path_value);
         pphp_runtime_error(state, 0U,
@@ -680,24 +680,18 @@ int pphp_exec_source_mode(pphp_state *state, const char *source, size_t length,
         return PPHP_E_PARSE;
     }
     pc_arena_destroy(&arena);
-    state->repl_mode = repl;
-    if (repl && !validate_repl_functions(state, &module)) {
+    state->repl_mode = 1;
+    if (!validate_repl_functions(state, &module)) {
         pmodule_destroy(&module);
         return PPHP_E_RUNTIME;
     }
-    if (repl && !retain_repl_module(state, &module, &execution_module)) {
+    if (!retain_module(state, &module, &execution_module)) {
         pmodule_destroy(&module);
         pphp_runtime_error(state, 0U,
-                           "out of memory retaining REPL definitions");
+                           "out of memory retaining source module");
         return PPHP_E_RUNTIME;
     }
     result = pphp_vm_execute(state, execution_module);
-    if (!repl) {
-        pphp_remove_module_functions(state, execution_module);
-        pphp_clear_user_classes(state);
-        pmodule_destroy(&module);
-        state->module = NULL;
-    }
     return result;
 #else
     (void)length;
@@ -722,10 +716,13 @@ int pphp_exec_source(pphp_state *state, const char *source, size_t length,
     return pphp_exec_source_mode(state, source, length, chunk_name, 0);
 }
 
-int pphp_exec_pbc(pphp_state *state, const void *pbc, size_t length) {
+static int exec_pbc(pphp_state *state, const void *pbc, size_t length,
+                    void *owned_backing) {
     pmodule module;
+    pmodule *execution_module = &module;
     int result;
     if (state == NULL) {
+        pphp_free(owned_backing);
         return PPHP_E_RUNTIME;
     }
     state->error[0] = '\0';
@@ -734,20 +731,37 @@ int pphp_exec_pbc(pphp_state *state, const void *pbc, size_t length) {
     state->exit_requested = 0;
     state->exit_status = 0;
     state->chunk_name = "<pbc>";
-    state->repl_mode = 0;
+    state->repl_mode = 1;
     result = pphp_pbc_load(pbc, length, &module);
     if (result != PPHP_OK) {
+        pphp_free(owned_backing);
         pphp_runtime_error(state, 0U,
                            result == PPHP_E_UNSUPPORTED
                                ? "PBC image requires float support"
                                : "invalid or incompatible PBC image");
         return result == PPHP_E_NOMEM ? PPHP_E_RUNTIME : PPHP_E_PARSE;
     }
-    result = pphp_vm_execute(state, &module);
-    pphp_remove_module_functions(state, &module);
-    pphp_clear_user_classes(state);
-    pmodule_destroy(&module);
+    module.backing = owned_backing;
+    module.owns_backing = owned_backing != NULL;
+    if (!validate_repl_functions(state, &module)) {
+        pmodule_destroy(&module);
+        return PPHP_E_RUNTIME;
+    }
+    if (!retain_module(state, &module, &execution_module)) {
+        pmodule_destroy(&module);
+        pphp_runtime_error(state, 0U, "out of memory retaining PBC module");
+        return PPHP_E_RUNTIME;
+    }
+    result = pphp_vm_execute(state, execution_module);
     return result;
+}
+
+int pphp_exec_pbc(pphp_state *state, const void *pbc, size_t length) {
+    return exec_pbc(state, pbc, length, NULL);
+}
+
+int pphp_exec_pbc_owned(pphp_state *state, void *pbc, size_t length) {
+    return exec_pbc(state, pbc, length, pbc);
 }
 
 void pphp_tick(pphp_state *state) {

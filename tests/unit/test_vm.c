@@ -9,6 +9,7 @@
 #include "vm.h"
 
 #include <stdint.h>
+#include <stdlib.h>
 
 typedef struct output_buffer {
     char bytes[4096];
@@ -94,6 +95,68 @@ static int load_test_pbc(uint8_t *bytes, size_t length) {
     int result = pphp_pbc_load(bytes, length, &module);
     if (result == PPHP_OK) pmodule_destroy(&module);
     return result;
+}
+
+static int write_source_pbc(const char *source, const char *path) {
+    pc_arena arena;
+    pc_parser parser;
+    pc_codegen_error error;
+    pc_ast *program;
+    pmodule module;
+    int result;
+    pc_arena_init(&arena, 2048U);
+    pc_parser_init(&parser, &arena, source, strlen(source), 1);
+    program = pc_parse_program(&parser);
+    if (program == NULL || !pc_codegen_program(program, &module, &error)) {
+        pc_arena_destroy(&arena);
+        return 0;
+    }
+    pc_arena_destroy(&arena);
+    result = pphp_pbc_write_file(&module, path) == PPHP_OK;
+    pmodule_destroy(&module);
+    return result;
+}
+
+static uint8_t *read_pbc_from_pool(const char *path, size_t *length) {
+    FILE *file = fopen(path, "rb");
+    long file_size;
+    uint8_t *bytes;
+    if (file == NULL || fseek(file, 0L, SEEK_END) != 0 ||
+        (file_size = ftell(file)) < 0L || fseek(file, 0L, SEEK_SET) != 0) {
+        if (file != NULL) (void)fclose(file);
+        return NULL;
+    }
+    bytes = pphp_alloc((size_t)file_size);
+    if (bytes == NULL || fread(bytes, 1U, (size_t)file_size, file) !=
+                             (size_t)file_size) {
+        pphp_free(bytes);
+        (void)fclose(file);
+        return NULL;
+    }
+    (void)fclose(file);
+    *length = (size_t)file_size;
+    return bytes;
+}
+
+static uint8_t *read_pbc_from_libc(const char *path, size_t *length) {
+    FILE *file = fopen(path, "rb");
+    long file_size;
+    uint8_t *bytes;
+    if (file == NULL || fseek(file, 0L, SEEK_END) != 0 ||
+        (file_size = ftell(file)) < 0L || fseek(file, 0L, SEEK_SET) != 0) {
+        if (file != NULL) (void)fclose(file);
+        return NULL;
+    }
+    bytes = malloc((size_t)file_size);
+    if (bytes == NULL || fread(bytes, 1U, (size_t)file_size, file) !=
+                             (size_t)file_size) {
+        free(bytes);
+        (void)fclose(file);
+        return NULL;
+    }
+    (void)fclose(file);
+    *length = (size_t)file_size;
+    return bytes;
 }
 
 static void capture_output(void *context, const char *bytes, size_t length) {
@@ -241,6 +304,212 @@ TEST(pbc_serialization_round_trips_through_loader) {
     ASSERT_EQ(0, remove(path));
 }
 
+TEST(pbc_string_constants_are_zero_copy_image_views) {
+    const char *path = "build/host/test_xip_strings.pbc";
+    const size_t literal_length = 12000U;
+    const char prefix[] = "$x = '";
+    const char suffix[] = "'; echo strlen($x);";
+    char *source = malloc(sizeof(prefix) - 1U + literal_length +
+                          sizeof(suffix));
+    uint8_t *bytes;
+    size_t length;
+    pmodule module;
+    pphp_pool_stats before;
+    pphp_pool_stats after;
+    const pstring *literal = NULL;
+    size_t i;
+    ASSERT_TRUE(source != NULL);
+    memcpy(source, prefix, sizeof(prefix) - 1U);
+    memset(source + sizeof(prefix) - 1U, 'x', literal_length);
+    memcpy(source + sizeof(prefix) - 1U + literal_length,
+           suffix, sizeof(suffix));
+    pphp_pool_init(vm_pool, sizeof(vm_pool));
+    ASSERT_TRUE(write_source_pbc(source, path));
+    bytes = read_pbc_from_pool(path, &length);
+    ASSERT_TRUE(bytes != NULL);
+    before = pphp_pool_get_stats();
+    ASSERT_EQ(PPHP_OK, pphp_pbc_load(bytes, length, &module));
+    after = pphp_pool_get_stats();
+    ASSERT_TRUE(module.image == bytes);
+    ASSERT_EQ(length, module.image_length);
+    ASSERT_TRUE(module.ro_string_count != 0U);
+    for (i = 0U; i < module.ro_string_count; i++) {
+        const pstring *string = &module.ro_strings[i];
+        ASSERT_EQ(PT_ROSTRING, string->header.type);
+        ASSERT_TRUE((const uint8_t *)string->data >= bytes);
+        ASSERT_TRUE((const uint8_t *)string->data + string->length <
+                    bytes + length);
+        ASSERT_EQ(0, string->data[string->length]);
+        if (string->length == literal_length) literal = string;
+    }
+    ASSERT_TRUE(literal != NULL);
+    ASSERT_TRUE(after.used - before.used < literal_length / 4U);
+    {
+        pvalue view = pv_heap(PT_STRING, (pheader *)&literal->header);
+        uint16_t refcnt = literal->header.refcnt;
+        pv_retain(view);
+        pv_release(view);
+        ASSERT_EQ(refcnt, literal->header.refcnt);
+    }
+    pmodule_destroy(&module);
+    pphp_free(bytes);
+    free(source);
+    ASSERT_EQ(0, remove(path));
+}
+
+TEST(pbc_string_records_are_binary_safe_and_nul_terminated) {
+    uint8_t bytes[128];
+    pmodule module;
+    minimal_pbc(bytes, 48U);
+    test_put_u32(bytes, 20U, 32U);
+    test_put_u16(bytes, 24U, 3U);
+    bytes[26U] = 'a';
+    bytes[27U] = 0U;
+    bytes[28U] = 'b';
+    bytes[29U] = 0U;
+    ASSERT_EQ(PPHP_OK, pphp_pbc_load(bytes, 48U, &module));
+    ASSERT_EQ(1, module.ro_string_count);
+    ASSERT_EQ(3, module.ro_strings[0].length);
+    ASSERT_EQ(0, module.ro_strings[0].data[1]);
+    ASSERT_EQ('b', module.ro_strings[0].data[2]);
+    pmodule_destroy(&module);
+
+    bytes[29U] = 1U;
+    ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(bytes, 48U));
+}
+
+TEST(pbc_modules_keep_classes_closures_and_owned_backings_alive) {
+    const char *definitions_path = "build/host/test_pbc_lifetime_defs.pbc";
+    const char *use_path = "build/host/test_pbc_lifetime_use.pbc";
+    const char *failure_path = "build/host/test_pbc_lifetime_failure.pbc";
+    const char *duplicate_path = "build/host/test_pbc_lifetime_duplicate.pbc";
+    const char *definitions =
+        "class XipBox {"
+        " public $value = 'property';"
+        " function text($suffix) { return $this->value . $suffix; }"
+        " function __destruct() { echo ':destroy'; }"
+        "}"
+        "function xip_echo($value) { return $value; }"
+        "$xipObject = new XipBox();"
+        "$xipCaptured = 'captured';"
+        "$xipClosure = function($suffix) use ($xipObject, $xipCaptured) {"
+        " return $xipObject->text($suffix) . ':' . $xipCaptured;"
+        "};"
+        "$xipCallable = 'xip_echo';"
+        "$xipArray = ['image-key' => 'image-value'];";
+    const char *use =
+        "$xipMethodCallable = [$xipObject, 'text'];"
+        "echo $xipObject->text(':method'), ':',"
+        " ($xipClosure)(':closure'), ':', $xipArray['image-key'], ':',"
+        " ($xipCallable)('callable'), ':',"
+        " ($xipMethodCallable)(':array-call');";
+    const char *failure =
+        "class FailedPbcClass {"
+        " function f() { return 'safe'; }"
+        " function __destruct() { echo ':failed-destroy'; }"
+        "}"
+        "$failedPbcObject = new FailedPbcClass();"
+        "throw new Exception('stop');";
+    pphp_state *state;
+    output_buffer output;
+    uint8_t *bytes;
+    size_t length;
+
+    pphp_pool_init(vm_pool, sizeof(vm_pool));
+    ASSERT_TRUE(write_source_pbc(definitions, definitions_path));
+    ASSERT_TRUE(write_source_pbc(use, use_path));
+    ASSERT_TRUE(write_source_pbc(failure, failure_path));
+    ASSERT_TRUE(write_source_pbc("class XipBox {}", duplicate_path));
+
+    state = pphp_open(vm_pool, sizeof(vm_pool));
+    ASSERT_TRUE(state != NULL);
+    memset(&output, 0, sizeof(output));
+    pphp_set_output(state, capture_output, &output);
+    bytes = read_pbc_from_pool(definitions_path, &length);
+    ASSERT_TRUE(bytes != NULL);
+    ASSERT_EQ(PPHP_OK, pphp_exec_pbc_owned(state, bytes, length));
+    bytes = read_pbc_from_pool(use_path, &length);
+    ASSERT_TRUE(bytes != NULL);
+    ASSERT_EQ(PPHP_OK, pphp_exec_pbc_owned(state, bytes, length));
+    ASSERT_STR("property:method:property:closure:captured:image-value:callable:property:array-call",
+               output.bytes);
+    pphp_close(state);
+    ASSERT_STR("property:method:property:closure:captured:image-value:callable:property:array-call:destroy",
+               output.bytes);
+
+    state = pphp_open(vm_pool, sizeof(vm_pool));
+    ASSERT_TRUE(state != NULL);
+    memset(&output, 0, sizeof(output));
+    pphp_set_output(state, capture_output, &output);
+    bytes = read_pbc_from_pool(failure_path, &length);
+    ASSERT_TRUE(bytes != NULL);
+    ASSERT_EQ(PPHP_E_RUNTIME, pphp_exec_pbc_owned(state, bytes, length));
+    pphp_close(state);
+    ASSERT_STR(":failed-destroy", output.bytes);
+
+    state = pphp_open(vm_pool, sizeof(vm_pool));
+    ASSERT_TRUE(state != NULL);
+    memset(&output, 0, sizeof(output));
+    pphp_set_output(state, capture_output, &output);
+    bytes = read_pbc_from_pool(definitions_path, &length);
+    ASSERT_TRUE(bytes != NULL);
+    ASSERT_EQ(PPHP_OK, pphp_exec_pbc_owned(state, bytes, length));
+    bytes = read_pbc_from_pool(duplicate_path, &length);
+    ASSERT_TRUE(bytes != NULL);
+    ASSERT_EQ(PPHP_E_RUNTIME, pphp_exec_pbc_owned(state, bytes, length));
+    ASSERT_TRUE(strstr(pphp_last_error(state), "cannot register class") != NULL);
+    pphp_close(state);
+    ASSERT_STR(":destroy", output.bytes);
+
+    ASSERT_EQ(0, remove(definitions_path));
+    ASSERT_EQ(0, remove(use_path));
+    ASSERT_EQ(0, remove(failure_path));
+    ASSERT_EQ(0, remove(duplicate_path));
+}
+
+TEST(pbc_xip_images_can_be_used_by_sequential_states) {
+    const char *path = "build/host/test_pbc_two_states.pbc";
+    uint8_t *bytes;
+    size_t length;
+    size_t i;
+    pphp_pool_init(vm_pool, sizeof(vm_pool));
+    ASSERT_TRUE(write_source_pbc("echo 'state';", path));
+    bytes = read_pbc_from_libc(path, &length);
+    ASSERT_TRUE(bytes != NULL);
+    for (i = 0U; i < 2U; i++) {
+        pphp_state *state = pphp_open(vm_pool, sizeof(vm_pool));
+        output_buffer output;
+        ASSERT_TRUE(state != NULL);
+        memset(&output, 0, sizeof(output));
+        pphp_set_output(state, capture_output, &output);
+        ASSERT_EQ(PPHP_OK, pphp_exec_pbc(state, bytes, length));
+        ASSERT_STR("state", output.bytes);
+        pphp_close(state);
+    }
+    free(bytes);
+    ASSERT_EQ(0, remove(path));
+}
+
+TEST(source_modules_outlive_objects_kept_in_globals) {
+    const char *source =
+        "<?php class SourceLifetime {"
+        " function value() { return 'alive'; }"
+        " function __destruct() { echo ':source-destroy'; }"
+        "}"
+        "$sourceLifetime = new SourceLifetime();"
+        "echo $sourceLifetime->value();";
+    pphp_state *state = pphp_open(vm_pool, sizeof(vm_pool));
+    output_buffer output;
+    ASSERT_TRUE(state != NULL);
+    memset(&output, 0, sizeof(output));
+    pphp_set_output(state, capture_output, &output);
+    ASSERT_EQ(PPHP_OK,
+              pphp_exec_source(state, source, strlen(source), "source-lifetime"));
+    ASSERT_STR("alive", output.bytes);
+    pphp_close(state);
+    ASSERT_STR("alive:source-destroy", output.bytes);
+}
+
 TEST(pbc_loader_rejects_truncated_and_wrapping_sections) {
     uint8_t bytes[128];
 
@@ -256,6 +525,18 @@ TEST(pbc_loader_rejects_truncated_and_wrapping_sections) {
 
     minimal_pbc(bytes, 44U);
     test_put_u32(bytes, 16U, 43U);
+    ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(bytes, 44U));
+
+    minimal_pbc(bytes, 44U);
+    test_put_u32(bytes, 20U, 29U);
+    ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(bytes, 44U));
+
+    minimal_pbc(bytes, 44U);
+    test_put_u32(bytes, 20U, 24U);
+    ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(bytes, 44U));
+
+    minimal_pbc(bytes, 44U);
+    test_put_u16(bytes, 24U, 3U);
     ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(bytes, 44U));
 
     minimal_pbc(bytes, 44U);
@@ -1235,6 +1516,11 @@ int main(void) {
         {"runtime errors", runtime_errors_stop_execution_cleanly},
         {"argument validation", argument_count_and_stack_limits_are_checked},
         {"PBC round trip", pbc_serialization_round_trips_through_loader},
+        {"PBC string XIP", pbc_string_constants_are_zero_copy_image_views},
+        {"PBC binary strings", pbc_string_records_are_binary_safe_and_nul_terminated},
+        {"PBC retained lifetimes", pbc_modules_keep_classes_closures_and_owned_backings_alive},
+        {"PBC sequential states", pbc_xip_images_can_be_used_by_sequential_states},
+        {"source retained lifetimes", source_modules_outlive_objects_kept_in_globals},
         {"PBC malformed bounds", pbc_loader_rejects_truncated_and_wrapping_sections},
         {"array COW runtime", arrays_use_copy_on_write_and_normalized_keys},
         {"language conformance", language_conformance_covers_casts_lvalues_nullsafe_and_interpolation},
