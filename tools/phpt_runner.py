@@ -238,7 +238,7 @@ def main() -> int:
     parser.add_argument("--target", choices=("host", "serial"), default="host")
     parser.add_argument("--port", help="serial device for --target=serial")
     parser.add_argument("--baud", type=int, default=115200)
-    args = parser.parse_args()
+    args = parser.parse_intermixed_args()
     args.serial = None
     if args.target == "serial":
         if not args.port:
