@@ -60,6 +60,42 @@ static int native_fail(pphp_ctx *context) {
     return pphp_raise(context, "RuntimeException", "native failure");
 }
 
+static void test_put_u16(uint8_t *bytes, size_t offset, uint16_t value) {
+    bytes[offset] = (uint8_t)(value & 0xffU);
+    bytes[offset + 1U] = (uint8_t)(value >> 8U);
+}
+
+static void test_put_u32(uint8_t *bytes, size_t offset, uint32_t value) {
+    bytes[offset] = (uint8_t)(value & 0xffU);
+    bytes[offset + 1U] = (uint8_t)((value >> 8U) & 0xffU);
+    bytes[offset + 2U] = (uint8_t)((value >> 16U) & 0xffU);
+    bytes[offset + 3U] = (uint8_t)(value >> 24U);
+}
+
+static void minimal_pbc(uint8_t *bytes, size_t length) {
+    uint16_t flags = (uint16_t)((PPHP_INT64 ? 1U : 0U) |
+                                (PPHP_USE_DOUBLE ? 2U : 0U) |
+                                (PPHP_LINE_INFO ? 4U : 0U));
+    memset(bytes, 0, 128U);
+    memcpy(bytes, "PPBC", 4U);
+    test_put_u16(bytes, 4U, (uint16_t)PPHP_PBC_FORMAT_VERSION);
+    test_put_u16(bytes, 6U, flags);
+    test_put_u32(bytes, 8U, (uint32_t)length);
+    test_put_u16(bytes, 12U, 1U);
+    test_put_u16(bytes, 14U, 1U);
+    test_put_u32(bytes, 16U, 24U);
+    test_put_u32(bytes, 20U, 28U);
+    test_put_u16(bytes, 24U, 0U);
+    test_put_u16(bytes, 42U, 0U);
+}
+
+static int load_test_pbc(uint8_t *bytes, size_t length) {
+    pmodule module;
+    int result = pphp_pbc_load(bytes, length, &module);
+    if (result == PPHP_OK) pmodule_destroy(&module);
+    return result;
+}
+
 static void capture_output(void *context, const char *bytes, size_t length) {
     output_buffer *output = context;
     if (length > sizeof(output->bytes) - output->length - 1U) {
@@ -203,6 +239,63 @@ TEST(pbc_serialization_round_trips_through_loader) {
     pmodule_destroy(&loaded);
     pphp_close(state);
     ASSERT_EQ(0, remove(path));
+}
+
+TEST(pbc_loader_rejects_truncated_and_wrapping_sections) {
+    uint8_t bytes[128];
+
+    minimal_pbc(bytes, 44U);
+    ASSERT_EQ(PPHP_OK, load_test_pbc(bytes, 44U));
+
+    minimal_pbc(bytes, 20U);
+    ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(bytes, 20U));
+
+    minimal_pbc(bytes, 44U);
+    test_put_u32(bytes, 16U, UINT32_C(0xfffffff8));
+    ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(bytes, 44U));
+
+    minimal_pbc(bytes, 44U);
+    test_put_u32(bytes, 16U, 43U);
+    ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(bytes, 44U));
+
+    minimal_pbc(bytes, 44U);
+    test_put_u32(bytes, 16U, 40U);
+    test_put_u16(bytes, 40U, 3U);
+    ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(bytes, 44U));
+
+    minimal_pbc(bytes, 44U);
+    test_put_u32(bytes, 20U, UINT32_C(0xfffffff8));
+    ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(bytes, 44U));
+
+    minimal_pbc(bytes, 44U);
+    test_put_u32(bytes, 20U, 36U);
+    ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(bytes, 44U));
+
+    minimal_pbc(bytes, 47U);
+    test_put_u16(bytes, 36U, 1U);
+    ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(bytes, 47U));
+
+    minimal_pbc(bytes, 51U);
+    test_put_u16(bytes, 38U, 1U);
+    ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(bytes, 51U));
+
+    minimal_pbc(bytes, 52U);
+    test_put_u16(bytes, 38U, 1U);
+    bytes[44U] = 3U;
+    ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(bytes, 52U));
+
+    minimal_pbc(bytes, 52U);
+    test_put_u16(bytes, 38U, 1U);
+    bytes[44U] = 4U;
+    ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(bytes, 52U));
+
+    minimal_pbc(bytes, 45U);
+    bytes[31U] = 1U;
+    ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(bytes, 45U));
+
+    minimal_pbc(bytes, 53U);
+    test_put_u16(bytes, 40U, 1U);
+    ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(bytes, 53U));
 }
 
 TEST(arrays_use_copy_on_write_and_normalized_keys) {
@@ -1136,6 +1229,7 @@ int main(void) {
         {"runtime errors", runtime_errors_stop_execution_cleanly},
         {"argument validation", argument_count_and_stack_limits_are_checked},
         {"PBC round trip", pbc_serialization_round_trips_through_loader},
+        {"PBC malformed bounds", pbc_loader_rejects_truncated_and_wrapping_sections},
         {"array COW runtime", arrays_use_copy_on_write_and_normalized_keys},
         {"language conformance", language_conformance_covers_casts_lvalues_nullsafe_and_interpolation},
         {"member lvalues", member_lvalues_and_dynamic_names_preserve_cow_and_evaluation_order},

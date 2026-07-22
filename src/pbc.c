@@ -247,6 +247,16 @@ static uint32_t get_u32(const uint8_t *bytes, size_t offset) {
            ((uint32_t)bytes[offset + 3U] << 24U);
 }
 
+static int pbc_range_available(size_t offset, size_t need, size_t length) {
+    return offset <= length && need <= length - offset;
+}
+
+static int pbc_advance(size_t *offset, size_t need, size_t length) {
+    if (!pbc_range_available(*offset, need, length)) return 0;
+    *offset += need;
+    return 1;
+}
+
 static int strings_add(string_list *list, pstring *string, uint16_t *index) {
     size_t i;
     for (i = 0U; i < list->count; i++) {
@@ -534,11 +544,15 @@ int pphp_pbc_load(const void *data, size_t length, pmodule *module) {
                    (PPHP_LINE_INFO ? 4U : 0U));
     uint16_t n_protos;
     uint16_t n_strings;
-    size_t table_end;
+    size_t table_entries;
+    size_t table_size;
+    size_t proto_table;
     pstring **strings = NULL;
     size_t i;
     int result = PPHP_E_PARSE;
-    if (bytes == NULL || length < 16U || memcmp(bytes, "PPBC", 4U) != 0 ||
+    if (bytes == NULL || module == NULL ||
+        !pbc_range_available(0U, 16U, length) ||
+        memcmp(bytes, "PPBC", 4U) != 0 ||
         get_u16(bytes, 4U) != (uint16_t)PPHP_PBC_FORMAT_VERSION ||
         get_u16(bytes, 6U) != expected_flags ||
         get_u32(bytes, 8U) != length) {
@@ -546,8 +560,13 @@ int pphp_pbc_load(const void *data, size_t length, pmodule *module) {
     }
     n_protos = get_u16(bytes, 12U);
     n_strings = get_u16(bytes, 14U);
-    table_end = 16U + (size_t)n_strings * 4U + (size_t)n_protos * 4U;
-    if (n_protos == 0U || table_end > length) return PPHP_E_PARSE;
+    table_entries = (size_t)n_strings + (size_t)n_protos;
+    if (n_protos == 0U || table_entries > (SIZE_MAX - 16U) / 4U) {
+        return PPHP_E_PARSE;
+    }
+    table_size = table_entries * 4U;
+    if (!pbc_range_available(16U, table_size, length)) return PPHP_E_PARSE;
+    proto_table = 16U + (size_t)n_strings * 4U;
     strings = pphp_alloc((size_t)n_strings * sizeof(*strings));
     if (n_strings != 0U && strings == NULL) return PPHP_E_NOMEM;
     if (n_strings != 0U) {
@@ -560,9 +579,13 @@ int pphp_pbc_load(const void *data, size_t length, pmodule *module) {
     for (i = 0U; i < n_strings; i++) {
         size_t offset = get_u32(bytes, 16U + i * 4U);
         uint16_t string_length;
-        if (offset + 2U > length) goto failed_module;
+        size_t record_size;
+        if (!pbc_range_available(offset, 2U, length)) goto failed_module;
         string_length = get_u16(bytes, offset);
-        if (offset + 2U + string_length + 1U > length) goto failed_module;
+        record_size = 2U + (size_t)string_length + 1U;
+        if (!pbc_range_available(offset, record_size, length)) {
+            goto failed_module;
+        }
         strings[i] = ps_new((const char *)bytes + offset + 2U, string_length);
         if (strings[i] == NULL) {
             result = PPHP_E_NOMEM;
@@ -570,7 +593,7 @@ int pphp_pbc_load(const void *data, size_t length, pmodule *module) {
         }
     }
     for (i = 0U; i < n_protos; i++) {
-        size_t offset = get_u32(bytes, 16U + (size_t)n_strings * 4U + i * 4U);
+        size_t offset = get_u32(bytes, proto_table + i * 4U);
         uint16_t code_length;
         uint16_t constant_count;
         uint16_t catch_count;
@@ -578,12 +601,13 @@ int pphp_pbc_load(const void *data, size_t length, pmodule *module) {
         uint8_t local_count;
         pproto *proto;
         size_t j;
-        if (offset + 16U > length) goto failed_module;
+        if (!pbc_range_available(offset, 16U, length)) goto failed_module;
         code_length = get_u16(bytes, offset + 8U);
         constant_count = get_u16(bytes, offset + 10U);
         catch_count = get_u16(bytes, offset + 12U);
         name_sid = get_u16(bytes, offset + 14U);
-        if (name_sid >= n_strings || offset + 16U + align4(code_length) > length) {
+        if (name_sid >= n_strings ||
+            !pbc_range_available(offset, 16U + align4(code_length), length)) {
             goto failed_module;
         }
         proto = pproto_new(strings[name_sid]->data, strings[name_sid]->length);
@@ -603,23 +627,28 @@ int pphp_pbc_load(const void *data, size_t length, pmodule *module) {
         proto->owns_code = 0U;
         proto->code_length = code_length;
         proto->code_capacity = 0U;
-        offset += 16U + align4(code_length);
+        if (!pbc_advance(&offset, 16U + align4(code_length), length)) {
+            goto failed_module;
+        }
         for (j = 0U; j < constant_count; j++) {
             pvalue value;
             uint16_t ignored;
             uint8_t tag;
-            if (offset + 8U > length) goto failed_module;
+            size_t constant_size;
+            if (!pbc_range_available(offset, 8U, length)) goto failed_module;
             tag = bytes[offset];
+            constant_size = tag == 3U || tag == 4U ? 16U : 8U;
+            if (!pbc_range_available(offset, constant_size, length)) {
+                goto failed_module;
+            }
             if (tag == 0U) {
                 value = pv_int((pphp_int)(int32_t)get_u32(bytes, offset + 4U));
-                offset += 8U;
             } else if (tag == 1U) {
 #if PPHP_ENABLE_FLOAT
                 uint32_t bits = get_u32(bytes, offset + 4U);
                 float number;
                 memcpy(&number, &bits, sizeof(number));
                 value = pv_float((pphp_float)number);
-                offset += 8U;
 #else
                 result = PPHP_E_UNSUPPORTED;
                 goto failed_module;
@@ -628,17 +657,14 @@ int pphp_pbc_load(const void *data, size_t length, pmodule *module) {
                 uint32_t sid = get_u32(bytes, offset + 4U);
                 if (sid >= n_strings) goto failed_module;
                 value = pv_heap(PT_STRING, &strings[sid]->header);
-                offset += 8U;
             } else if (tag == 3U) {
 #if PPHP_ENABLE_FLOAT
                 uint64_t bits;
                 double number;
-                if (offset + 16U > length) goto failed_module;
                 bits = get_u32(bytes, offset + 8U);
                 bits |= (uint64_t)get_u32(bytes, offset + 12U) << 32U;
                 memcpy(&number, &bits, sizeof(number));
                 value = pv_float((pphp_float)number);
-                offset += 16U;
 #else
                 result = PPHP_E_UNSUPPORTED;
                 goto failed_module;
@@ -647,12 +673,10 @@ int pphp_pbc_load(const void *data, size_t length, pmodule *module) {
 #if PPHP_INT64
                 uint64_t bits;
                 int64_t integer;
-                if (offset + 16U > length) goto failed_module;
                 bits = get_u32(bytes, offset + 8U);
                 bits |= (uint64_t)get_u32(bytes, offset + 12U) << 32U;
                 memcpy(&integer, &bits, sizeof(integer));
                 value = pv_int((pphp_int)integer);
-                offset += 16U;
 #else
                 goto failed_module;
 #endif
@@ -663,11 +687,14 @@ int pphp_pbc_load(const void *data, size_t length, pmodule *module) {
                 result = PPHP_E_NOMEM;
                 goto failed_module;
             }
+            if (!pbc_advance(&offset, constant_size, length)) {
+                goto failed_module;
+            }
         }
         for (j = 0U; j < local_count; j++) {
             uint16_t local_sid;
             uint8_t slot;
-            if (offset + 2U > length) goto failed_module;
+            if (!pbc_range_available(offset, 2U, length)) goto failed_module;
             local_sid = get_u16(bytes, offset);
             if (local_sid >= n_strings ||
                 !pproto_add_local(proto, strings[local_sid]->data,
@@ -675,12 +702,12 @@ int pphp_pbc_load(const void *data, size_t length, pmodule *module) {
                 slot != j) {
                 goto failed_module;
             }
-            offset += 2U;
+            if (!pbc_advance(&offset, 2U, length)) goto failed_module;
         }
         for (j = 0U; j < catch_count; j++) {
             pcatch entry;
             uint16_t class_sid;
-            if (offset + 10U > length) goto failed_module;
+            if (!pbc_range_available(offset, 10U, length)) goto failed_module;
             entry.try_start = get_u16(bytes, offset);
             entry.try_end = get_u16(bytes, offset + 2U);
             entry.handler_pc = get_u16(bytes, offset + 4U);
@@ -704,7 +731,7 @@ int pphp_pbc_load(const void *data, size_t length, pmodule *module) {
                 entry.class_constant = class_constant;
             }
             if (!pproto_add_catch(proto, entry)) goto failed_module;
-            offset += 10U;
+            if (!pbc_advance(&offset, 10U, length)) goto failed_module;
         }
     }
     result = PPHP_OK;
