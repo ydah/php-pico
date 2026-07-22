@@ -228,6 +228,11 @@ def write_report(path: Path, results: list[CaseResult]) -> None:
     )
 
 
+def parse_arguments(parser: argparse.ArgumentParser) -> argparse.Namespace:
+    parse = getattr(parser, "parse_intermixed_args", parser.parse_args)
+    return parse()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("mode", choices=("run", "diff"))
@@ -238,7 +243,7 @@ def main() -> int:
     parser.add_argument("--target", choices=("host", "serial"), default="host")
     parser.add_argument("--port", help="serial device for --target=serial")
     parser.add_argument("--baud", type=int, default=115200)
-    args = parser.parse_intermixed_args()
+    args = parse_arguments(parser)
     args.serial = None
     if args.target == "serial":
         if not args.port:
