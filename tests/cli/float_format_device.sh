@@ -22,3 +22,6 @@ expected_paths='9.99999975e-6:9.9999997473788e-06:float(9.9999997473788e-06)
 Array|(|    [0] => 9.9999997473788e-06|)|:9.99999975e-06:[     inf][    -inf][     nan]'
 
 test "$paths" = "$expected_paths"
+
+adc_voltage=$("$binary" -r "echo (new ADC(7))->read_voltage();")
+test "$adc_voltage" = '0.090586848556995'

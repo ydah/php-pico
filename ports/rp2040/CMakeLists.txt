@@ -89,8 +89,18 @@ set_source_files_properties(
 
 # Keep Pico SDK sources outside LTO: GNU ld --wrap is used by the SDK for
 # printf and math shims, and whole-target LTO bypasses those wrapper symbols.
-# Optimizing the firmware sources still provides cross-file dead-code removal.
+# This path is verified with GCC only; other toolchains retain their defaults.
+set(PPHP_RP2040_LTO_ENABLED OFF)
 if(PPHP_RP2040_LTO)
+  if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
+    set(PPHP_RP2040_LTO_ENABLED ON)
+  else()
+    message(STATUS
+      "PPHP_RP2040_LTO requested but skipped for unsupported C compiler "
+      "${CMAKE_C_COMPILER_ID}")
+  endif()
+endif()
+if(PPHP_RP2040_LTO_ENABLED)
   set_property(SOURCE ${PPHP_SOURCES} APPEND PROPERTY
     COMPILE_OPTIONS "$<$<CONFIG:Release>:-Os;-flto>"
   )
@@ -120,7 +130,7 @@ target_compile_options(php-pico PRIVATE
   -Os -fmerge-all-constants -ffunction-sections -fdata-sections
 )
 target_link_options(php-pico PRIVATE -Wl,--gc-sections)
-if(PPHP_RP2040_LTO)
+if(PPHP_RP2040_LTO_ENABLED)
   target_link_options(php-pico PRIVATE
     "$<$<CONFIG:Release>:-Os>"
     "$<$<CONFIG:Release>:-flto>"

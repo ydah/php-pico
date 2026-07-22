@@ -205,7 +205,8 @@ static int adc_sample(pphp_ctx *context, int voltage) {
     if (voltage) {
 #if PPHP_ENABLE_FLOAT
         pphp_ret_float(context,
-                       (pphp_float)((double)sample * 3.3 / 65536.0));
+                       (pphp_float)sample * (pphp_float)3.3 /
+                           (pphp_float)65536);
 #else
         return pphp_raise(context, "RuntimeException",
                           "float support disabled");
