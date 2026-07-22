@@ -114,7 +114,7 @@ static int token_equal(pc_token token, const pstring *string) {
     return 1;
 }
 
-static pphp_int parse_integer_token(pc_token token, int *overflow) {
+static uint64_t parse_integer_token(pc_token token, int *overflow) {
     size_t i = 0U;
     unsigned base = 10U;
     uint64_t value = 0U;
@@ -147,13 +147,13 @@ static pphp_int parse_integer_token(pc_token token, int *overflow) {
         } else {
             digit = (unsigned)(value_char - 'A') + 10U;
         }
-        if (value > (uint64_t)INT32_MAX / base ||
-            value * base > (uint64_t)INT32_MAX - digit) {
+        if (value > (UINT64_MAX - digit) / base) {
             *overflow = 1;
+        } else {
+            value = value * base + digit;
         }
-        value = value * base + digit;
     }
-    return (pphp_int)value;
+    return value;
 }
 
 #if PPHP_ENABLE_FLOAT
@@ -1605,16 +1605,23 @@ static void compile_expression(generator *gen, const pc_ast *node) {
             break;
         case AST_INT: {
             int overflow;
-            pphp_int value = parse_integer_token(node->as.literal.token, &overflow);
-            if (!overflow && value >= INT8_MIN && value <= INT8_MAX) {
+            uint64_t magnitude = parse_integer_token(node->as.literal.token,
+                                                     &overflow);
+            if (overflow) {
+                fail(gen, node->line, "integer literal is out of range");
+            } else if (magnitude <= INT8_MAX) {
                 emit_byte(gen, OP_LOAD_I8, node->line);
-                emit_byte(gen, (uint8_t)(int8_t)value, node->line);
-            } else if (!overflow) {
+                emit_byte(gen, (uint8_t)magnitude, node->line);
+            } else if (magnitude <= INT32_MAX) {
                 emit_byte(gen, OP_LOAD_I32, node->line);
-                emit_i32(gen, (int32_t)value, node->line);
+                emit_i32(gen, (int32_t)magnitude, node->line);
+            } else if (magnitude <= (uint64_t)PPHP_INT_MAXIMUM) {
+                emit_constant(gen, pv_int((pphp_int)magnitude), node->line);
             } else {
-#if PPHP_ENABLE_FLOAT
-                emit_constant(gen, pv_float((pphp_float)(uint32_t)value), node->line);
+#if PPHP_INT64
+                fail(gen, node->line, "integer literal is out of range");
+#elif PPHP_ENABLE_FLOAT
+                emit_constant(gen, pv_float((pphp_float)magnitude), node->line);
 #else
                 fail(gen, node->line, "integer literal requires float support");
 #endif
@@ -1704,6 +1711,18 @@ static void compile_expression(generator *gen, const pc_ast *node) {
                 break;
             }
 #endif
+            if (node->as.unary.op == T_MINUS &&
+                node->as.unary.operand != NULL &&
+                node->as.unary.operand->kind == AST_INT) {
+                int overflow;
+                uint64_t magnitude = parse_integer_token(
+                    node->as.unary.operand->as.literal.token, &overflow);
+                if (!overflow &&
+                    magnitude == (uint64_t)PPHP_INT_MAXIMUM + 1U) {
+                    emit_constant(gen, pv_int(PPHP_INT_MINIMUM), node->line);
+                    break;
+                }
+            }
             compile_expression(gen, node->as.unary.operand);
             if (node->as.unary.op == T_MINUS) emit_byte(gen, OP_NEG, node->line);
             else if (node->as.unary.op == T_BANG) emit_byte(gen, OP_NOT, node->line);

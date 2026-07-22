@@ -80,9 +80,16 @@ static int normalize_key(pvalue input, pvalue *key, int *temporary) {
             *key = input;
             return 1;
 #if PPHP_ENABLE_FLOAT
-        case PT_FLOAT:
-            *key = pv_int((pphp_int)input.as.f);
+        case PT_FLOAT: {
+            pphp_int integer;
+            const pphp_float upper_exclusive =
+                -(pphp_float)PPHP_INT_MINIMUM;
+            if (!(input.as.f >= (pphp_float)PPHP_INT_MINIMUM &&
+                  input.as.f < upper_exclusive)) return 0;
+            integer = (pphp_int)input.as.f;
+            *key = pv_int(integer);
             return 1;
+        }
 #endif
         case PT_TRUE:
             *key = pv_int(1);

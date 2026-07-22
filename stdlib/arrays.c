@@ -283,6 +283,9 @@ static int call_array_product(pphp_state *state, const pstring *name,
     size_t position = 0U;
     pphp_float product = 1;
     int all_integer = 1;
+#if PPHP_ENABLE_FLOAT
+    pphp_int integer_product = 1;
+#endif
     if (count != 1U || arguments[0].type != PT_ARRAY) {
         return fail_arguments(state, name);
     }
@@ -297,6 +300,23 @@ static int call_array_product(pphp_state *state, const pstring *name,
         if (pv_to_number(value, &number, &integer)) {
 #if PPHP_ENABLE_FLOAT
             product *= number;
+            if (all_integer) {
+                pphp_int factor;
+                pphp_int multiplied;
+                if (!integer ||
+                    (value.type != PT_INT &&
+                     !pphp_number_to_integer(number, 1, &factor))) {
+                    all_integer = 0;
+                } else {
+                    if (value.type == PT_INT) factor = value.as.i;
+                    if (!pphp_integer_multiply(integer_product, factor,
+                                               &multiplied)) {
+                        all_integer = 0;
+                    } else {
+                        integer_product = multiplied;
+                    }
+                }
+            }
 #else
             if (!pphp_integer_multiply(product, number, &product)) {
                 pv_release(key);
@@ -315,13 +335,16 @@ static int call_array_product(pphp_state *state, const pstring *name,
             return -1;
         } else {
             product = 0;
+#if PPHP_ENABLE_FLOAT
+            integer_product = 0;
+#endif
         }
         pv_release(key);
         pv_release(value);
         position = next;
     }
 #if PPHP_ENABLE_FLOAT
-    *result = all_integer ? pv_int((pphp_int)product) : pv_float(product);
+    *result = all_integer ? pv_int(integer_product) : pv_float(product);
 #else
     (void)all_integer;
     *result = pv_int(product);

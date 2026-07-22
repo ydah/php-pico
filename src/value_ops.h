@@ -35,5 +35,6 @@ int pphp_integer_multiply(pphp_int left, pphp_int right, pphp_int *result);
 int pphp_integer_negate(pphp_int value, pphp_int *result);
 int pphp_integer_division_overflows(pphp_int left, pphp_int right);
 int pphp_integer_power(pphp_int base, pphp_int exponent, pphp_int *result);
+int pphp_number_to_integer(pphp_float number, int exact, pphp_int *result);
 
 #endif

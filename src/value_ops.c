@@ -102,6 +102,78 @@ static pphp_int integer_shift_right(pphp_int value, pphp_int distance) {
     return -(pphp_int)quotient;
 }
 
+#if PPHP_ENABLE_FLOAT
+int pphp_number_to_integer(pphp_float number, int exact, pphp_int *result) {
+    const pphp_float upper_exclusive = -(pphp_float)PPHP_INT_MINIMUM;
+    pphp_int integer;
+    if (!(number >= (pphp_float)PPHP_INT_MINIMUM &&
+          number < upper_exclusive)) return 0;
+    integer = (pphp_int)number;
+    if (exact && number != (pphp_float)integer) return 0;
+    *result = integer;
+    return 1;
+}
+
+static int integer_binary_float(pv_operation operation, pphp_int left,
+                                pphp_int right, pvalue *result,
+                                const char **error) {
+    pphp_int integer;
+    switch (operation) {
+        case PV_ADD:
+            *result = pphp_integer_add(left, right, &integer)
+                          ? pv_int(integer)
+                          : pv_float((pphp_float)left + (pphp_float)right);
+            return 1;
+        case PV_SUB:
+            *result = pphp_integer_subtract(left, right, &integer)
+                          ? pv_int(integer)
+                          : pv_float((pphp_float)left - (pphp_float)right);
+            return 1;
+        case PV_MUL:
+            *result = pphp_integer_multiply(left, right, &integer)
+                          ? pv_int(integer)
+                          : pv_float((pphp_float)left * (pphp_float)right);
+            return 1;
+        case PV_DIV:
+            if (right == 0) {
+                *error = "Division by zero";
+                return 0;
+            }
+            if (!pphp_integer_division_overflows(left, right) &&
+                left % right == 0) {
+                *result = pv_int(left / right);
+            } else {
+                *result = pv_float((pphp_float)left / (pphp_float)right);
+            }
+            return 1;
+        case PV_MOD:
+            if (right == 0) {
+                *error = "Modulo by zero";
+                return 0;
+            }
+            *result = pv_int(pphp_integer_division_overflows(left, right)
+                                 ? 0
+                                 : left % right);
+            return 1;
+        case PV_POW:
+            if (right >= 0 && pphp_integer_power(left, right, &integer)) {
+                *result = pv_int(integer);
+            } else {
+                *result = pv_float((pphp_float)pow((double)left,
+                                                   (double)right));
+            }
+            return 1;
+        case PV_BAND: *result = pv_int(left & right); return 1;
+        case PV_BOR: *result = pv_int(left | right); return 1;
+        case PV_BXOR: *result = pv_int(left ^ right); return 1;
+        case PV_SHL: *result = pv_int(integer_shift_left(left, right)); return 1;
+        case PV_SHR: *result = pv_int(integer_shift_right(left, right)); return 1;
+        case PV_CONCAT: break;
+    }
+    return 0;
+}
+#endif
+
 #if !PPHP_ENABLE_FLOAT
 static int string_number(const char *text, size_t length, pphp_float *number,
                          int *is_integer, int require_complete) {
@@ -278,15 +350,8 @@ int pv_to_number_prefix(pvalue value, pphp_float *number, int *is_integer) {
 
 #if PPHP_ENABLE_FLOAT
 static pvalue numeric_result(pphp_float number, int integers) {
-    if (integers && number >= (pphp_float)PPHP_INT_MINIMUM &&
-#if PPHP_INT64
-        number < (pphp_float)PPHP_INT_MAXIMUM &&
-#else
-        number <= (pphp_float)PPHP_INT_MAXIMUM &&
-#endif
-        number == (pphp_float)(pphp_int)number) {
-        return pv_int((pphp_int)number);
-    }
+    pphp_int integer;
+    if (integers && pphp_number_to_integer(number, 1, &integer)) return pv_int(integer);
     return pv_float(number);
 }
 #endif
@@ -368,6 +433,12 @@ int pv_binary_operation(pv_operation operation, pvalue left, pvalue right,
         *result = pv_heap(PT_STRING, &joined->header);
         return 1;
     }
+#if PPHP_ENABLE_FLOAT
+    if (left.type == PT_INT && right.type == PT_INT) {
+        return integer_binary_float(operation, left.as.i, right.as.i,
+                                    result, error);
+    }
+#endif
     if (!pv_to_number_prefix(left, &a, &ai) ||
         !pv_to_number_prefix(right, &b, &bi)) {
         *error = ai < 0 || bi < 0
@@ -417,21 +488,37 @@ int pv_binary_operation(pv_operation operation, pvalue left, pvalue right,
 #endif
             return 1;
         case PV_MOD:
-            if ((pphp_int)b == 0) {
+            if (b == (pphp_float)0) {
                 *error = "Modulo by zero";
                 return 0;
             }
+#if PPHP_ENABLE_FLOAT
+            {
+                pphp_int left_integer;
+                pphp_int right_integer;
+                if (!pphp_number_to_integer(a, 0, &left_integer) ||
+                    !pphp_number_to_integer(b, 0, &right_integer)) {
+                    *error = "integer conversion is out of range";
+                    return 0;
+                }
+                if (right_integer == 0) {
+                    *error = "Modulo by zero";
+                    return 0;
+                }
+                *result = pv_int(pphp_integer_division_overflows(
+                                     left_integer, right_integer)
+                                     ? 0
+                                     : left_integer % right_integer);
+                return 1;
+            }
+#else
             if (pphp_integer_division_overflows((pphp_int)a,
                                                 (pphp_int)b)) {
-#if PPHP_ENABLE_FLOAT
-                *result = pv_int(0);
-                return 1;
-#else
                 goto integer_overflow;
-#endif
             }
             *result = pv_int((pphp_int)a % (pphp_int)b);
             return 1;
+#endif
         case PV_POW:
 #if PPHP_ENABLE_FLOAT
             *result = numeric_result((pphp_float)pow((double)a, (double)b), 0);
@@ -444,11 +531,34 @@ int pv_binary_operation(pv_operation operation, pvalue left, pvalue right,
             *result = pv_int(a);
 #endif
             return 1;
-        case PV_BAND: *result = pv_int((pphp_int)a & (pphp_int)b); return 1;
-        case PV_BOR: *result = pv_int((pphp_int)a | (pphp_int)b); return 1;
-        case PV_BXOR: *result = pv_int((pphp_int)a ^ (pphp_int)b); return 1;
-        case PV_SHL: *result = pv_int(integer_shift_left((pphp_int)a, (pphp_int)b)); return 1;
-        case PV_SHR: *result = pv_int(integer_shift_right((pphp_int)a, (pphp_int)b)); return 1;
+        case PV_BAND: case PV_BOR: case PV_BXOR: case PV_SHL: case PV_SHR:
+#if PPHP_ENABLE_FLOAT
+        {
+            pphp_int left_integer;
+            pphp_int right_integer;
+            if (!pphp_number_to_integer(a, 0, &left_integer) ||
+                !pphp_number_to_integer(b, 0, &right_integer)) {
+                *error = "integer conversion is out of range";
+                return 0;
+            }
+            if (operation == PV_BAND) *result = pv_int(left_integer & right_integer);
+            else if (operation == PV_BOR) *result = pv_int(left_integer | right_integer);
+            else if (operation == PV_BXOR) *result = pv_int(left_integer ^ right_integer);
+            else if (operation == PV_SHL) {
+                *result = pv_int(integer_shift_left(left_integer, right_integer));
+            } else {
+                *result = pv_int(integer_shift_right(left_integer, right_integer));
+            }
+            return 1;
+        }
+#else
+            if (operation == PV_BAND) *result = pv_int(a & b);
+            else if (operation == PV_BOR) *result = pv_int(a | b);
+            else if (operation == PV_BXOR) *result = pv_int(a ^ b);
+            else if (operation == PV_SHL) *result = pv_int(integer_shift_left(a, b));
+            else *result = pv_int(integer_shift_right(a, b));
+            return 1;
+#endif
         case PV_CONCAT: break;
     }
     *error = "invalid binary operation";
@@ -459,6 +569,14 @@ integer_overflow:
     return 0;
 #endif
 }
+
+#if !PPHP_ENABLE_FLOAT
+int pphp_number_to_integer(pphp_float number, int exact, pphp_int *result) {
+    (void)exact;
+    *result = number;
+    return 1;
+}
+#endif
 
 int pv_compare(pvalue left, pvalue right, int strict, int *result,
                const char **error) {

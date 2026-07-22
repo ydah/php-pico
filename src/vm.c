@@ -442,10 +442,13 @@ static int execute_index_get(pphp_state *state, int quiet) {
         (void)pa_get((const parray *)base.as.gc, key, &value);
     } else if (base.type == PT_STRING) {
         pphp_float offset_number;
+        pphp_int offset;
         int integer;
         const pstring *string = (const pstring *)base.as.gc;
-        if (pv_to_number(key, &offset_number, &integer)) {
-            pphp_int offset = (pphp_int)offset_number;
+        if (pv_to_number(key, &offset_number, &integer) &&
+            (key.type == PT_INT ||
+             pphp_number_to_integer(offset_number, 0, &offset))) {
+            if (key.type == PT_INT) offset = key.as.i;
             if (offset < 0) offset += (pphp_int)string->length;
             if (offset >= 0 && (size_t)offset < string->length) {
                 pstring *character = ps_new(string->data + offset, 1U);
@@ -484,7 +487,18 @@ static int execute_cast(pphp_state *state, uint8_t target) {
                                "integer overflow requires float support");
             return 0;
         }
-        result = pv_int((pphp_int)number);
+        if (target == PT_INT) {
+            pphp_int integer_value;
+            if (value.type == PT_INT) {
+                integer_value = value.as.i;
+            } else if (!pphp_number_to_integer(number, 0, &integer_value)) {
+                pv_release(value);
+                pphp_runtime_error(state, 0U,
+                                   "integer conversion is out of range");
+                return 0;
+            }
+            result = pv_int(integer_value);
+        }
 #if PPHP_ENABLE_FLOAT
         if (target == PT_FLOAT) result = pv_float(number);
 #endif
@@ -1577,9 +1591,11 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                 } else {
 #if PPHP_ENABLE_FLOAT
                     pphp_int negated;
-                    if (integer && pphp_integer_negate((pphp_int)number,
-                                                       &negated)) {
+                    if (value.type == PT_INT &&
+                        pphp_integer_negate(value.as.i, &negated)) {
                         (void)push(state, pv_int(negated));
+                    } else if (value.type == PT_INT) {
+                        (void)push(state, pv_float(-(pphp_float)value.as.i));
                     } else {
                         (void)push(state, pv_float(-number));
                     }
@@ -1608,7 +1624,18 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                             ? "integer overflow requires float support"
                             : "unsupported operand type for ~");
                 } else {
-                    (void)push(state, pv_int(~(pphp_int)number));
+                    pphp_int integer_value;
+                    if (value.type == PT_INT) {
+                        integer_value = value.as.i;
+                    } else if (!pphp_number_to_integer(number, 0,
+                                                       &integer_value)) {
+                        pphp_runtime_error(
+                            state, frame->line,
+                            "integer conversion is out of range");
+                        pv_release(value);
+                        break;
+                    }
+                    (void)push(state, pv_int(~integer_value));
                 }
                 pv_release(value);
                 break;

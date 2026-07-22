@@ -295,6 +295,8 @@ static int collect_strings(const pmodule *module, string_list *strings) {
 }
 
 static size_t serialized_constant_size(pvalue value) {
+    if (value.type == PT_INT && PPHP_INT64 &&
+        (value.as.i < INT32_MIN || value.as.i > INT32_MAX)) return 16U;
 #if PPHP_ENABLE_FLOAT
     return value.type == PT_FLOAT && sizeof(pphp_float) == 8U ? 16U : 8U;
 #else
@@ -401,9 +403,21 @@ int pphp_pbc_write_file(const pmodule *module, const char *path) {
         for (j = 0U; j < proto->constant_count; j++) {
             pvalue value = proto->constants[j];
             if (value.type == PT_INT) {
-                bytes[offset] = 0U;
-                put_u32(bytes, offset + 4U, (uint32_t)(int32_t)value.as.i);
-                offset += 8U;
+                if (PPHP_INT64 &&
+                    (value.as.i < INT32_MIN || value.as.i > INT32_MAX)) {
+                    uint64_t bits = (uint64_t)value.as.i;
+                    bytes[offset] = 4U;
+                    put_u32(bytes, offset + 8U,
+                            (uint32_t)(bits & UINT32_MAX));
+                    put_u32(bytes, offset + 12U,
+                            (uint32_t)(bits >> 32U));
+                    offset += 16U;
+                } else {
+                    bytes[offset] = 0U;
+                    put_u32(bytes, offset + 4U,
+                            (uint32_t)(int32_t)value.as.i);
+                    offset += 8U;
+                }
 #if PPHP_ENABLE_FLOAT
             } else if (value.type == PT_FLOAT && sizeof(pphp_float) == 4U) {
                 uint32_t bits;
@@ -627,6 +641,19 @@ int pphp_pbc_load(const void *data, size_t length, pmodule *module) {
                 offset += 16U;
 #else
                 result = PPHP_E_UNSUPPORTED;
+                goto failed_module;
+#endif
+            } else if (tag == 4U) {
+#if PPHP_INT64
+                uint64_t bits;
+                int64_t integer;
+                if (offset + 16U > length) goto failed_module;
+                bits = get_u32(bytes, offset + 8U);
+                bits |= (uint64_t)get_u32(bytes, offset + 12U) << 32U;
+                memcpy(&integer, &bits, sizeof(integer));
+                value = pv_int((pphp_int)integer);
+                offset += 16U;
+#else
                 goto failed_module;
 #endif
             } else {

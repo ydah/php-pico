@@ -51,8 +51,10 @@ NO_FLOAT_HOST_BINARY := build/host/php-pico-no-float
 NO_FLOAT_PBC_HOST_BINARY := build/host/php-pico-no-float-pbc
 NO_FLOAT_UBSAN_BINARY := build/host/php-pico-no-float-ubsan
 NO_FLOAT_INT64_BINARY := build/host/php-pico-no-float-int64
+NO_FLOAT_INT64_PBC_BINARY := build/host/php-pico-no-float-int64-pbc
 FLOAT_REFERENCE_BINARY := build/host/php-pico-default-float
 RP2040_HOST_BINARY := build/host/php-pico-rp2040
+RP2040_UBSAN_BINARY := build/host/php-pico-rp2040-ubsan
 FLOAT_FORMAT_TEST_BINARY := build/host/test_float_format
 TEST_BINARY := build/host/test_core
 LEXER_TEST_BINARY := build/host/test_lexer
@@ -64,7 +66,7 @@ ASAN_PARSER_BINARY := build/host/test_parser_asan
 ASAN_VM_BINARY := build/host/test_vm_asan
 ASAN_LEAKS := $(if $(filter Darwin,$(shell uname -s)),0,1)
 
-.PHONY: all FORCE host host-pbc host-rp2040 rp2040 test test-unit test-compiler-off test-no-float test-no-float-ubsan test-float-format test-phpt test-target test-asan test-diff bench size clean
+.PHONY: all FORCE host host-pbc host-rp2040 rp2040 test test-unit test-compiler-off test-no-float test-no-float-ubsan test-float-format test-rp-integer-boundary test-phpt test-target test-asan test-diff bench size clean
 
 FORCE:
 
@@ -131,6 +133,12 @@ $(NO_FLOAT_INT64_BINARY): FORCE $(RUNTIME_COMMON_SOURCES) $(COMPILER_SOURCES) co
 		$(RUNTIME_COMMON_SOURCES) $(COMPILER_SOURCES) compiler/codegen.c \
 		tools/disasm.c shell/p2sh.c shell/p2sh_device.c ports/host/main.c -o $@
 
+$(NO_FLOAT_INT64_PBC_BINARY): FORCE $(RUNTIME_COMMON_SOURCES) tools/disasm.c ports/host/main.c
+	@mkdir -p $(@D)
+	$(CC) $(filter-out -DPPHP_ENABLE_FLOAT=%,$(PBC_CPPFLAGS)) \
+		-DPPHP_ENABLE_FLOAT=0 -DPPHP_INT64=1 $(CFLAGS) \
+		$(RUNTIME_COMMON_SOURCES) tools/disasm.c ports/host/main.c -o $@
+
 $(FLOAT_REFERENCE_BINARY): FORCE $(RUNTIME_COMMON_SOURCES) src/float_format.c $(COMPILER_SOURCES) compiler/codegen.c tools/disasm.c shell/p2sh.c shell/p2sh_device.c ports/host/main.c
 	@mkdir -p $(@D)
 	$(CC) $(filter-out -DPPHP_ENABLE_FLOAT=%,$(COMPILER_CPPFLAGS)) \
@@ -143,6 +151,16 @@ $(RP2040_HOST_BINARY): $(HOST_SOURCES)
 	$(CC) $(CPPFLAGS) -DPPHP_INT64=0 -DPPHP_USE_DOUBLE=0 \
 		-DPPHP_DEVICE_FLOAT_FORMAT=1 $(CFLAGS) \
 		$(HOST_SOURCES) $(LDFLAGS) $(LDLIBS) -o $@
+
+$(RP2040_UBSAN_BINARY): FORCE $(RUNTIME_COMMON_SOURCES) src/float_format.c $(COMPILER_SOURCES) compiler/codegen.c tools/disasm.c shell/p2sh.c shell/p2sh_device.c ports/host/main.c
+	@mkdir -p $(@D)
+	$(CC) $(filter-out -DPPHP_ENABLE_FLOAT=%,$(COMPILER_CPPFLAGS)) \
+		-DPPHP_ENABLE_FLOAT=1 -DPPHP_INT64=0 -DPPHP_USE_DOUBLE=0 \
+		-DPPHP_DEVICE_FLOAT_FORMAT=1 $(CFLAGS) -O1 -g \
+		-fno-omit-frame-pointer -fsanitize=undefined \
+		$(RUNTIME_COMMON_SOURCES) src/float_format.c $(COMPILER_SOURCES) \
+		compiler/codegen.c tools/disasm.c shell/p2sh.c shell/p2sh_device.c \
+		ports/host/main.c -fsanitize=undefined -lm -o $@
 
 $(FLOAT_FORMAT_TEST_BINARY): FORCE src/float_format.c tests/unit/test_float_format.c
 	@mkdir -p $(@D)
@@ -192,14 +210,17 @@ test-compiler-off: $(HOST_BINARY) $(CONFIGURED_PBC_HOST_BINARY) $(COMPILER_OFF_T
 test-no-float: $(FLOAT_REFERENCE_BINARY) $(NO_FLOAT_HOST_BINARY) $(NO_FLOAT_PBC_HOST_BINARY) test-no-float-ubsan
 	sh tests/cli/no_float.sh $(FLOAT_REFERENCE_BINARY) $(NO_FLOAT_HOST_BINARY) $(NO_FLOAT_PBC_HOST_BINARY)
 
-test-no-float-ubsan: $(NO_FLOAT_HOST_BINARY) $(NO_FLOAT_UBSAN_BINARY) $(NO_FLOAT_INT64_BINARY)
+test-no-float-ubsan: $(NO_FLOAT_HOST_BINARY) $(NO_FLOAT_UBSAN_BINARY) $(NO_FLOAT_INT64_BINARY) $(NO_FLOAT_INT64_PBC_BINARY)
 	sh tests/cli/no_float_overflow.sh $(NO_FLOAT_HOST_BINARY)
 	sh tests/cli/no_float_overflow.sh $(NO_FLOAT_UBSAN_BINARY)
-	sh tests/cli/no_float_int64.sh $(NO_FLOAT_INT64_BINARY)
+	sh tests/cli/no_float_int64.sh $(NO_FLOAT_INT64_BINARY) $(NO_FLOAT_INT64_PBC_BINARY)
 
-test-float-format: $(RP2040_HOST_BINARY) $(FLOAT_FORMAT_TEST_BINARY)
+test-float-format: $(RP2040_HOST_BINARY) $(FLOAT_FORMAT_TEST_BINARY) test-rp-integer-boundary
 	$(FLOAT_FORMAT_TEST_BINARY)
 	sh tests/cli/float_format_device.sh $(RP2040_HOST_BINARY)
+
+test-rp-integer-boundary: $(RP2040_UBSAN_BINARY)
+	sh tests/cli/integer_float_boundary.sh $(RP2040_UBSAN_BINARY)
 
 test-phpt: $(HOST_BINARY)
 	sh tools/phpt_run.sh --binary $(HOST_BINARY) tests/phpt

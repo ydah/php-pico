@@ -187,7 +187,9 @@ static int append_formatted(pphp_state *state, const pstring *format,
         char native[32];
         size_t native_length = 0U;
         pphp_float number;
+        pphp_int integer_value = 0;
         int integer;
+        int integer_conversion;
         if (format->data[position] != '%') {
             while (position < format->length && format->data[position] != '%') {
                 position++;
@@ -259,9 +261,21 @@ static int append_formatted(pphp_state *state, const pstring *format,
             continue;
         }
         if (!pv_to_number(arguments[argument], &number, &integer)) return 0;
+        integer_conversion = arguments[argument].type == PT_INT;
+        if (integer_conversion) {
+            integer_value = arguments[argument].as.i;
+        } else if (conversion == 'b' || conversion == 'd' ||
+                   conversion == 'u' || conversion == 'x' ||
+                   conversion == 'X' || conversion == 'o' ||
+                   conversion == 'c') {
+            integer_conversion = pphp_number_to_integer(
+                number, 0, &integer_value);
+        }
+        if (!integer_conversion && conversion != 'f' && conversion != 'e' &&
+            conversion != 'g') return 0;
         argument++;
         if (conversion == 'b') {
-            if (!append_binary(buffer, (uint32_t)(pphp_int)number, width,
+            if (!append_binary(buffer, (uint32_t)integer_value, width,
                                zero_pad, left_align)) return 0;
             continue;
         }
@@ -292,7 +306,7 @@ static int append_formatted(pphp_state *state, const pstring *format,
             native[native_length++] = 'd';
             native[native_length] = '\0';
             if (!buffer_printf_integer(buffer, native,
-                                       (long long)(pphp_int)number)) return 0;
+                                       (long long)integer_value)) return 0;
         } else if (conversion == 'u' || conversion == 'x' ||
                    conversion == 'X' || conversion == 'o') {
             native[native_length++] = 'l';
@@ -300,21 +314,23 @@ static int append_formatted(pphp_state *state, const pstring *format,
             native[native_length++] = conversion;
             native[native_length] = '\0';
             if (!buffer_printf_unsigned(buffer, native,
-                                        (unsigned long long)(uint32_t)(pphp_int)number)) {
+                                        (unsigned long long)(uint32_t)integer_value)) {
                 return 0;
             }
         } else if (conversion == 'c') {
             native[native_length++] = 'c';
             native[native_length] = '\0';
             if (!buffer_printf_character(buffer, native,
-                                         (int)(unsigned char)(pphp_int)number)) {
+                                         (int)(unsigned char)integer_value)) {
                 return 0;
             }
         }
 #if PPHP_ENABLE_FLOAT
-        else if (conversion == 'f' || conversion == 'e' || conversion == 'g') {
-            if (!append_formatted_float(buffer, number, conversion, precision,
-                                        width, zero_pad, left_align)) return 0;
+        else if (conversion == 'f' || conversion == 'e' ||
+                 conversion == 'g') {
+            if (!append_formatted_float(buffer, number, conversion,
+                                        precision, width, zero_pad,
+                                        left_align)) return 0;
         }
 #endif
         else {
