@@ -785,7 +785,9 @@ static int call_str_pad(pphp_state *state, const pstring *name,
     size_t i;
     if (count < 2U || count > 4U || arguments[1].type != PT_INT ||
         arguments[1].as.i < 0 ||
-        (count == 4U && arguments[3].type != PT_INT)) {
+        (count == 4U &&
+         (arguments[3].type != PT_INT || arguments[3].as.i < 0 ||
+          arguments[3].as.i > 2))) {
         return fail_arguments(state, name);
     }
     input = argument_string(state, name, arguments[0]);
@@ -798,7 +800,7 @@ static int call_str_pad(pphp_state *state, const pstring *name,
         ps_destroy(padding);
         return fail_arguments(state, name);
     }
-    if (count == 4U) type = arguments[3].as.i;
+    if (count == 4U) type = (int)arguments[3].as.i;
     if (type < 0 || type > 2) {
         ps_destroy(input);
         ps_destroy(padding);

@@ -478,7 +478,12 @@ static int execute_cast(pphp_state *state, uint8_t target) {
     ) {
         pphp_float number = 0;
         int integer = 0;
-        (void)pv_to_number_prefix(value, &number, &integer);
+        if (!pv_to_number_prefix(value, &number, &integer) && integer < 0) {
+            pv_release(value);
+            pphp_runtime_error(state, 0U,
+                               "integer overflow requires float support");
+            return 0;
+        }
         result = pv_int((pphp_int)number);
 #if PPHP_ENABLE_FLOAT
         if (target == PT_FLOAT) result = pv_float(number);
@@ -1564,12 +1569,29 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                 pphp_float number;
                 int integer;
                 if (!pv_to_number_prefix(value, &number, &integer)) {
-                    pphp_runtime_error(state, frame->line, "unsupported operand type for unary -");
+                    pphp_runtime_error(
+                        state, frame->line, "%s",
+                        integer < 0
+                            ? "integer overflow requires float support"
+                            : "unsupported operand type for unary -");
                 } else {
 #if PPHP_ENABLE_FLOAT
-                    (void)push(state, integer ? pv_int(-(pphp_int)number) : pv_float(-number));
+                    pphp_int negated;
+                    if (integer && pphp_integer_negate((pphp_int)number,
+                                                       &negated)) {
+                        (void)push(state, pv_int(negated));
+                    } else {
+                        (void)push(state, pv_float(-number));
+                    }
 #else
-                    (void)push(state, pv_int(-number));
+                    pphp_int negated;
+                    if (!pphp_integer_negate(number, &negated)) {
+                        pphp_runtime_error(
+                            state, frame->line,
+                            "integer overflow requires float support");
+                    } else {
+                        (void)push(state, pv_int(negated));
+                    }
 #endif
                 }
                 pv_release(value);
@@ -1580,7 +1602,11 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                 pphp_float number;
                 int integer;
                 if (!pv_to_number_prefix(value, &number, &integer)) {
-                    pphp_runtime_error(state, frame->line, "unsupported operand type for ~");
+                    pphp_runtime_error(
+                        state, frame->line, "%s",
+                        integer < 0
+                            ? "integer overflow requires float support"
+                            : "unsupported operand type for ~");
                 } else {
                     (void)push(state, pv_int(~(pphp_int)number));
                 }

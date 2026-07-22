@@ -278,7 +278,8 @@ static int integer_from_string(const pstring *string, unsigned base,
                                pphp_int *result) {
     size_t i = 0U;
     int sign = 1;
-    uint32_t value = 0U;
+    uint64_t value = 0U;
+    uint64_t limit;
     int digits = 0;
     if (base < 2U || base > 36U) return 0;
     while (i < string->length && (string->data[i] == ' ' ||
@@ -287,6 +288,7 @@ static int integer_from_string(const pstring *string, unsigned base,
     if (i < string->length && (string->data[i] == '+' || string->data[i] == '-')) {
         sign = string->data[i++] == '-' ? -1 : 1;
     }
+    limit = (uint64_t)PPHP_INT_MAXIMUM + (sign < 0 ? 1U : 0U);
     if (i + 1U < string->length && string->data[i] == '0') {
         char prefix = string->data[i + 1U];
         if ((base == 16U && (prefix == 'x' || prefix == 'X')) ||
@@ -300,13 +302,19 @@ static int integer_from_string(const pstring *string, unsigned base,
         else if (c >= 'A' && c <= 'Z') digit = (unsigned)(c - 'A') + 10U;
         else break;
         if (digit >= base) break;
+        if (value > (limit - digit) / base) {
+            *result = sign < 0 ? PPHP_INT_MINIMUM : PPHP_INT_MAXIMUM;
+            return -1;
+        }
         value = value * base + digit;
         digits++;
     }
     if (digits == 0) {
         *result = 0;
+    } else if (sign < 0 && value == (uint64_t)PPHP_INT_MAXIMUM + 1U) {
+        *result = PPHP_INT_MINIMUM;
     } else if (sign < 0) {
-        *result = (pphp_int)(-(int64_t)value);
+        *result = -(pphp_int)value;
     } else {
         *result = (pphp_int)value;
     }
@@ -331,8 +339,17 @@ static int call_conversion_builtin(pphp_state *state, const pstring *name,
         }
         if (arguments[0].type == PT_STRING) {
             pphp_int converted;
-            (void)integer_from_string((const pstring *)arguments[0].as.gc,
-                                      base, &converted);
+            if (integer_from_string((const pstring *)arguments[0].as.gc,
+                                    base, &converted) < 0) {
+#if PPHP_ENABLE_FLOAT
+                *result = pv_int(converted);
+                return 1;
+#else
+                pphp_runtime_error(state, 0U,
+                                   "integer overflow requires float support");
+                return -1;
+#endif
+            }
             *result = pv_int(converted);
         } else if (pv_to_number(arguments[0], &number, &integer)) {
             *result = pv_int((pphp_int)number);
@@ -467,7 +484,12 @@ static int call_type_builtin(pphp_state *state, const pstring *name,
 static int numeric_argument(pphp_state *state, const char *name, pvalue value,
                             pphp_float *number, int *integer) {
     if (pv_to_number(value, number, integer)) return 1;
-    pphp_runtime_error(state, 0U, "%s() expects numeric arguments", name);
+    if (*integer < 0) {
+        pphp_runtime_error(state, 0U,
+                           "integer overflow requires float support");
+    } else {
+        pphp_runtime_error(state, 0U, "%s() expects numeric arguments", name);
+    }
     return 0;
 }
 
@@ -566,6 +588,11 @@ static int call_math_builtin(pphp_state *state, const pstring *name,
             !numeric_argument(state, "intdiv", arguments[1], &b, &bi)) return -1;
         if ((pphp_int)b == 0) {
             pphp_runtime_error(state, 0U, "Division by zero");
+            return -1;
+        }
+        if (pphp_integer_division_overflows((pphp_int)a, (pphp_int)b)) {
+            pphp_runtime_error(state, 0U,
+                               "integer overflow requires float support");
             return -1;
         }
         *result = pv_int((pphp_int)a / (pphp_int)b);
@@ -714,8 +741,25 @@ int pphp_call_builtin(pphp_state *state, const pstring *name,
             int integer;
             if (!pa_entry_at(array, position, &key, &item, &next)) break;
             if (pv_to_number(item, &number, &integer)) {
+#if !PPHP_ENABLE_FLOAT
+                if (!pphp_integer_add(sum, number, &sum)) {
+                    pv_release(key);
+                    pv_release(item);
+                    pphp_runtime_error(
+                        state, 0U,
+                        "integer overflow requires float support");
+                    return -1;
+                }
+#else
                 sum += number;
+#endif
                 all_integer = all_integer && integer;
+            } else if (integer < 0) {
+                pv_release(key);
+                pv_release(item);
+                pphp_runtime_error(state, 0U,
+                                   "integer overflow requires float support");
+                return -1;
             }
             pv_release(key);
             pv_release(item);
@@ -731,13 +775,37 @@ int pphp_call_builtin(pphp_state *state, const pstring *name,
     }
     if (name_is(name, "abs")) {
         pphp_float number;
-        int integer;
+        int integer = 0;
         if (count != 1U || !pv_to_number(arguments[0], &number, &integer)) {
-            pphp_runtime_error(state, 0U, "abs() expects one numeric argument");
+            pphp_runtime_error(
+                state, 0U, "%s",
+                integer < 0
+                    ? "integer overflow requires float support"
+                    : "abs() expects one numeric argument");
             return -1;
         }
         if (number < 0) {
-            number = -number;
+#if PPHP_ENABLE_FLOAT
+            if (integer && number >= (pphp_float)PPHP_INT_MINIMUM &&
+                number <= (pphp_float)PPHP_INT_MAXIMUM) {
+                pphp_int negated;
+                if (pphp_integer_negate((pphp_int)number, &negated)) {
+                    number = (pphp_float)negated;
+                } else {
+                    number = -number;
+                    integer = 0;
+                }
+            } else {
+                number = -number;
+                integer = 0;
+            }
+#else
+            if (!pphp_integer_negate(number, &number)) {
+                pphp_runtime_error(state, 0U,
+                                   "integer overflow requires float support");
+                return -1;
+            }
+#endif
         }
 #if PPHP_ENABLE_FLOAT
         *result = integer ? pv_int((pphp_int)number) : pv_float(number);

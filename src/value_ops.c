@@ -11,9 +11,143 @@
 #if PPHP_ENABLE_FLOAT
 #include <math.h>
 #endif
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 
+int pphp_integer_add(pphp_int left, pphp_int right, pphp_int *result) {
+    if ((right > 0 && left > PPHP_INT_MAXIMUM - right) ||
+        (right < 0 && left < PPHP_INT_MINIMUM - right)) {
+        return 0;
+    }
+    *result = left + right;
+    return 1;
+}
+
+int pphp_integer_subtract(pphp_int left, pphp_int right, pphp_int *result) {
+    if ((right > 0 && left < PPHP_INT_MINIMUM + right) ||
+        (right < 0 && left > PPHP_INT_MAXIMUM + right)) {
+        return 0;
+    }
+    *result = left - right;
+    return 1;
+}
+
+int pphp_integer_multiply(pphp_int left, pphp_int right, pphp_int *result) {
+    if (left > 0) {
+        if ((right > 0 && left > PPHP_INT_MAXIMUM / right) ||
+            (right < 0 && right < PPHP_INT_MINIMUM / left)) return 0;
+    } else if (left < 0) {
+        if ((right > 0 && left < PPHP_INT_MINIMUM / right) ||
+            (right < 0 && left < PPHP_INT_MAXIMUM / right)) return 0;
+    }
+    *result = left * right;
+    return 1;
+}
+
+int pphp_integer_negate(pphp_int value, pphp_int *result) {
+    if (value == PPHP_INT_MINIMUM) return 0;
+    *result = -value;
+    return 1;
+}
+
+int pphp_integer_division_overflows(pphp_int left, pphp_int right) {
+    return left == PPHP_INT_MINIMUM && right == (pphp_int)-1;
+}
+
+int pphp_integer_power(pphp_int base, pphp_int exponent, pphp_int *result) {
+    pphp_int value = 1;
+    if (exponent < 0) return 0;
+    while (exponent != 0) {
+        if ((exponent & 1) != 0 &&
+            !pphp_integer_multiply(value, base, &value)) return 0;
+        exponent >>= 1;
+        if (exponent != 0 &&
+            !pphp_integer_multiply(base, base, &base)) return 0;
+    }
+    *result = value;
+    return 1;
+}
+
+static pphp_int integer_shift_left(pphp_int value, pphp_int distance) {
+    unsigned width = (unsigned)(sizeof(pphp_int) * CHAR_BIT);
+    unsigned shift = (unsigned)((uint64_t)distance & (uint64_t)(width - 1U));
+#if PPHP_INT64
+    uint64_t bits = (uint64_t)value << shift;
+#else
+    uint32_t bits = (uint32_t)value << shift;
+#endif
+    pphp_int shifted;
+    memcpy(&shifted, &bits, sizeof(shifted));
+    return shifted;
+}
+
+static pphp_int integer_shift_right(pphp_int value, pphp_int distance) {
+    unsigned width = (unsigned)(sizeof(pphp_int) * CHAR_BIT);
+    unsigned shift = (unsigned)((uint64_t)distance & (uint64_t)(width - 1U));
+    uint64_t magnitude;
+    uint64_t quotient;
+    uint64_t remainder_mask;
+    if (shift == 0U) return value;
+    if (value >= 0) {
+        return (pphp_int)((uint64_t)value >> shift);
+    }
+    magnitude = UINT64_C(0) - (uint64_t)value;
+    quotient = magnitude >> shift;
+    remainder_mask = (UINT64_C(1) << shift) - 1U;
+    if ((magnitude & remainder_mask) != 0U) quotient++;
+    if (quotient == (uint64_t)PPHP_INT_MAXIMUM + 1U) {
+        return PPHP_INT_MINIMUM;
+    }
+    return -(pphp_int)quotient;
+}
+
+#if !PPHP_ENABLE_FLOAT
+static int string_number(const char *text, size_t length, pphp_float *number,
+                         int *is_integer, int require_complete) {
+    size_t position = 0U;
+    int negative = 0;
+    int digits = 0;
+    uint64_t magnitude = 0U;
+    uint64_t limit;
+    while (position < length &&
+           (text[position] == ' ' || text[position] == '\t' ||
+            text[position] == '\n' || text[position] == '\r')) position++;
+    if (position < length &&
+        (text[position] == '+' || text[position] == '-')) {
+        negative = text[position++] == '-';
+    }
+    limit = (uint64_t)PPHP_INT_MAXIMUM + (negative ? 1U : 0U);
+    while (position < length && text[position] >= '0' &&
+           text[position] <= '9') {
+        unsigned digit = (unsigned)(text[position++] - '0');
+        if (magnitude > (limit - digit) / 10U) {
+            *is_integer = -1;
+            return 0;
+        }
+        magnitude = magnitude * 10U + digit;
+        digits++;
+    }
+    if (digits == 0 ||
+        (position < length &&
+         (text[position] == '.' || text[position] == 'e' ||
+          text[position] == 'E'))) return 0;
+    if (require_complete) {
+        while (position < length &&
+               (text[position] == ' ' || text[position] == '\t' ||
+                text[position] == '\n' || text[position] == '\r')) position++;
+        if (position != length) return 0;
+    }
+    if (negative && magnitude == (uint64_t)PPHP_INT_MAXIMUM + 1U) {
+        *number = PPHP_INT_MINIMUM;
+    } else {
+        pphp_int integer = (pphp_int)magnitude;
+        *number = negative ? -integer : integer;
+    }
+    *is_integer = 1;
+    return 1;
+}
+#else
 static int string_number(const char *text, size_t length, pphp_float *number,
                          int *is_integer, int require_complete) {
     size_t i = 0U;
@@ -98,8 +232,10 @@ static int string_number(const char *text, size_t length, pphp_float *number,
     *is_integer = !fraction;
     return 1;
 }
+#endif
 
 int pv_to_number(pvalue value, pphp_float *number, int *is_integer) {
+    *is_integer = 0;
     switch ((pvalue_type)value.type) {
         case PT_INT:
             *number = (pphp_float)value.as.i;
@@ -131,6 +267,7 @@ int pv_to_number(pvalue value, pphp_float *number, int *is_integer) {
 }
 
 int pv_to_number_prefix(pvalue value, pphp_float *number, int *is_integer) {
+    *is_integer = 0;
     if (value.type == PT_STRING) {
         const pstring *string = (const pstring *)value.as.gc;
         return string_number(string->data, string->length, number,
@@ -139,30 +276,18 @@ int pv_to_number_prefix(pvalue value, pphp_float *number, int *is_integer) {
     return pv_to_number(value, number, is_integer);
 }
 
-static pvalue numeric_result(pphp_float number, int integers) {
 #if PPHP_ENABLE_FLOAT
-    if (integers && number >= (pphp_float)INT32_MIN && number <= (pphp_float)INT32_MAX &&
+static pvalue numeric_result(pphp_float number, int integers) {
+    if (integers && number >= (pphp_float)PPHP_INT_MINIMUM &&
+#if PPHP_INT64
+        number < (pphp_float)PPHP_INT_MAXIMUM &&
+#else
+        number <= (pphp_float)PPHP_INT_MAXIMUM &&
+#endif
         number == (pphp_float)(pphp_int)number) {
         return pv_int((pphp_int)number);
     }
     return pv_float(number);
-#else
-    (void)integers;
-    return pv_int(number);
-#endif
-}
-
-#if !PPHP_ENABLE_FLOAT
-static int integer_power(pphp_int base, pphp_int exponent, pphp_int *result) {
-    pphp_int value = 1;
-    if (exponent < 0) return 0;
-    while (exponent != 0) {
-        if ((exponent & 1) != 0) value *= base;
-        exponent >>= 1;
-        if (exponent != 0) base *= base;
-    }
-    *result = value;
-    return 1;
 }
 #endif
 
@@ -198,8 +323,8 @@ int pv_binary_operation(pv_operation operation, pvalue left, pvalue right,
                         pvalue *result, const char **error) {
     pphp_float a;
     pphp_float b;
-    int ai;
-    int bi;
+    int ai = 0;
+    int bi = 0;
     if (operation == PV_CONCAT) {
         pstring *left_string = pv_to_string(left);
         pstring *right_string = pv_to_string(right);
@@ -245,13 +370,36 @@ int pv_binary_operation(pv_operation operation, pvalue left, pvalue right,
     }
     if (!pv_to_number_prefix(left, &a, &ai) ||
         !pv_to_number_prefix(right, &b, &bi)) {
-        *error = "unsupported operand types";
+        *error = ai < 0 || bi < 0
+                     ? "integer overflow requires float support"
+                     : "unsupported operand types";
         return 0;
     }
     switch (operation) {
-        case PV_ADD: *result = numeric_result(a + b, ai && bi); return 1;
-        case PV_SUB: *result = numeric_result(a - b, ai && bi); return 1;
-        case PV_MUL: *result = numeric_result(a * b, ai && bi); return 1;
+        case PV_ADD:
+#if PPHP_ENABLE_FLOAT
+            *result = numeric_result(a + b, ai && bi);
+#else
+            if (!pphp_integer_add(a, b, &a)) goto integer_overflow;
+            *result = pv_int(a);
+#endif
+            return 1;
+        case PV_SUB:
+#if PPHP_ENABLE_FLOAT
+            *result = numeric_result(a - b, ai && bi);
+#else
+            if (!pphp_integer_subtract(a, b, &a)) goto integer_overflow;
+            *result = pv_int(a);
+#endif
+            return 1;
+        case PV_MUL:
+#if PPHP_ENABLE_FLOAT
+            *result = numeric_result(a * b, ai && bi);
+#else
+            if (!pphp_integer_multiply(a, b, &a)) goto integer_overflow;
+            *result = pv_int(a);
+#endif
+            return 1;
         case PV_DIV:
             if (b == (pphp_float)0) {
                 *error = "Division by zero";
@@ -260,6 +408,7 @@ int pv_binary_operation(pv_operation operation, pvalue left, pvalue right,
 #if PPHP_ENABLE_FLOAT
             *result = numeric_result(a / b, ai && bi && fmod((double)a, (double)b) == 0.0);
 #else
+            if (pphp_integer_division_overflows(a, b)) goto integer_overflow;
             if (a % b != 0) {
                 *error = "non-integral division requires float support";
                 return 0;
@@ -272,28 +421,43 @@ int pv_binary_operation(pv_operation operation, pvalue left, pvalue right,
                 *error = "Modulo by zero";
                 return 0;
             }
+            if (pphp_integer_division_overflows((pphp_int)a,
+                                                (pphp_int)b)) {
+#if PPHP_ENABLE_FLOAT
+                *result = pv_int(0);
+                return 1;
+#else
+                goto integer_overflow;
+#endif
+            }
             *result = pv_int((pphp_int)a % (pphp_int)b);
             return 1;
         case PV_POW:
 #if PPHP_ENABLE_FLOAT
             *result = numeric_result((pphp_float)pow((double)a, (double)b), 0);
 #else
-            if (!integer_power(a, b, &a)) {
+            if (b < 0) {
                 *error = "negative exponent requires float support";
                 return 0;
             }
+            if (!pphp_integer_power(a, b, &a)) goto integer_overflow;
             *result = pv_int(a);
 #endif
             return 1;
         case PV_BAND: *result = pv_int((pphp_int)a & (pphp_int)b); return 1;
         case PV_BOR: *result = pv_int((pphp_int)a | (pphp_int)b); return 1;
         case PV_BXOR: *result = pv_int((pphp_int)a ^ (pphp_int)b); return 1;
-        case PV_SHL: *result = pv_int((pphp_int)((uint32_t)(pphp_int)a << ((unsigned)b & 31U))); return 1;
-        case PV_SHR: *result = pv_int((pphp_int)a >> ((unsigned)b & 31U)); return 1;
+        case PV_SHL: *result = pv_int(integer_shift_left((pphp_int)a, (pphp_int)b)); return 1;
+        case PV_SHR: *result = pv_int(integer_shift_right((pphp_int)a, (pphp_int)b)); return 1;
         case PV_CONCAT: break;
     }
     *error = "invalid binary operation";
     return 0;
+#if !PPHP_ENABLE_FLOAT
+integer_overflow:
+    *error = "integer overflow requires float support";
+    return 0;
+#endif
 }
 
 int pv_compare(pvalue left, pvalue right, int strict, int *result,

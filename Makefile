@@ -49,6 +49,8 @@ COMPILER_OFF_TEST_BINARY := build/host/test_compiler_off
 COMPILER_OFF_DEVICE_OBJECT := build/host/p2sh_device_compiler_off.o
 NO_FLOAT_HOST_BINARY := build/host/php-pico-no-float
 NO_FLOAT_PBC_HOST_BINARY := build/host/php-pico-no-float-pbc
+NO_FLOAT_UBSAN_BINARY := build/host/php-pico-no-float-ubsan
+NO_FLOAT_INT64_BINARY := build/host/php-pico-no-float-int64
 FLOAT_REFERENCE_BINARY := build/host/php-pico-default-float
 RP2040_HOST_BINARY := build/host/php-pico-rp2040
 FLOAT_FORMAT_TEST_BINARY := build/host/test_float_format
@@ -62,7 +64,7 @@ ASAN_PARSER_BINARY := build/host/test_parser_asan
 ASAN_VM_BINARY := build/host/test_vm_asan
 ASAN_LEAKS := $(if $(filter Darwin,$(shell uname -s)),0,1)
 
-.PHONY: all FORCE host host-pbc host-rp2040 rp2040 test test-unit test-compiler-off test-no-float test-float-format test-phpt test-target test-asan test-diff bench size clean
+.PHONY: all FORCE host host-pbc host-rp2040 rp2040 test test-unit test-compiler-off test-no-float test-no-float-ubsan test-float-format test-phpt test-target test-asan test-diff bench size clean
 
 FORCE:
 
@@ -82,7 +84,7 @@ $(HOST_BINARY): FORCE $(HOST_SOURCES)
 	@mkdir -p $(@D)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(HOST_SOURCES) $(LDFLAGS) $(LDLIBS) -o $@
 
-$(PBC_HOST_BINARY): $(PBC_HOST_SOURCES)
+$(PBC_HOST_BINARY): FORCE $(PBC_HOST_SOURCES)
 	@mkdir -p $(@D)
 	$(CC) $(PBC_CPPFLAGS) $(CFLAGS) \
 		$(PBC_HOST_SOURCES) $(LDFLAGS) $(LDLIBS) -o $@
@@ -92,14 +94,14 @@ $(CONFIGURED_PBC_HOST_BINARY): FORCE $(PBC_HOST_SOURCES)
 	$(CC) $(PBC_CPPFLAGS) $(CFLAGS) \
 		$(PBC_HOST_SOURCES) $(LDFLAGS) $(LDLIBS) -o $@
 
-$(COMPILER_OFF_TEST_BINARY): $(COMPILER_OFF_TEST_SOURCES)
+$(COMPILER_OFF_TEST_BINARY): FORCE $(COMPILER_OFF_TEST_SOURCES)
 	@mkdir -p $(@D)
 	$(CC) $(PBC_CPPFLAGS) $(CFLAGS) \
 		$(COMPILER_OFF_TEST_SOURCES) $(LDFLAGS) $(LDLIBS) -o $@
 
-$(COMPILER_OFF_DEVICE_OBJECT): shell/p2sh_device.c
+$(COMPILER_OFF_DEVICE_OBJECT): FORCE shell/p2sh_device.c
 	@mkdir -p $(@D)
-	$(CC) $(PBC_CPPFLAGS) $(CFLAGS) -c $< -o $@
+	$(CC) $(PBC_CPPFLAGS) $(CFLAGS) -c shell/p2sh_device.c -o $@
 
 $(NO_FLOAT_HOST_BINARY): FORCE $(RUNTIME_COMMON_SOURCES) $(COMPILER_SOURCES) compiler/codegen.c tools/disasm.c shell/p2sh.c shell/p2sh_device.c ports/host/main.c
 	@mkdir -p $(@D)
@@ -114,6 +116,21 @@ $(NO_FLOAT_PBC_HOST_BINARY): FORCE $(RUNTIME_COMMON_SOURCES) tools/disasm.c port
 		-DPPHP_ENABLE_FLOAT=0 $(CFLAGS) $(RUNTIME_COMMON_SOURCES) \
 		tools/disasm.c ports/host/main.c $(LDFLAGS) -o $@
 
+$(NO_FLOAT_UBSAN_BINARY): FORCE $(RUNTIME_COMMON_SOURCES) $(COMPILER_SOURCES) compiler/codegen.c tools/disasm.c shell/p2sh.c shell/p2sh_device.c ports/host/main.c
+	@mkdir -p $(@D)
+	$(CC) $(filter-out -DPPHP_ENABLE_FLOAT=%,$(COMPILER_CPPFLAGS)) \
+		-DPPHP_ENABLE_FLOAT=0 $(CFLAGS) -O1 -g -fno-omit-frame-pointer \
+		-fsanitize=undefined $(RUNTIME_COMMON_SOURCES) $(COMPILER_SOURCES) \
+		compiler/codegen.c tools/disasm.c shell/p2sh.c shell/p2sh_device.c \
+		ports/host/main.c -fsanitize=undefined -o $@
+
+$(NO_FLOAT_INT64_BINARY): FORCE $(RUNTIME_COMMON_SOURCES) $(COMPILER_SOURCES) compiler/codegen.c tools/disasm.c shell/p2sh.c shell/p2sh_device.c ports/host/main.c
+	@mkdir -p $(@D)
+	$(CC) $(filter-out -DPPHP_ENABLE_FLOAT=%,$(COMPILER_CPPFLAGS)) \
+		-DPPHP_ENABLE_FLOAT=0 -DPPHP_INT64=1 $(CFLAGS) \
+		$(RUNTIME_COMMON_SOURCES) $(COMPILER_SOURCES) compiler/codegen.c \
+		tools/disasm.c shell/p2sh.c shell/p2sh_device.c ports/host/main.c -o $@
+
 $(FLOAT_REFERENCE_BINARY): FORCE $(RUNTIME_COMMON_SOURCES) src/float_format.c $(COMPILER_SOURCES) compiler/codegen.c tools/disasm.c shell/p2sh.c shell/p2sh_device.c ports/host/main.c
 	@mkdir -p $(@D)
 	$(CC) $(filter-out -DPPHP_ENABLE_FLOAT=%,$(COMPILER_CPPFLAGS)) \
@@ -127,33 +144,44 @@ $(RP2040_HOST_BINARY): $(HOST_SOURCES)
 		-DPPHP_DEVICE_FLOAT_FORMAT=1 $(CFLAGS) \
 		$(HOST_SOURCES) $(LDFLAGS) $(LDLIBS) -o $@
 
-$(FLOAT_FORMAT_TEST_BINARY): src/float_format.c tests/unit/test_float_format.c
+$(FLOAT_FORMAT_TEST_BINARY): FORCE src/float_format.c tests/unit/test_float_format.c
 	@mkdir -p $(@D)
 	$(CC) $(BASE_CPPFLAGS) -DPPHP_INT64=0 -DPPHP_USE_DOUBLE=0 \
-		-DPPHP_DEVICE_FLOAT_FORMAT=1 $(CFLAGS) $^ $(LDFLAGS) $(LDLIBS) -o $@
+		-DPPHP_DEVICE_FLOAT_FORMAT=1 $(CFLAGS) src/float_format.c \
+		tests/unit/test_float_format.c $(LDFLAGS) $(LDLIBS) -o $@
 
-$(TEST_BINARY): $(TEST_SOURCES)
+$(TEST_BINARY): FORCE $(TEST_SOURCES)
 	@mkdir -p $(@D)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(TEST_SOURCES) $(LDFLAGS) -o $@
 
-$(LEXER_TEST_BINARY): $(LEXER_TEST_SOURCES)
+$(LEXER_TEST_BINARY): FORCE $(LEXER_TEST_SOURCES)
 	@mkdir -p $(@D)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LEXER_TEST_SOURCES) $(LDFLAGS) -o $@
 
-$(PARSER_TEST_BINARY): $(PARSER_TEST_SOURCES)
+$(PARSER_TEST_BINARY): FORCE $(PARSER_TEST_SOURCES)
 	@mkdir -p $(@D)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(PARSER_TEST_SOURCES) $(LDFLAGS) -o $@
 
-$(VM_TEST_BINARY): $(VM_TEST_SOURCES)
+$(VM_TEST_BINARY): FORCE $(VM_TEST_SOURCES)
 	@mkdir -p $(@D)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(VM_TEST_SOURCES) $(LDFLAGS) $(LDLIBS) -o $@
 
-test-unit: $(TEST_BINARY) $(LEXER_TEST_BINARY) $(PARSER_TEST_BINARY) $(VM_TEST_BINARY) $(FLOAT_FORMAT_TEST_BINARY) $(HOST_BINARY)
+ifeq ($(PPHP_ENABLE_FLOAT),1)
+TEST_UNIT_DEPENDENCIES := $(TEST_BINARY) $(LEXER_TEST_BINARY) $(PARSER_TEST_BINARY) $(VM_TEST_BINARY) $(FLOAT_FORMAT_TEST_BINARY) $(HOST_BINARY)
+TEST_DEPENDENCIES := test-unit test-compiler-off test-no-float test-float-format test-phpt
+else
+TEST_UNIT_DEPENDENCIES := $(TEST_BINARY) $(LEXER_TEST_BINARY) $(PARSER_TEST_BINARY) $(HOST_BINARY)
+TEST_DEPENDENCIES := test-unit test-compiler-off test-no-float
+endif
+
+test-unit: $(TEST_UNIT_DEPENDENCIES)
 	$(TEST_BINARY)
 	$(LEXER_TEST_BINARY)
 	$(PARSER_TEST_BINARY)
+ifeq ($(PPHP_ENABLE_FLOAT),1)
 	$(VM_TEST_BINARY)
 	$(FLOAT_FORMAT_TEST_BINARY)
+endif
 	$(HOST_BINARY) --version
 	sh tests/cli/smoke.sh $(HOST_BINARY)
 
@@ -161,8 +189,13 @@ test-compiler-off: $(HOST_BINARY) $(CONFIGURED_PBC_HOST_BINARY) $(COMPILER_OFF_T
 	$(COMPILER_OFF_TEST_BINARY)
 	sh tests/cli/compiler_off.sh $(HOST_BINARY) $(CONFIGURED_PBC_HOST_BINARY)
 
-test-no-float: $(FLOAT_REFERENCE_BINARY) $(NO_FLOAT_HOST_BINARY) $(NO_FLOAT_PBC_HOST_BINARY)
+test-no-float: $(FLOAT_REFERENCE_BINARY) $(NO_FLOAT_HOST_BINARY) $(NO_FLOAT_PBC_HOST_BINARY) test-no-float-ubsan
 	sh tests/cli/no_float.sh $(FLOAT_REFERENCE_BINARY) $(NO_FLOAT_HOST_BINARY) $(NO_FLOAT_PBC_HOST_BINARY)
+
+test-no-float-ubsan: $(NO_FLOAT_HOST_BINARY) $(NO_FLOAT_UBSAN_BINARY) $(NO_FLOAT_INT64_BINARY)
+	sh tests/cli/no_float_overflow.sh $(NO_FLOAT_HOST_BINARY)
+	sh tests/cli/no_float_overflow.sh $(NO_FLOAT_UBSAN_BINARY)
+	sh tests/cli/no_float_int64.sh $(NO_FLOAT_INT64_BINARY)
 
 test-float-format: $(RP2040_HOST_BINARY) $(FLOAT_FORMAT_TEST_BINARY)
 	$(FLOAT_FORMAT_TEST_BINARY)
@@ -175,7 +208,7 @@ test-target:
 	@test -n "$(PORT)" || { echo "usage: make test-target PORT=/dev/ttyACM0"; exit 2; }
 	sh tools/phpt_run.sh --target=serial --port "$(PORT)" tests/phpt
 
-test: test-unit test-compiler-off test-no-float test-float-format test-phpt
+test: $(TEST_DEPENDENCIES)
 
 test-asan:
 	@mkdir -p $(dir $(ASAN_BINARY))

@@ -7,14 +7,6 @@
 #include <limits.h>
 #include <string.h>
 
-#if PPHP_INT64
-#define PPHP_INT_MAXIMUM INT64_MAX
-#define PPHP_INT_MINIMUM INT64_MIN
-#else
-#define PPHP_INT_MAXIMUM INT32_MAX
-#define PPHP_INT_MINIMUM INT32_MIN
-#endif
-
 static int name_is(const pstring *name, const char *expected) {
     return ps_equal_bytes(name, expected, strlen(expected));
 }
@@ -303,8 +295,24 @@ static int call_array_product(pphp_state *state, const pstring *name,
         int integer;
         if (!pa_entry_at(array, position, &key, &value, &next)) break;
         if (pv_to_number(value, &number, &integer)) {
+#if PPHP_ENABLE_FLOAT
             product *= number;
+#else
+            if (!pphp_integer_multiply(product, number, &product)) {
+                pv_release(key);
+                pv_release(value);
+                pphp_runtime_error(state, 0U,
+                                   "integer overflow requires float support");
+                return -1;
+            }
+#endif
             all_integer = all_integer && integer;
+        } else if (integer < 0) {
+            pv_release(key);
+            pv_release(value);
+            pphp_runtime_error(state, 0U,
+                               "integer overflow requires float support");
+            return -1;
         } else {
             product = 0;
         }
@@ -772,11 +780,13 @@ static int call_array_filter(pphp_state *state, const pstring *name,
     int mode = 0;
     int has_callback;
     if (count < 1U || count > 3U || arguments[0].type != PT_ARRAY ||
-        (count == 3U && arguments[2].type != PT_INT)) {
+        (count == 3U &&
+         (arguments[2].type != PT_INT || arguments[2].as.i < 0 ||
+          arguments[2].as.i > 2))) {
         return fail_arguments(state, name);
     }
     has_callback = count >= 2U && arguments[1].type != PT_NULL;
-    if (count == 3U) mode = arguments[2].as.i;
+    if (count == 3U) mode = (int)arguments[2].as.i;
     if (mode < 0 || mode > 2) return fail_arguments(state, name);
     source = (const parray *)arguments[0].as.gc;
     output = pa_new(source->size);

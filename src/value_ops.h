@@ -29,4 +29,11 @@ int pv_compare(pvalue left, pvalue right, int strict, int *result,
                const char **error);
 pstring *pv_to_string(pvalue value);
 
+int pphp_integer_add(pphp_int left, pphp_int right, pphp_int *result);
+int pphp_integer_subtract(pphp_int left, pphp_int right, pphp_int *result);
+int pphp_integer_multiply(pphp_int left, pphp_int right, pphp_int *result);
+int pphp_integer_negate(pphp_int value, pphp_int *result);
+int pphp_integer_division_overflows(pphp_int left, pphp_int right);
+int pphp_integer_power(pphp_int base, pphp_int exponent, pphp_int *result);
+
 #endif

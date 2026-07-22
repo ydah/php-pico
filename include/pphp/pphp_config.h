@@ -81,8 +81,12 @@
 
 #if PPHP_INT64
 typedef int64_t pphp_int;
+#define PPHP_INT_MINIMUM INT64_MIN
+#define PPHP_INT_MAXIMUM INT64_MAX
 #else
 typedef int32_t pphp_int;
+#define PPHP_INT_MINIMUM INT32_MIN
+#define PPHP_INT_MAXIMUM INT32_MAX
 #endif
 
 #if !PPHP_ENABLE_FLOAT

@@ -54,7 +54,7 @@ static int initialize_constants(pphp_state *state) {
     if (newline == NULL) return 0;
     newline_value = pv_heap(PT_STRING, &newline->header);
     ok = set_constant(state, "PHP_INT_MAX",
-                      pv_int((pphp_int)(PPHP_INT64 ? INT64_MAX : INT32_MAX))) &&
+                      pv_int(PPHP_INT_MAXIMUM)) &&
          set_constant(state, "PHP_INT_SIZE", pv_int((pphp_int)sizeof(pphp_int))) &&
 #if PPHP_ENABLE_FLOAT
          set_constant(state, "PHP_FLOAT_EPSILON",

@@ -493,8 +493,13 @@ static pvalue parse_number(json_parser *parser) {
             goto invalid;
         }
         ps_destroy(text);
-        if (!floating && integer && number >= (pphp_float)INT32_MIN &&
-            number <= (pphp_float)INT32_MAX) {
+        if (!floating && integer &&
+            number >= (pphp_float)PPHP_INT_MINIMUM &&
+#if PPHP_ENABLE_FLOAT && PPHP_INT64
+            number < (pphp_float)PPHP_INT_MAXIMUM) {
+#else
+            number <= (pphp_float)PPHP_INT_MAXIMUM) {
+#endif
             return pv_int((pphp_int)number);
         }
 #if PPHP_ENABLE_FLOAT

@@ -56,7 +56,7 @@ static int numeric_string_key(const pstring *string, pphp_int *integer) {
     if (string->data[i] == '0' && i + 1U < string->length) {
         return 0;
     }
-    limit = negative ? (uint64_t)INT32_MAX + 1U : (uint64_t)INT32_MAX;
+    limit = (uint64_t)PPHP_INT_MAXIMUM + (negative ? 1U : 0U);
     for (; i < string->length; i++) {
         unsigned digit;
         if (string->data[i] < '0' || string->data[i] > '9') return 0;
@@ -64,7 +64,12 @@ static int numeric_string_key(const pstring *string, pphp_int *integer) {
         if (value > (limit - digit) / 10U) return 0;
         value = value * 10U + digit;
     }
-    *integer = negative ? (pphp_int)(-(int64_t)value) : (pphp_int)value;
+    if (negative && value == (uint64_t)PPHP_INT_MAXIMUM + 1U) {
+        *integer = PPHP_INT_MINIMUM;
+    } else {
+        pphp_int magnitude = (pphp_int)value;
+        *integer = negative ? -magnitude : magnitude;
+    }
     return 1;
 }
 
@@ -295,7 +300,8 @@ int pa_set(parray *array, pvalue input, pvalue value) {
         array->entries[index].next = array->buckets[bucket];
         array->buckets[bucket] = index;
     }
-    if (key.type == PT_INT && key.as.i >= array->next_index && key.as.i < INT32_MAX) {
+    if (key.type == PT_INT && key.as.i >= array->next_index &&
+        key.as.i < PPHP_INT_MAXIMUM) {
         array->next_index = key.as.i + 1;
     }
     if (temporary) pv_release(key);
