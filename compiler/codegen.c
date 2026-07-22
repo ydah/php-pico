@@ -1586,9 +1586,30 @@ static void compile_argument_array(generator *gen, const pc_ast *argument,
     }
 }
 
-static void compile_quiet_expression(generator *gen, const pc_ast *node) {
+typedef struct access_chain_jumps {
+    size_t operands[PPHP_PARSE_DEPTH_MAX];
+    uint32_t lines[PPHP_PARSE_DEPTH_MAX];
+    size_t count;
+    int quiet;
+} access_chain_jumps;
+
+static int add_access_chain_jump(generator *gen, access_chain_jumps *jumps,
+                                 uint32_t line) {
+    if (jumps->count >= PPHP_PARSE_DEPTH_MAX) {
+        fail(gen, line, "nullsafe access nesting exceeds limit");
+        return 0;
+    }
+    jumps->operands[jumps->count] =
+        emit_jump(gen, OP_JMP_IFNULL_KEEP, line);
+    jumps->lines[jumps->count] = line;
+    jumps->count++;
+    return 1;
+}
+
+static void compile_access_chain_part(generator *gen, const pc_ast *node,
+                                      access_chain_jumps *jumps) {
     if (node == NULL || gen->failed) return;
-    if (node->kind == AST_VARIABLE) {
+    if (jumps->quiet && node->kind == AST_VARIABLE) {
         uint8_t slot;
         if (variable_slot(gen, node->as.literal.token, &slot)) {
             emit_byte(gen, OP_LOAD_LOCAL_QUIET, node->line);
@@ -1596,35 +1617,104 @@ static void compile_quiet_expression(generator *gen, const pc_ast *node) {
         }
         return;
     }
-    if (node->kind == AST_INDEX && node->as.index.key != NULL) {
-        compile_quiet_expression(gen, node->as.index.base);
+    if (node->kind == AST_CALL &&
+        node->as.call.callee->kind == AST_MEMBER &&
+        (node->as.call.callee->as.member.op == T_ARROW ||
+         node->as.call.callee->as.member.op == T_NULLSAFE_ARROW)) {
+        const pc_ast *member = node->as.call.callee;
+        const pc_ast *argument = node->as.call.arguments;
+        uint16_t method_name;
+        int has_spread = argument_list_has_spread(argument);
+        if (node->as.call.count > 31U) {
+            fail(gen, node->line, "a call may have at most 31 arguments");
+            return;
+        }
+        compile_access_chain_part(gen, member->as.member.base, jumps);
+        if (member->as.member.op == T_NULLSAFE_ARROW &&
+            !add_access_chain_jump(gen, jumps, node->line)) {
+            return;
+        }
+        method_name = member->as.member.dynamic_name == NULL
+                          ? name_constant(gen, member->as.member.name)
+                          : 0U;
+        if (member->as.member.dynamic_name != NULL) {
+            compile_expression(gen, member->as.member.dynamic_name);
+        }
+        if (has_spread) {
+            compile_argument_array(gen, argument, node->as.call.count,
+                                   node->line);
+            if (member->as.member.dynamic_name != NULL) {
+                emit_byte(gen, OP_MCALL_DYNAMIC_ARRAY, node->line);
+            } else {
+                emit_byte(gen, OP_MCALL_ARRAY, node->line);
+                emit_u16(gen, method_name, node->line);
+            }
+        } else {
+            while (argument != NULL) {
+                compile_expression(gen, argument);
+                argument = argument->next;
+            }
+            if (member->as.member.dynamic_name != NULL) {
+                emit_byte(gen, OP_MCALL_DYNAMIC, node->line);
+                emit_byte(gen, (uint8_t)node->as.call.count, node->line);
+            } else {
+                emit_byte(gen, OP_MCALL, node->line);
+                emit_u16(gen, method_name, node->line);
+                emit_byte(gen, (uint8_t)node->as.call.count, node->line);
+            }
+        }
+        return;
+    }
+    if (node->kind == AST_INDEX) {
+        if (node->as.index.key == NULL) {
+            fail(gen, node->line, "cannot read from an empty array index");
+            return;
+        }
+        compile_access_chain_part(gen, node->as.index.base, jumps);
         compile_expression(gen, node->as.index.key);
-        emit_byte(gen, OP_IDX_GET_QUIET, node->line);
+        emit_byte(gen, jumps->quiet ? OP_IDX_GET_QUIET : OP_IDX_GET,
+                  node->line);
         return;
     }
     if (node->kind == AST_MEMBER &&
         (node->as.member.op == T_ARROW ||
          node->as.member.op == T_NULLSAFE_ARROW)) {
-        size_t nullsafe_end = 0U;
-        compile_quiet_expression(gen, node->as.member.base);
+        compile_access_chain_part(gen, node->as.member.base, jumps);
         if (node->as.member.op == T_NULLSAFE_ARROW) {
-            nullsafe_end = emit_jump(gen, OP_JMP_IFNULL_KEEP, node->line);
+            if (!add_access_chain_jump(gen, jumps, node->line)) return;
         }
         if (node->as.member.dynamic_name != NULL) {
             compile_expression(gen, node->as.member.dynamic_name);
-            emit_byte(gen, OP_PROP_GET_DYNAMIC_QUIET, node->line);
+            emit_byte(gen, jumps->quiet ? OP_PROP_GET_DYNAMIC_QUIET
+                                        : OP_PROP_GET_DYNAMIC,
+                      node->line);
         } else {
             uint16_t name = name_constant(gen, node->as.member.name);
-            emit_byte(gen, OP_PROP_GET_QUIET, node->line);
+            emit_byte(gen, jumps->quiet ? OP_PROP_GET_QUIET : OP_PROP_GET,
+                      node->line);
             emit_u16(gen, name, node->line);
-        }
-        if (node->as.member.op == T_NULLSAFE_ARROW) {
-            patch_jump(gen, nullsafe_end, gen->proto->code_length,
-                       node->line);
         }
         return;
     }
     compile_expression(gen, node);
+}
+
+static void compile_access_chain(generator *gen, const pc_ast *node,
+                                 int quiet) {
+    access_chain_jumps jumps;
+    size_t i;
+    memset(&jumps, 0, sizeof(jumps));
+    jumps.quiet = quiet;
+    compile_access_chain_part(gen, node, &jumps);
+    if (gen->failed) return;
+    for (i = 0U; i < jumps.count; i++) {
+        patch_jump(gen, jumps.operands[i], gen->proto->code_length,
+                   jumps.lines[i]);
+    }
+}
+
+static void compile_quiet_expression(generator *gen, const pc_ast *node) {
+    compile_access_chain(gen, node, 1);
 }
 
 static void compile_expression(generator *gen, const pc_ast *node) {
@@ -1897,51 +1987,7 @@ static void compile_expression(generator *gen, const pc_ast *node) {
             if (node->as.call.callee->kind == AST_MEMBER &&
                 (node->as.call.callee->as.member.op == T_ARROW ||
                  node->as.call.callee->as.member.op == T_NULLSAFE_ARROW)) {
-                uint16_t method_name;
-                size_t null_result = 0U;
-                compile_expression(gen, node->as.call.callee->as.member.base);
-                if (node->as.call.callee->as.member.op == T_NULLSAFE_ARROW) {
-                    null_result = emit_jump(gen, OP_JMP_IFNULL_KEEP,
-                                            node->line);
-                }
-                method_name = node->as.call.callee->as.member.dynamic_name == NULL
-                                  ? name_constant(
-                                        gen,
-                                        node->as.call.callee->as.member.name)
-                                  : 0U;
-                if (node->as.call.callee->as.member.dynamic_name != NULL) {
-                    compile_expression(
-                        gen, node->as.call.callee->as.member.dynamic_name);
-                }
-                if (has_spread) {
-                    compile_argument_array(gen, argument, node->as.call.count,
-                                           node->line);
-                    if (node->as.call.callee->as.member.dynamic_name != NULL) {
-                        emit_byte(gen, OP_MCALL_DYNAMIC_ARRAY, node->line);
-                    } else {
-                        emit_byte(gen, OP_MCALL_ARRAY, node->line);
-                        emit_u16(gen, method_name, node->line);
-                    }
-                } else {
-                    while (argument != NULL) {
-                        compile_expression(gen, argument);
-                        argument = argument->next;
-                    }
-                    if (node->as.call.callee->as.member.dynamic_name != NULL) {
-                        emit_byte(gen, OP_MCALL_DYNAMIC, node->line);
-                        emit_byte(gen, (uint8_t)node->as.call.count,
-                                  node->line);
-                    } else {
-                        emit_byte(gen, OP_MCALL, node->line);
-                        emit_u16(gen, method_name, node->line);
-                        emit_byte(gen, (uint8_t)node->as.call.count,
-                                  node->line);
-                    }
-                }
-                if (node->as.call.callee->as.member.op == T_NULLSAFE_ARROW) {
-                    patch_jump(gen, null_result, gen->proto->code_length,
-                               node->line);
-                }
+                compile_access_chain(gen, node, 0);
                 break;
             }
             if (node->as.call.callee->kind == AST_MEMBER &&
@@ -2097,9 +2143,9 @@ static void compile_expression(generator *gen, const pc_ast *node) {
             break;
         }
         case AST_MEMBER: {
-            uint16_t name;
             if (node->as.member.op == T_SCOPE) {
                 uint16_t class_name;
+                uint16_t name;
                 if (node->as.member.base->kind != AST_IDENTIFIER) {
                     fail(gen, node->line, "invalid static member target");
                     break;
@@ -2119,30 +2165,7 @@ static void compile_expression(generator *gen, const pc_ast *node) {
                 fail(gen, node->line, "invalid member access");
                 break;
             }
-            compile_expression(gen, node->as.member.base);
-            name = node->as.member.dynamic_name == NULL
-                       ? name_constant(gen, node->as.member.name) : 0U;
-            if (node->as.member.op == T_NULLSAFE_ARROW) {
-                size_t null_result = emit_jump(gen, OP_JMP_IFNULL_KEEP,
-                                               node->line);
-                if (node->as.member.dynamic_name != NULL) {
-                    compile_expression(gen, node->as.member.dynamic_name);
-                    emit_byte(gen, OP_PROP_GET_DYNAMIC, node->line);
-                } else {
-                    emit_byte(gen, OP_PROP_GET, node->line);
-                    emit_u16(gen, name, node->line);
-                }
-                patch_jump(gen, null_result, gen->proto->code_length,
-                           node->line);
-                break;
-            }
-            if (node->as.member.dynamic_name != NULL) {
-                compile_expression(gen, node->as.member.dynamic_name);
-                emit_byte(gen, OP_PROP_GET_DYNAMIC, node->line);
-            } else {
-                emit_byte(gen, OP_PROP_GET, node->line);
-                emit_u16(gen, name, node->line);
-            }
+            compile_access_chain(gen, node, 0);
             break;
         }
         case AST_NEW: {
@@ -2211,13 +2234,7 @@ static void compile_expression(generator *gen, const pc_ast *node) {
             break;
         }
         case AST_INDEX:
-            if (node->as.index.key == NULL) {
-                fail(gen, node->line, "cannot read from an empty array index");
-                break;
-            }
-            compile_expression(gen, node->as.index.base);
-            compile_expression(gen, node->as.index.key);
-            emit_byte(gen, OP_IDX_GET, node->line);
+            compile_access_chain(gen, node, 0);
             break;
         case AST_ISSET:
             compile_quiet_expression(gen, node->as.unary.operand);

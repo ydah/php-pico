@@ -109,6 +109,32 @@ quiet_expected='0:1:7:8:0:6:0:5:0:5:0:3
 assert_output "$warnings_on" "$quiet_source" "$quiet_expected"
 assert_output "$warnings_off" "$quiet_source" "$quiet_expected"
 
+chain_source='class ChainProbe { public $value = 5; public $child; public function childValue() { return $this->child; } }
+$chainEffects = 0;
+function chain_effect($name) { global $chainEffects; $chainEffects++; return $name; }
+$nullChain = null;
+echo (isset($nullChain?->child[chain_effect("key")]) ? 1 : 0), ":", (empty($nullChain?->child[chain_effect("key")]) ? 1 : 0), ":", ($nullChain?->child[chain_effect("key")] ?? 7), ":";
+echo (isset($nullChain?->child->{chain_effect("value")}) ? 1 : 0), ":", (empty($nullChain?->child->{chain_effect("value")}) ? 1 : 0), ":", ($nullChain?->child->{chain_effect("value")} ?? 7), ":", $chainEffects, ":";
+$normalNull = $nullChain?->child[chain_effect("key")];
+echo ($normalNull === null ? 1 : 0), ":", $chainEffects, ":";
+$normalCallNull = $nullChain?->childValue()[chain_effect("key")];
+echo ($normalCallNull === null ? 1 : 0), ":", $chainEffects, ":";
+$leaf = new ChainProbe();
+$chain = new ChainProbe();
+$chain->child = ["first" => ["second" => $leaf]];
+echo (isset($chain?->child[chain_effect("first")][chain_effect("second")]->{chain_effect("value")}) ? 1 : 0), ":", $chainEffects, ":";
+echo (empty($chain?->child[chain_effect("first")][chain_effect("second")]->{chain_effect("value")}) ? 1 : 0), ":", $chainEffects, ":";
+echo ($chain?->child[chain_effect("first")][chain_effect("second")]->{chain_effect("value")} ?? 0), ":", $chainEffects, ":";
+$normalValue = $chain?->child[chain_effect("first")][chain_effect("second")]->{chain_effect("value")};
+echo $normalValue, ":", $chainEffects, ":";
+$normalCallValue = $chain?->childValue()[chain_effect("first")][chain_effect("second")]->{chain_effect("value")};
+echo $normalCallValue, ":", $chainEffects, ":";
+$nullableChild = new ChainProbe();
+echo ($nullableChild?->child->{chain_effect("value")} ?? 8), ":", $chainEffects, "\n";'
+chain_expected='0:1:7:0:1:7:0:1:0:1:0:1:3:0:6:5:9:5:12:5:15:8:16'
+assert_output "$warnings_on" "$chain_source" "$chain_expected"
+assert_output "$warnings_off" "$chain_source" "$chain_expected"
+
 numeric_source='echo "12tail" + 3, ":", -"2x", ":", +"4y", ":", "1a" + "2b", "\n";'
 numeric_on='Warning: A non-numeric value encountered on line 1
 Warning: A non-numeric value encountered on line 1
@@ -153,6 +179,24 @@ $pbcNull = null;
 echo (isset($pbcNull?->{pbc_quiet_name()}) ? 1 : 0), ':', (empty($pbcNull?->{pbc_quiet_name()}) ? 1 : 0), ':', ($pbcNull?->{pbc_quiet_name()} ?? 7), ':', $pbcEffects, "\n";
 $pbcBox = new PbcQuietProbe();
 echo (isset($pbcBox?->{pbc_quiet_name()}) ? 1 : 0), ':', (empty($pbcBox?->{pbc_quiet_name()}) ? 1 : 0), ':', ($pbcBox?->{pbc_quiet_name()} ?? 0), ':', $pbcEffects, "\n";
+class PbcChainProbe { public $value = 5; public $child; }
+$pbcChainEffects = 0;
+function pbc_chain_effect($name) { global $pbcChainEffects; $pbcChainEffects++; return $name; }
+$pbcNullChain = null;
+echo (isset($pbcNullChain?->child[pbc_chain_effect("key")]) ? 1 : 0), ':', (empty($pbcNullChain?->child[pbc_chain_effect("key")]) ? 1 : 0), ':', ($pbcNullChain?->child[pbc_chain_effect("key")] ?? 7), ':';
+echo (isset($pbcNullChain?->child->{pbc_chain_effect("value")}) ? 1 : 0), ':', (empty($pbcNullChain?->child->{pbc_chain_effect("value")}) ? 1 : 0), ':', ($pbcNullChain?->child->{pbc_chain_effect("value")} ?? 7), ':', $pbcChainEffects, ':';
+$pbcNormalNull = $pbcNullChain?->child[pbc_chain_effect("key")];
+echo ($pbcNormalNull === null ? 1 : 0), ':', $pbcChainEffects, ':';
+$pbcLeaf = new PbcChainProbe();
+$pbcChain = new PbcChainProbe();
+$pbcChain->child = ["first" => ["second" => $pbcLeaf]];
+echo (isset($pbcChain?->child[pbc_chain_effect("first")][pbc_chain_effect("second")]->{pbc_chain_effect("value")}) ? 1 : 0), ':', $pbcChainEffects, ':';
+echo (empty($pbcChain?->child[pbc_chain_effect("first")][pbc_chain_effect("second")]->{pbc_chain_effect("value")}) ? 1 : 0), ':', $pbcChainEffects, ':';
+echo ($pbcChain?->child[pbc_chain_effect("first")][pbc_chain_effect("second")]->{pbc_chain_effect("value")} ?? 0), ':', $pbcChainEffects, ':';
+$pbcNormalValue = $pbcChain?->child[pbc_chain_effect("first")][pbc_chain_effect("second")]->{pbc_chain_effect("value")};
+echo $pbcNormalValue, ':', $pbcChainEffects, ':';
+$pbcNullableChild = new PbcChainProbe();
+echo ($pbcNullableChild?->child->{pbc_chain_effect("value")} ?? 8), ':', $pbcChainEffects, "\n";
 PHP
 "$warnings_on" -c "$temporary/warnings.php" -o "$temporary/warnings.pbc"
 pbc_expected='0:4
@@ -163,13 +207,15 @@ again
 Warning: A non-numeric value encountered on line 7
 9
 0:1:7:0
-1:0:6:3'
+1:0:6:3
+0:1:7:0:1:7:0:1:0:1:3:0:6:5:9:5:12:8:13'
 pbc_without='0:4
 missing
 again
 9
 0:1:7:0
-1:0:6:3'
+1:0:6:3
+0:1:7:0:1:7:0:1:0:1:3:0:6:5:9:5:12:8:13'
 pbc_actual=$($pbc_on "$temporary/warnings.pbc")
 test "$pbc_actual" = "$pbc_expected" ||
     fail 'compiler-off PBC runtime did not preserve warning behavior'
