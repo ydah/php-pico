@@ -1,7 +1,9 @@
 #include "state.h"
 
+#if PPHP_ENABLE_COMPILER
 #include "codegen.h"
 #include "parser.h"
+#endif
 #include "vm.h"
 #include "pclass.h"
 #include "parray.h"
@@ -16,6 +18,22 @@
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
+
+/* PBC v2 stores these lexer token values as the OP_INCLUDE operand. */
+enum {
+    PPHP_PBC_INCLUDE = 113,
+    PPHP_PBC_INCLUDE_ONCE = 114,
+    PPHP_PBC_REQUIRE = 129,
+    PPHP_PBC_REQUIRE_ONCE = 130
+};
+
+#if PPHP_ENABLE_COMPILER
+typedef char pphp_include_modes_match_pbc_v2[
+    T_INCLUDE == PPHP_PBC_INCLUDE &&
+    T_INCLUDE_ONCE == PPHP_PBC_INCLUDE_ONCE &&
+    T_REQUIRE == PPHP_PBC_REQUIRE &&
+    T_REQUIRE_ONCE == PPHP_PBC_REQUIRE_ONCE ? 1 : -1];
+#endif
 
 static void discard_output(void *context, const char *bytes, size_t length) {
     (void)context;
@@ -289,7 +307,11 @@ static int has_php_extension(const char *path) {
 
 static int resolve_include_path(const char *path, char *resolved) {
     static const char *const prefixes[] = {"/lib/", "/home/"};
+#if PPHP_ENABLE_COMPILER
     static const char *const suffixes[] = {".pbc", ".php"};
+#else
+    static const char *const suffixes[] = {".pbc"};
+#endif
     size_t i;
     size_t j;
     int extension;
@@ -328,15 +350,17 @@ int pphp_exec_include(pphp_state *state, const char *path, uint8_t mode,
     size_t length = 0U;
     pmodule module;
     pmodule *execution_module = &module;
+#if PPHP_ENABLE_COMPILER
     pc_arena arena;
     pc_parser parser;
     pc_ast *program;
     pc_codegen_error codegen_error;
+#endif
     pphp_state child;
-    int once = mode == (uint8_t)T_INCLUDE_ONCE ||
-               mode == (uint8_t)T_REQUIRE_ONCE;
-    int required = mode == (uint8_t)T_REQUIRE ||
-                   mode == (uint8_t)T_REQUIRE_ONCE;
+    int once = mode == (uint8_t)PPHP_PBC_INCLUDE_ONCE ||
+               mode == (uint8_t)PPHP_PBC_REQUIRE_ONCE;
+    int required = mode == (uint8_t)PPHP_PBC_REQUIRE ||
+                   mode == (uint8_t)PPHP_PBC_REQUIRE_ONCE;
     int status;
     char resolved[PPHP_FS_PATH_MAX];
     if (state == NULL || path == NULL || result == NULL) return PPHP_E_RUNTIME;
@@ -383,6 +407,7 @@ int pphp_exec_include(pphp_state *state, const char *path, uint8_t mode,
         module.owns_backing = 1U;
         bytes = NULL;
     } else {
+#if PPHP_ENABLE_COMPILER
         pc_arena_init(&arena, 4096U);
         pc_parser_init(&parser, &arena, bytes, length, 0);
         program = pc_parse_program(&parser);
@@ -405,6 +430,14 @@ int pphp_exec_include(pphp_state *state, const char *path, uint8_t mode,
             return PPHP_E_PARSE;
         }
         pc_arena_destroy(&arena);
+#else
+        pphp_runtime_error(state, 0U,
+                           "source compiler is disabled; include requires PBC: %s",
+                           path);
+        pphp_free(bytes);
+        pv_release(path_value);
+        return PPHP_E_PARSE;
+#endif
     }
     pphp_free(bytes);
     if (!validate_repl_functions(owner, &module)) {
@@ -576,6 +609,7 @@ void pphp_runtime_error(pphp_state *state, uint32_t line, const char *format, ..
 
 int pphp_exec_source_mode(pphp_state *state, const char *source, size_t length,
                           const char *chunk_name, int repl) {
+#if PPHP_ENABLE_COMPILER
     pc_arena arena;
     pc_parser parser;
     pc_ast *program;
@@ -629,6 +663,22 @@ int pphp_exec_source_mode(pphp_state *state, const char *source, size_t length,
         state->module = NULL;
     }
     return result;
+#else
+    (void)length;
+    (void)repl;
+    if (state == NULL || source == NULL) {
+        return PPHP_E_RUNTIME;
+    }
+    state->error[0] = '\0';
+    state->raised_class[0] = '\0';
+    state->error_line = 0U;
+    state->exit_requested = 0;
+    state->exit_status = 0;
+    state->chunk_name = chunk_name == NULL ? "<source>" : chunk_name;
+    pphp_runtime_error(state, 0U,
+                       "source compiler is disabled; execute PBC instead");
+    return PPHP_E_PARSE;
+#endif
 }
 
 int pphp_exec_source(pphp_state *state, const char *source, size_t length,

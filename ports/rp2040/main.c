@@ -31,6 +31,7 @@ static bool tick_callback(struct repeating_timer *timer) {
     return true;
 }
 
+#if PPHP_ENABLE_COMPILER
 static void report_error(void) {
     char line[352];
     int length = snprintf(line, sizeof(line), "%s on line %lu\r\n",
@@ -38,6 +39,7 @@ static void report_error(void) {
                           (unsigned long)pphp_last_error_line(runtime));
     if (length > 0) hal_console_write(line, (size_t)length);
 }
+#endif
 
 static int wait_for_recovery(void) {
     uint64_t deadline;
@@ -62,14 +64,18 @@ static int wait_for_recovery(void) {
 
 static void auto_start(void) {
     int result = PPHP_OK;
+#if PPHP_ENABLE_COMPILER
     if (pphp_fs_exists("/home/boot.php")) {
         result = pphp_p2sh_run_file(runtime, "/home/boot.php");
     }
+#endif
     if (result != PPHP_OK) return;
     if (pphp_fs_exists("/home/app.pbc")) {
         (void)pphp_p2sh_run_file(runtime, "/home/app.pbc");
+#if PPHP_ENABLE_COMPILER
     } else if (pphp_fs_exists("/home/app.php")) {
         (void)pphp_p2sh_run_file(runtime, "/home/app.php");
+#endif
     }
 }
 
@@ -114,6 +120,7 @@ static void history_load(char *line, size_t *length, size_t *cursor,
     redraw_line(prompt, line, *length, *cursor);
 }
 
+#if PPHP_ENABLE_COMPILER
 static void execute_repl_line(char *line) {
     static unsigned chunk = 1U;
     char name[32];
@@ -123,6 +130,7 @@ static void execute_repl_line(char *line) {
         report_error();
     }
 }
+#endif
 
 int main(void) {
     struct repeating_timer tick;
@@ -202,7 +210,11 @@ int main(void) {
                 (strcmp(line, "exit") == 0 || strcmp(line, "quit") == 0)) {
                 repl_mode = 0;
             } else if (repl_mode) {
+#if PPHP_ENABLE_COMPILER
                 execute_repl_line(line);
+#else
+                repl_mode = 0;
+#endif
             } else if (pphp_p2sh_execute(runtime, line) ==
                        PPHP_P2SH_ENTER_REPL) {
                 repl_mode = 1;

@@ -1,13 +1,15 @@
 #include "pphp/pphp.h"
+#if PPHP_ENABLE_COMPILER
 #include "ast.h"
 #include "lexer.h"
 #include "parser.h"
-#include "state.h"
 #include "codegen.h"
+#include "p2sh.h"
+#endif
+#include "state.h"
 #include "disasm.h"
 #include "pbc.h"
 #include "pphp/hal.h"
-#include "p2sh.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -16,6 +18,7 @@
 static uint8_t host_pool[PPHP_HEAP_SIZE];
 
 static void print_usage(FILE *stream) {
+#if PPHP_ENABLE_COMPILER
     fprintf(stream,
             "Usage: php-pico [--version]\n"
             "       php-pico --tokens file.php\n"
@@ -25,6 +28,12 @@ static void print_usage(FILE *stream) {
             "       php-pico -r 'code'\n"
             "       php-pico --shell\n"
             "       php-pico file.php\n");
+#else
+    fprintf(stream,
+            "Usage: php-pico [--version]\n"
+            "       php-pico -d file.pbc\n"
+            "       php-pico file.pbc\n");
+#endif
 }
 
 static char *read_file(const char *path, size_t *length) {
@@ -62,6 +71,7 @@ static char *read_file(const char *path, size_t *length) {
     return contents;
 }
 
+#if PPHP_ENABLE_COMPILER
 static void print_lexeme(const pc_token *token) {
     size_t i;
     putchar('"');
@@ -120,6 +130,7 @@ static int dump_ast(const char *source, size_t length, const char *path) {
     pc_arena_destroy(&arena);
     return PPHP_OK;
 }
+#endif
 
 static void write_stdout(void *context, const char *bytes, size_t length) {
     FILE *stream = context;
@@ -153,6 +164,7 @@ static int execute_source(const char *source, size_t length, const char *name,
     return result == PPHP_OK ? 0 : (result == PPHP_E_PARSE ? 1 : 255);
 }
 
+#if PPHP_ENABLE_COMPILER
 static int compile_module(const char *source, size_t length, const char *name,
                           pmodule *module) {
     pc_arena arena;
@@ -195,6 +207,7 @@ static int compile_file_to_pbc(const char *input, const char *output) {
     pphp_free(source);
     return result;
 }
+#endif
 
 static int disassemble_file(const char *path) {
     size_t length = 0U;
@@ -207,7 +220,11 @@ static int disassemble_file(const char *path) {
     if (length >= 4U && memcmp(contents, "PPBC", 4U) == 0) {
         result = pphp_pbc_load(contents, length, &module);
     } else {
+#if PPHP_ENABLE_COMPILER
         result = compile_module(contents, length, path, &module);
+#else
+        result = PPHP_E_PARSE;
+#endif
     }
     if (result == PPHP_OK) {
         if (!pphp_disassemble_module(stdout, &module)) {
@@ -241,6 +258,7 @@ static int execute_pbc(const void *bytes, size_t length) {
     return result == PPHP_OK ? 0 : (result == PPHP_E_PARSE ? 1 : 255);
 }
 
+#if PPHP_ENABLE_COMPILER
 static int run_repl(void) {
     pphp_state *state = pphp_open(NULL, 0U);
     int result;
@@ -266,6 +284,16 @@ static int run_shell(void) {
     pphp_close(state);
     return result;
 }
+#endif
+
+#if !PPHP_ENABLE_COMPILER
+static int compiler_unavailable(const char *operation) {
+    fprintf(stderr,
+            "php-pico: %s is unavailable because the source compiler is disabled\n",
+            operation);
+    return PPHP_E_PARSE;
+}
+#endif
 
 int main(int argc, char **argv) {
     pphp_pool_init(host_pool, sizeof(host_pool));
@@ -275,10 +303,15 @@ int main(int argc, char **argv) {
         return 0;
     }
     if (argc == 2 && strcmp(argv[1], "--shell") == 0) {
+#if PPHP_ENABLE_COMPILER
         return run_shell();
+#else
+        return compiler_unavailable("shell");
+#endif
     }
     if (argc == 3 && (strcmp(argv[1], "--tokens") == 0 ||
                       strcmp(argv[1], "--ast") == 0)) {
+#if PPHP_ENABLE_COMPILER
         size_t length = 0U;
         char *source = read_file(argv[2], &length);
         int result;
@@ -290,12 +323,23 @@ int main(int argc, char **argv) {
                      : dump_ast(source, length, argv[2]);
         pphp_free(source);
         return result;
+#else
+        return compiler_unavailable("source inspection");
+#endif
     }
     if (argc == 3 && strcmp(argv[1], "-r") == 0) {
+#if PPHP_ENABLE_COMPILER
         return execute_source(argv[2], strlen(argv[2]), "Command line code", 1);
+#else
+        return compiler_unavailable("inline PHP");
+#endif
     }
     if (argc == 5 && strcmp(argv[1], "-c") == 0 && strcmp(argv[3], "-o") == 0) {
+#if PPHP_ENABLE_COMPILER
         return compile_file_to_pbc(argv[2], argv[4]);
+#else
+        return compiler_unavailable("compilation");
+#endif
     }
     if (argc == 3 && strcmp(argv[1], "-d") == 0) {
         return disassemble_file(argv[2]);
@@ -313,7 +357,13 @@ int main(int argc, char **argv) {
         pphp_free(source);
         return result;
     }
-    if (argc == 1) return run_repl();
+    if (argc == 1) {
+#if PPHP_ENABLE_COMPILER
+        return run_repl();
+#else
+        return compiler_unavailable("REPL");
+#endif
+    }
     print_usage(stderr);
     return 2;
 }

@@ -9,6 +9,7 @@ endif()
 include(${PICO_SDK_PATH}/external/pico_sdk_import.cmake)
 
 project(php_pico VERSION 1.0.0 LANGUAGES C CXX ASM)
+option(PPHP_ENABLE_COMPILER "Build the PHP source compiler" ON)
 # pico-sdk 2.3 headers use C11 static_assert; php-pico sources remain C99.
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
@@ -36,10 +37,6 @@ set(PPHP_SOURCES
   ${PPHP_ROOT}/src/pbc.c
   ${PPHP_ROOT}/src/state.c
   ${PPHP_ROOT}/src/vm.c
-  ${PPHP_ROOT}/compiler/lexer.c
-  ${PPHP_ROOT}/compiler/ast.c
-  ${PPHP_ROOT}/compiler/parser.c
-  ${PPHP_ROOT}/compiler/codegen.c
   ${PPHP_ROOT}/stdlib/builtins.c
   ${PPHP_ROOT}/stdlib/strings.c
   ${PPHP_ROOT}/stdlib/arrays.c
@@ -56,6 +53,15 @@ set(PPHP_SOURCES
   ${CMAKE_CURRENT_LIST_DIR}/main.c
 )
 
+if(PPHP_ENABLE_COMPILER)
+  list(APPEND PPHP_SOURCES
+    ${PPHP_ROOT}/compiler/lexer.c
+    ${PPHP_ROOT}/compiler/ast.c
+    ${PPHP_ROOT}/compiler/parser.c
+    ${PPHP_ROOT}/compiler/codegen.c
+  )
+endif()
+
 set_source_files_properties(
   ${PPHP_SOURCES}
   PROPERTIES COMPILE_OPTIONS "-Wall;-Wextra;-Werror;-Wpedantic;-Wconversion;-Wshadow"
@@ -71,15 +77,20 @@ add_executable(php-pico ${PPHP_SOURCES})
 target_include_directories(php-pico PRIVATE
   ${PPHP_ROOT}/include
   ${PPHP_ROOT}/src
-  ${PPHP_ROOT}/compiler
   ${PPHP_ROOT}/stdlib
   ${PPHP_ROOT}/pgems
   ${PPHP_ROOT}/shell
 )
+if(PPHP_ENABLE_COMPILER)
+  target_include_directories(php-pico PRIVATE ${PPHP_ROOT}/compiler)
+endif()
 target_include_directories(php-pico SYSTEM PRIVATE
   ${PPHP_ROOT}/third_party/littlefs
 )
-target_compile_definitions(php-pico PRIVATE LFS_NO_MALLOC=1)
+target_compile_definitions(php-pico PRIVATE
+  LFS_NO_MALLOC=1
+  PPHP_ENABLE_COMPILER=$<BOOL:${PPHP_ENABLE_COMPILER}>
+)
 target_compile_options(php-pico PRIVATE
   -Os -fmerge-all-constants -ffunction-sections -fdata-sections
 )

@@ -1,9 +1,11 @@
 #include "p2sh_device.h"
 
+#include "files.h"
+#if PPHP_ENABLE_COMPILER
 #include "ast.h"
 #include "codegen.h"
-#include "files.h"
 #include "parser.h"
+#endif
 #include "pbc.h"
 #include "pphp/fs.h"
 #include "pphp/hal.h"
@@ -180,6 +182,7 @@ int pphp_p2sh_run_file(pphp_state *state, const char *path) {
 }
 
 static int compile_file(const char *input_path, const char *output_path) {
+#if PPHP_ENABLE_COMPILER
     char *source;
     size_t length;
     pc_arena arena;
@@ -219,6 +222,12 @@ static int compile_file(const char *input_path, const char *output_path) {
     pc_arena_destroy(&arena);
     pphp_free(source);
     return result;
+#else
+    (void)input_path;
+    (void)output_path;
+    write_line("pico: phpc: source compiler is disabled");
+    return PPHP_E_PARSE;
+#endif
 }
 
 static void list_directory(const char *path) {
@@ -444,7 +453,11 @@ int pphp_p2sh_execute(pphp_state *state, char *line) {
             (void)compile_file(input, output);
         }
     } else if (strcmp(command, "repl") == 0) {
+#if PPHP_ENABLE_COMPILER
         return PPHP_P2SH_ENTER_REPL;
+#else
+        write_line("pico: repl: source compiler is disabled");
+#endif
     } else {
         write_line("pico: unknown command");
     }
