@@ -751,6 +751,40 @@ static void convert_runtime_error(pphp_state *state, size_t throw_pc) {
 static int enter_method(pphp_state *state, pframe *caller,
                         const pmethod *method, uint8_t argument_count,
                         int constructor);
+static int enter_static_method(pphp_state *state, pframe *caller,
+                               const pmethod *method, pclass *called_class,
+                               uint8_t argument_count);
+
+static const pmethod *find_static_callable_method(
+    pphp_state *state, const pframe *frame, const char *class_name,
+    size_t class_length, const char *method_name, size_t method_length,
+    pclass **called_class) {
+    pclass *class_entry = pphp_find_class(state, class_name, class_length);
+    const pmethod *method;
+    if (called_class != NULL) *called_class = NULL;
+    if (class_entry == NULL) return NULL;
+    method = pclass_find_method(class_entry, method_name, method_length);
+    if (method == NULL || (method->flags & PC_STATIC) == 0U ||
+        !pclass_member_visible(method->flags, method->owner,
+                               frame->called_scope)) return NULL;
+    if (called_class != NULL) *called_class = class_entry;
+    return method;
+}
+
+static const pmethod *find_string_static_callable(
+    pphp_state *state, const pframe *frame, const pstring *callable,
+    pclass **called_class) {
+    const char *bytes = ps_data(callable);
+    size_t i;
+    for (i = 1U; i + 2U < callable->length; i++) {
+        if (bytes[i] == ':' && bytes[i + 1U] == ':') {
+            return find_static_callable_method(
+                state, frame, bytes, i, bytes + i + 2U,
+                callable->length - i - 2U, called_class);
+        }
+    }
+    return NULL;
+}
 
 static int expand_argument_array(pphp_state *state, uint32_t line,
                                  uint8_t *argument_count) {
@@ -818,12 +852,14 @@ static int value_is_callable(pphp_state *state, const pframe *frame,
         const pstring *name = (const pstring *)value.as.gc;
         return pphp_builtin_exists(name) ||
                pphp_native_function_exists(state, name) ||
-               pphp_find_function(state, name, NULL) != NULL;
+               pphp_find_function(state, name, NULL) != NULL ||
+               find_string_static_callable(state, frame, name, NULL) != NULL;
     }
     if (value.type == PT_OBJECT) {
         const pmethod *method = pclass_find_method(
             ((const pobject *)value.as.gc)->class_entry, "__invoke", 8U);
-        return method != NULL && pclass_member_visible(
+        return method != NULL && (method->flags & PC_STATIC) == 0U &&
+               pclass_member_visible(
             method->flags, method->owner, frame->called_scope);
     }
     if (value.type == PT_ARRAY) {
@@ -833,14 +869,23 @@ static int value_is_callable(pphp_state *state, const pframe *frame,
         int valid = pa_get((const parray *)value.as.gc, pv_int(0), &target) &&
                     pa_get((const parray *)value.as.gc, pv_int(1), &method_name) &&
                     pa_count((const parray *)value.as.gc) == 2U &&
-                    target.type == PT_OBJECT && method_name.type == PT_STRING;
+                    (target.type == PT_OBJECT || target.type == PT_STRING) &&
+                    method_name.type == PT_STRING;
         if (valid) {
             const pstring *name = (const pstring *)method_name.as.gc;
-            method = pclass_find_method(
-                ((const pobject *)target.as.gc)->class_entry,
-                ps_data(name), name->length);
-            valid = method != NULL && pclass_member_visible(
-                method->flags, method->owner, frame->called_scope);
+            if (target.type == PT_OBJECT) {
+                method = pclass_find_method(
+                    ((const pobject *)target.as.gc)->class_entry,
+                    ps_data(name), name->length);
+                valid = method != NULL && pclass_member_visible(
+                    method->flags, method->owner, frame->called_scope);
+            } else {
+                const pstring *class_name = (const pstring *)target.as.gc;
+                method = find_static_callable_method(
+                    state, frame, ps_data(class_name), class_name->length,
+                    ps_data(name), name->length, NULL);
+                valid = method != NULL;
+            }
         }
         pv_release(target);
         pv_release(method_name);
@@ -1276,6 +1321,17 @@ static int call_value(pphp_state *state, pframe *caller,
     base = state->stack_count - argument_count - 1U;
     callable = state->stack[base];
     if (callable.type == PT_STRING) {
+        pclass *called_class = NULL;
+        const pmethod *method = find_string_static_callable(
+            state, caller, (const pstring *)callable.as.gc, &called_class);
+        if (method != NULL) {
+            pv_release(callable);
+            memmove(state->stack + base, state->stack + base + 1U,
+                    (size_t)argument_count * sizeof(*state->stack));
+            state->stack_count--;
+            return enter_static_method(state, caller, method, called_class,
+                                       argument_count);
+        }
         return call_named_value(state, caller,
                                 (const pstring *)callable.as.gc,
                                 argument_count, base);
@@ -1284,21 +1340,34 @@ static int call_value(pphp_state *state, pframe *caller,
         pvalue target = pv_null();
         pvalue method_name = pv_null();
         const pmethod *method;
+        pclass *called_class = NULL;
         if (!pa_get((const parray *)callable.as.gc, pv_int(0), &target) ||
             !pa_get((const parray *)callable.as.gc, pv_int(1), &method_name) ||
-            target.type != PT_OBJECT || method_name.type != PT_STRING) {
+            pa_count((const parray *)callable.as.gc) != 2U ||
+            (target.type != PT_OBJECT && target.type != PT_STRING) ||
+            method_name.type != PT_STRING) {
             pv_release(target);
             pv_release(method_name);
             pphp_runtime_error(state, caller->line, "array is not a valid callable");
             return 0;
         }
-        method = pclass_find_method(
-            ((pobject *)target.as.gc)->class_entry,
-            ps_data((const pstring *)method_name.as.gc),
-            ((const pstring *)method_name.as.gc)->length);
-        if (method == NULL ||
-            !pclass_member_visible(method->flags, method->owner,
-                                   caller->called_scope)) {
+        if (target.type == PT_OBJECT) {
+            method = pclass_find_method(
+                ((pobject *)target.as.gc)->class_entry,
+                ps_data((const pstring *)method_name.as.gc),
+                ((const pstring *)method_name.as.gc)->length);
+            if (method != NULL && (method->flags & PC_STATIC) != 0U) {
+                called_class = ((pobject *)target.as.gc)->class_entry;
+            }
+        } else {
+            const pstring *class_name = (const pstring *)target.as.gc;
+            const pstring *name = (const pstring *)method_name.as.gc;
+            method = find_static_callable_method(
+                state, caller, ps_data(class_name), class_name->length,
+                ps_data(name), name->length, &called_class);
+        }
+        if (method == NULL || !pclass_member_visible(
+                method->flags, method->owner, caller->called_scope)) {
             pv_release(target);
             pv_release(method_name);
             pphp_runtime_error(state, caller->line,
@@ -1306,8 +1375,16 @@ static int call_value(pphp_state *state, pframe *caller,
             return 0;
         }
         pv_release(callable);
-        state->stack[base] = target;
         pv_release(method_name);
+        if (called_class != NULL) {
+            pv_release(target);
+            memmove(state->stack + base, state->stack + base + 1U,
+                    (size_t)argument_count * sizeof(*state->stack));
+            state->stack_count--;
+            return enter_static_method(state, caller, method, called_class,
+                                       argument_count);
+        }
+        state->stack[base] = target;
         return enter_method(state, caller, method, argument_count, 0);
     }
     if (callable.type == PT_OBJECT) {
@@ -1315,6 +1392,7 @@ static int call_value(pphp_state *state, pframe *caller,
         const pmethod *invoke = pclass_find_method(object->class_entry,
                                                    "__invoke", 8U);
         if (invoke == NULL ||
+            (invoke->flags & PC_STATIC) != 0U ||
             !pclass_member_visible(invoke->flags, invoke->owner,
                                    caller->called_scope)) {
             pphp_runtime_error(state, caller->line, "object is not callable");
@@ -1758,6 +1836,24 @@ static int return_from_function(pphp_state *state, pvalue result) {
         return 1;
     }
     return push(state, result);
+}
+
+static int validate_class_signatures(pphp_state *state, uint32_t line,
+                                     int reject_pending) {
+    size_t i;
+    for (i = 0U; i < state->class_count; i++) {
+        const pmethod *missing = NULL;
+        int complete = pclass_is_complete(state, state->classes[i], &missing);
+        if (complete != 0 && (!reject_pending || complete == 1)) continue;
+        pphp_runtime_error(
+            state, line, "class %.*s must implement method %.*s()",
+            (int)state->classes[i]->name->length,
+            ps_data(state->classes[i]->name),
+            missing == NULL ? 0 : (int)missing->name->length,
+            missing == NULL ? "" : ps_data(missing->name));
+        return 0;
+    }
+    return 1;
 }
 
 int pphp_vm_execute(pphp_state *state, const pmodule *module) {
@@ -2587,9 +2683,10 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
             }
             case OP_DEF_END: {
                 const pmethod *missing = NULL;
-                if (state->building_class != NULL &&
-                    !pclass_is_complete(state, state->building_class,
-                                        &missing)) {
+                int complete = state->building_class == NULL ? 0 :
+                    pclass_is_complete(state, state->building_class,
+                                       &missing);
+                if (state->building_class != NULL && complete == 0) {
                     pphp_runtime_error(
                         state, frame->line,
                         "class %.*s must implement method %.*s()",
@@ -2603,6 +2700,7 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                     pphp_runtime_error(state, frame->line, "cannot register class");
                 } else {
                     state->building_class = NULL;
+                    (void)validate_class_signatures(state, frame->line, 0);
                 }
                 break;
             }
@@ -3259,6 +3357,9 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
         if (state->error[0] != '\0' && !exception_processed) {
             convert_runtime_error(state, instruction_pc);
         }
+    }
+    if (state->error[0] == '\0' && !state->capture_halt_result) {
+        (void)validate_class_signatures(state, 0U, 1);
     }
     if (state->error[0] != '\0') {
         if (state->building_class != NULL) {

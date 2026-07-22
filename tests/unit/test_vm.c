@@ -1131,6 +1131,7 @@ TEST(pbc_loader_rejects_corrupt_declared_type_metadata) {
         "$closure = function (int $value) use ($outside): int {"
         " return $value + $outside;"
         "};"
+        "$otherClosure = function (): int { return 1; };"
         "if (true) { echo typed(new TypeBlobClass()); }"
         "$cast = (int)'1'; include 'not-executed.php';";
     uint8_t *bytes;
@@ -1149,6 +1150,7 @@ TEST(pbc_loader_rejects_corrupt_declared_type_metadata) {
     size_t call_opcode;
     size_t jump_opcode;
     size_t closure_opcode;
+    size_t other_closure_opcode;
     size_t cast_opcode;
     size_t include_opcode;
     size_t typecheck_opcode;
@@ -1156,6 +1158,8 @@ TEST(pbc_loader_rejects_corrupt_declared_type_metadata) {
     size_t method_opcode;
     size_t constructor_proto;
     size_t constructor_type;
+    size_t method_proto;
+    size_t method_name_record;
     size_t store_opcode;
     size_t string_record;
     pphp_pool_init(vm_pool, sizeof(vm_pool));
@@ -1184,6 +1188,7 @@ TEST(pbc_loader_rejects_corrupt_declared_type_metadata) {
     call_opcode = test_find_opcode(bytes, main_proto, OP_CALL, 0U);
     jump_opcode = test_find_opcode(bytes, main_proto, OP_JMP_UNLESS, 0U);
     closure_opcode = test_find_opcode(bytes, main_proto, OP_CLOSURE, 0U);
+    other_closure_opcode = test_find_opcode(bytes, main_proto, OP_CLOSURE, 1U);
     cast_opcode = test_find_opcode(bytes, main_proto, OP_CAST, 0U);
     include_opcode = test_find_opcode(bytes, main_proto, OP_INCLUDE, 0U);
     typecheck_opcode = test_find_opcode(bytes, typed_proto,
@@ -1198,6 +1203,7 @@ TEST(pbc_loader_rejects_corrupt_declared_type_metadata) {
     ASSERT_TRUE(call_opcode != SIZE_MAX);
     ASSERT_TRUE(jump_opcode != SIZE_MAX);
     ASSERT_TRUE(closure_opcode != SIZE_MAX);
+    ASSERT_TRUE(other_closure_opcode != SIZE_MAX);
     ASSERT_TRUE(cast_opcode != SIZE_MAX);
     ASSERT_TRUE(include_opcode != SIZE_MAX);
     ASSERT_TRUE(typecheck_opcode != SIZE_MAX);
@@ -1215,6 +1221,17 @@ TEST(pbc_loader_rejects_corrupt_declared_type_metadata) {
         constructor_type = test_proto_type_offset(bytes, constructor_proto);
         ASSERT_EQ(1, bytes[constructor_type]);
         ASSERT_EQ(PTYPE_VOID, bytes[constructor_type + 1U]);
+    }
+    {
+        uint16_t method_index = test_get_u16(bytes, method_opcode + 3U);
+        uint16_t method_name_sid;
+        ASSERT_TRUE(method_index < n_protos);
+        method_proto = test_get_u32(
+            bytes, proto_table + (size_t)method_index * 4U);
+        method_name_sid = test_get_u16(bytes, method_proto + 14U);
+        ASSERT_TRUE(method_name_sid < n_strings);
+        method_name_record = test_get_u32(
+            bytes, 16U + (size_t)method_name_sid * 4U);
     }
 
     memcpy(mutated, bytes, length);
@@ -1283,9 +1300,28 @@ TEST(pbc_loader_rejects_corrupt_declared_type_metadata) {
     test_put_u16(mutated, jump_opcode + 1U, UINT16_MAX - 1U);
     ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(mutated, length));
 
+    {
+        size_t code_start = main_proto + 16U;
+        size_t jump_pc = jump_opcode - code_start;
+        size_t code_length = test_get_u16(bytes, main_proto + 8U);
+        int16_t relative = (int16_t)(code_length - (jump_pc + 3U));
+        memcpy(mutated, bytes, length);
+        test_put_u16(mutated, jump_opcode + 1U, (uint16_t)relative);
+        ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(mutated, length));
+    }
+
     ASSERT_EQ(1, bytes[closure_opcode + 3U]);
     memcpy(mutated, bytes, length);
     test_put_u16(mutated, closure_opcode + 1U, n_protos);
+    ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(mutated, length));
+
+    memcpy(mutated, bytes, length);
+    test_put_u16(mutated, closure_opcode + 1U, 1U);
+    ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(mutated, length));
+
+    memcpy(mutated, bytes, length);
+    test_put_u16(mutated, other_closure_opcode + 1U,
+                 test_get_u16(bytes, closure_opcode + 1U));
     ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(mutated, length));
 
     memcpy(mutated, bytes, length);
@@ -1318,6 +1354,10 @@ TEST(pbc_loader_rejects_corrupt_declared_type_metadata) {
 
     memcpy(mutated, bytes, length);
     mutated[method_opcode + 5U] = PC_MOD_READONLY;
+    ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(mutated, length));
+
+    memcpy(mutated, bytes, length);
+    mutated[method_name_record + 2U] = 'X';
     ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(mutated, length));
 
     memcpy(mutated, bytes, length);

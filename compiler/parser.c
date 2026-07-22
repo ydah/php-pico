@@ -1240,10 +1240,18 @@ static pc_ast *parse_function(pc_parser *parser, pc_token keyword) {
         uint8_t parameter_flags = 0U;
         while (check(parser, T_PUBLIC) || check(parser, T_PROTECTED) ||
                check(parser, T_PRIVATE) || check(parser, T_READONLY)) {
-            if (check(parser, T_PUBLIC)) parameter_flags |= PC_MOD_PUBLIC;
-            else if (check(parser, T_PROTECTED)) parameter_flags |= PC_MOD_PROTECTED;
-            else if (check(parser, T_PRIVATE)) parameter_flags |= PC_MOD_PRIVATE;
-            else parameter_flags |= PC_MOD_READONLY;
+            uint8_t modifier = check(parser, T_PUBLIC) ? PC_MOD_PUBLIC :
+                               check(parser, T_PROTECTED) ? PC_MOD_PROTECTED :
+                               check(parser, T_PRIVATE) ? PC_MOD_PRIVATE :
+                               PC_MOD_READONLY;
+            if ((modifier & (PC_MOD_PUBLIC | PC_MOD_PROTECTED |
+                             PC_MOD_PRIVATE)) != 0U &&
+                (parameter_flags & (PC_MOD_PUBLIC | PC_MOD_PROTECTED |
+                                    PC_MOD_PRIVATE)) != 0U) {
+                fail_at(parser, parser->current,
+                        "multiple visibility modifiers are not allowed");
+            }
+            parameter_flags |= modifier;
             advance_token(parser);
         }
         if ((parameter_flags & PC_MOD_READONLY) != 0U &&
@@ -1307,10 +1315,23 @@ static uint8_t parse_member_modifiers(pc_parser *parser) {
     uint8_t flags = 0U;
     int scanning = 1;
     while (scanning) {
+        uint8_t visibility = flags &
+            (PC_MOD_PUBLIC | PC_MOD_PROTECTED | PC_MOD_PRIVATE);
         switch (parser->current.type) {
-            case T_PUBLIC: flags |= PC_MOD_PUBLIC; advance_token(parser); break;
-            case T_PROTECTED: flags |= PC_MOD_PROTECTED; advance_token(parser); break;
-            case T_PRIVATE: flags |= PC_MOD_PRIVATE; advance_token(parser); break;
+            case T_PUBLIC:
+            case T_PROTECTED:
+            case T_PRIVATE: {
+                uint8_t modifier = check(parser, T_PUBLIC) ? PC_MOD_PUBLIC :
+                                   check(parser, T_PROTECTED) ? PC_MOD_PROTECTED :
+                                   PC_MOD_PRIVATE;
+                if (visibility != 0U) {
+                    fail_at(parser, parser->current,
+                            "multiple visibility modifiers are not allowed");
+                }
+                flags |= modifier;
+                advance_token(parser);
+                break;
+            }
             case T_STATIC: flags |= PC_MOD_STATIC; advance_token(parser); break;
             case T_ABSTRACT: flags |= PC_MOD_ABSTRACT; advance_token(parser); break;
             case T_FINAL: flags |= PC_MOD_FINAL; advance_token(parser); break;

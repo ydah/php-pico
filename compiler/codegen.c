@@ -912,6 +912,7 @@ static void compile_closure_expression(generator *gen, const pc_ast *node) {
         fail(gen, node->line, "out of memory creating closure");
         return;
     }
+    proto->role = PPROTO_CLOSURE;
     parameter = node->as.closure.parameters;
     while (parameter != NULL) {
         pc_token parameter_name = parameter->as.parameter.name;
@@ -3252,6 +3253,7 @@ static int compile_method(generator *gen, const pc_ast *class_node,
         fail(gen, method->line, "out of memory creating method");
         return 0;
     }
+    proto->role = PPROTO_METHOD;
     proto->is_method = (uint8_t)((method->as.function.flags & PC_MOD_STATIC) == 0U);
     if (proto->is_method && !pproto_add_local(proto, "this", 4U, &ignored)) {
         fail(gen, method->line, "cannot allocate $this slot");
@@ -3265,6 +3267,14 @@ static int compile_method(generator *gen, const pc_ast *class_node,
             if (!is_constructor) {
                 fail(gen, parameter->line,
                      "property promotion is only valid in a constructor");
+                return 0;
+            }
+            if ((class_node->as.class_decl.flags & PC_MOD_INTERFACE) != 0U ||
+                (method->as.function.flags & PC_MOD_ABSTRACT) != 0U ||
+                method->as.function.declaration_only ||
+                (method->as.function.flags & PC_MOD_STATIC) != 0U) {
+                fail(gen, parameter->line,
+                     "property promotion requires a concrete instance constructor");
                 return 0;
             }
             if (parameter->as.parameter.variadic) {
@@ -3716,6 +3726,7 @@ int pc_codegen_program(const pc_ast *program, pmodule *module,
         (void)snprintf(error->message, sizeof(error->message), "out of memory creating module");
         return 0;
     }
+    entry->role = PPROTO_MAIN;
     memset(&gen, 0, sizeof(gen));
     gen.module = module;
     gen.proto = entry;

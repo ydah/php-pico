@@ -79,12 +79,21 @@ assert_output "$typecheck_on" "$class_source" 'Child:Base:Child:Child'
 
 callable_source='class Calls { public function method() { return 1; } }
 class Invokable { public function __invoke() { return 1; } }
+class StaticCalls {
+    public static function method() { return 1; }
+    private static function hidden() { return 1; }
+    public function instance() { return 1; }
+}
 function accepts(callable $value): bool { return true; }
+function invokes(callable $value): int { return $value(); }
 function user_callable() { return 1; }
 $calls = new Calls();
-echo accepts(function () {}), accepts(fn () => 1), accepts("strlen"), accepts("user_callable"), accepts([$calls, "method"]), accepts(new Invokable());
-try { accepts("missing_callable"); } catch (TypeError $error) { echo ":", get_class($error); }'
-assert_output "$typecheck_on" "$callable_source" '111111:TypeError'
+$staticCalls = new StaticCalls();
+echo accepts(function () {}), accepts(fn () => 1), accepts("strlen"), accepts("user_callable"), accepts([$calls, "method"]), accepts(new Invokable()), accepts(["StaticCalls", "method"]), invokes(["StaticCalls", "method"]), invokes("StaticCalls::method"), accepts([$staticCalls, "method"]), invokes([$staticCalls, "method"]);
+try { accepts("missing_callable"); } catch (TypeError $error) { echo ":", get_class($error); }
+try { accepts(["StaticCalls", "hidden"]); } catch (TypeError $error) { echo ":private"; }
+try { accepts("StaticCalls::instance"); } catch (TypeError $error) { echo ":instance"; }'
+assert_output "$typecheck_on" "$callable_source" '11111111111:TypeError:private:instance'
 
 binding_source='function defaults(int $value = 4): int { return $value; }
 function variadic(int ...$values): int { return count($values); }
@@ -236,6 +245,30 @@ assert_failure "$typecheck_on" \
     'interface I { public function f(int ...$v): int; } class C implements I { public function f(int $v): int { return 1; } }' \
     'must implement method f' variance-variadic
 
+forward_variance_source='class ForwardBase {
+    public function convert(ForwardChild $value): ForwardParent { return new ForwardParent(); }
+}
+class ForwardImpl extends ForwardBase {
+    public function convert(ForwardParent $value): ForwardChild { return new ForwardChild(); }
+}
+interface ForwardContract {
+    public function apply(ForwardChild $value): ForwardParent;
+}
+class ForwardContractImpl implements ForwardContract {
+    public function apply(ForwardParent $value): ForwardChild { return new ForwardChild(); }
+}
+$callbackValues = array_map(fn ($value) => $value, [7]);
+class ForwardParent {}
+class ForwardChild extends ForwardParent {}
+echo get_class((new ForwardImpl())->convert(new ForwardChild())), ":",
+     get_class((new ForwardContractImpl())->apply(new ForwardChild())), ":",
+     $callbackValues[0];'
+assert_output "$typecheck_on" "$forward_variance_source" \
+    'ForwardChild:ForwardChild:7'
+assert_failure "$typecheck_on" \
+    'class A { public function f(LateA $v): LateB { return new LateB(); } } class B extends A { public function f(LateC $v): LateD { return new LateD(); } } class LateA {} class LateB {} class LateC {} class LateD {}' \
+    'must implement method f' forward-variance-invalid
+
 readonly_source='class ReadonlyPromotion {
     public function __construct(public readonly int $id = 7) {}
 }
@@ -266,6 +299,23 @@ assert_failure "$typecheck_off" \
 assert_failure "$typecheck_off" \
     'class Base {} readonly class Bad extends Base {}' \
     'readonly classes may only extend readonly classes' readonly-child
+assert_failure "$typecheck_off" \
+    'interface Bad { public function __CONSTRUCT(public int $value); }' \
+    'property promotion requires a concrete instance constructor' promotion-interface
+assert_failure "$typecheck_off" \
+    'abstract class Bad { abstract public function __construct(public int $value); }' \
+    'property promotion requires a concrete instance constructor' promotion-abstract
+assert_failure "$typecheck_off" \
+    'class Bad { public static function __Construct(public int $value) {} }' \
+    'property promotion requires a concrete instance constructor' promotion-static
+assert_failure "$typecheck_off" 'class Bad { public private int $value; }' \
+    'multiple visibility modifiers' visibility-property
+assert_failure "$typecheck_off" \
+    'class Bad { protected public function value() {} }' \
+    'multiple visibility modifiers' visibility-method
+assert_failure "$typecheck_off" \
+    'class Bad { public function __construct(public private int $value) {} }' \
+    'multiple visibility modifiers' visibility-promotion
 
 assert_output "$int64" \
     'function wide(int $value): int { return $value; } echo wide(2147483648);' \
@@ -295,19 +345,37 @@ class PbcVoidConstructor {
         try { return; } finally {}
     }
 }
+class PbcForwardBase {
+    public function late(PbcLateChild $value): PbcLateBase { return new PbcLateBase(); }
+}
+class PbcForwardImpl extends PbcForwardBase {
+    public function late(PbcLateBase $value): PbcLateChild { return new PbcLateChild(); }
+}
+class PbcStaticCallable {
+    public static function value(): int { return 1; }
+    public function instance(): int { return 1; }
+}
+class PbcLateBase {}
+class PbcLateChild extends PbcLateBase {}
+function pbc_invoke(callable $value): int { return $value(); }
 function pbc_typed(PbcMarker $value): string { return $value->name; }
 $value = new PbcValue();
 echo pbc_typed($value), ":", $value->identity($value)->name, ":";
 try { pbc_typed("bad"); } catch (TypeError $error) { echo get_class($error); }
 pbc_void_finally(); new PbcVoidConstructor();
-echo ":", get_class((new PbcChild())->convert("ok")), ":", (new PbcReadonly())->id;
+echo ":", get_class((new PbcChild())->convert("ok")), ":", (new PbcReadonly())->id,
+     ":", get_class((new PbcForwardImpl())->late(new PbcLateChild())),
+     ":", pbc_invoke(["PbcStaticCallable", "value"]),
+     ":", pbc_invoke("PbcStaticCallable::value");
+try { pbc_invoke("PbcStaticCallable::instance"); }
+catch (TypeError $error) { echo ":instance"; }
 PHP
 "$typecheck_on" -c "$temporary/typed.php" -o "$temporary/typed.pbc"
-test "$("$pbc_on" "$temporary/typed.pbc")" = 'pbc:pbc:TypeError:PbcChild:4' ||
+test "$("$pbc_on" "$temporary/typed.pbc")" = 'pbc:pbc:TypeError:PbcChild:4:PbcLateChild:1:1:instance' ||
     fail 'type metadata was not enforced by the compiler-free runtime'
 ASAN_OPTIONS=detect_leaks=0 "$asan" "$temporary/typed.pbc" \
     >"$temporary/asan-pbc.out"
-test "$(cat "$temporary/asan-pbc.out")" = 'pbc:pbc:TypeError:PbcChild:4' ||
+test "$(cat "$temporary/asan-pbc.out")" = 'pbc:pbc:TypeError:PbcChild:4:PbcLateChild:1:1:instance' ||
     fail 'ASan runtime changed typed PBC execution'
 
 if "$pbc_off" "$temporary/typed.pbc" >"$temporary/mismatch.out" \
@@ -345,6 +413,29 @@ fi
 grep -q 'must implement method value' "$temporary/variance-bad.err" ||
     fail 'compiler-free runtime did not validate method variance'
 
+cat >"$temporary/forward-variance-bad.php" <<'PHP'
+<?php
+class ForwardBadBase {
+    public function value(ForwardOne $value): ForwardTwo { return new ForwardTwo(); }
+}
+class ForwardBadChild extends ForwardBadBase {
+    public function value(ForwardThree $value): ForwardFour { return new ForwardFour(); }
+}
+class ForwardOne {}
+class ForwardTwo {}
+class ForwardThree {}
+class ForwardFour {}
+PHP
+"$typecheck_on" -c "$temporary/forward-variance-bad.php" \
+    -o "$temporary/forward-variance-bad.pbc"
+if "$pbc_on" "$temporary/forward-variance-bad.pbc" \
+        >"$temporary/forward-variance-bad.out" \
+        2>"$temporary/forward-variance-bad.err"; then
+    fail 'compiler-free runtime accepted invalid forward variance'
+fi
+grep -q 'must implement method value' "$temporary/forward-variance-bad.err" ||
+    fail 'compiler-free runtime did not resolve forward variance'
+
 printf '<?php echo 1;\n' >"$temporary/float-config.php"
 "$typecheck_off" -c "$temporary/float-config.php" \
     -o "$temporary/float-config.pbc"
@@ -352,7 +443,7 @@ if "$no_float_off" "$temporary/float-config.pbc" \
         >"$temporary/float-config.out" 2>"$temporary/float-config.err"; then
     fail 'integer-only runtime accepted float-enabled PBC'
 fi
-grep -q 'invalid or incompatible PBC image' "$temporary/float-config.err" ||
+grep -q 'PBC image requires float support' "$temporary/float-config.err" ||
     fail 'float PBC configuration mismatch was not reported'
 
 echo 'typecheck tests passed'

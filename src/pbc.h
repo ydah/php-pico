@@ -16,6 +16,13 @@ typedef struct pcatch {
     uint8_t reserved;
 } pcatch;
 
+typedef enum pproto_role {
+    PPROTO_FUNCTION = 0,
+    PPROTO_MAIN,
+    PPROTO_METHOD,
+    PPROTO_CLOSURE
+} pproto_role;
+
 #if PPHP_TYPECHECK
 typedef enum ptype_kind {
     PTYPE_INT = 1,
@@ -53,6 +60,7 @@ typedef struct pproto {
     uint8_t is_method;
     uint8_t conditional;
     uint8_t owns_code;
+    uint8_t role;
     uint8_t n_locals;
     uint16_t max_stack;
     uint8_t *code;

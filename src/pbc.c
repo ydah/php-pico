@@ -148,6 +148,9 @@ int pmodule_add(pmodule *module, pproto *proto) {
                     &module->capacity, module->count + 1U)) {
         return 0;
     }
+    if (module->count == 0U && proto->role == PPROTO_FUNCTION) {
+        proto->role = PPROTO_MAIN;
+    }
     module->protos[module->count++] = proto;
     return 1;
 }
@@ -157,7 +160,8 @@ const pproto *pmodule_find(const pmodule *module, const pstring *name) {
     size_t j;
     for (i = 1U; i < module->count; i++) {
         const pstring *candidate = module->protos[i]->name;
-        if (module->protos[i]->conditional) continue;
+        if (module->protos[i]->conditional ||
+            module->protos[i]->role != PPROTO_FUNCTION) continue;
         int equal = candidate->length == name->length;
         for (j = 0U; equal && j < name->length; j++) {
             unsigned char left = (unsigned char)ps_data(candidate)[j];
@@ -243,21 +247,6 @@ static int pbc_flag_visibility(uint8_t flags) {
     return visibility == 1U || visibility == 2U || visibility == 4U;
 }
 
-#if PPHP_TYPECHECK
-static int pbc_bytes_equal_ci(const char *left, size_t left_length,
-                              const char *right, size_t right_length) {
-    size_t i;
-    if (left_length != right_length) return 0;
-    for (i = 0U; i < left_length; i++) {
-        unsigned char a = (unsigned char)left[i];
-        unsigned char b = (unsigned char)right[i];
-        if (a >= 'A' && a <= 'Z') a = (unsigned char)(a + ('a' - 'A'));
-        if (b >= 'A' && b <= 'Z') b = (unsigned char)(b + ('a' - 'A'));
-        if (a != b) return 0;
-    }
-    return 1;
-}
-
 static int pbc_identifier_bytes(const char *bytes, size_t length) {
     size_t i;
     unsigned char byte;
@@ -275,6 +264,21 @@ static int pbc_identifier_bytes(const char *bytes, size_t length) {
               byte >= 0x80U)) {
             return 0;
         }
+    }
+    return 1;
+}
+
+#if PPHP_TYPECHECK
+static int pbc_bytes_equal_ci(const char *left, size_t left_length,
+                              const char *right, size_t right_length) {
+    size_t i;
+    if (left_length != right_length) return 0;
+    for (i = 0U; i < left_length; i++) {
+        unsigned char a = (unsigned char)left[i];
+        unsigned char b = (unsigned char)right[i];
+        if (a >= 'A' && a <= 'Z') a = (unsigned char)(a + ('a' - 'A'));
+        if (b >= 'A' && b <= 'Z') b = (unsigned char)(b + ('a' - 'A'));
+        if (a != b) return 0;
     }
     return 1;
 }
@@ -399,7 +403,7 @@ static size_t pbc_instruction_size(const pproto *proto, size_t pc) {
 
 static int pbc_instruction_boundary(const pproto *proto, size_t target) {
     size_t pc = 0U;
-    if (target > proto->code_length) return 0;
+    if (target >= proto->code_length) return 0;
     while (pc < target) {
         size_t size = pbc_instruction_size(proto, pc);
         if (size == 0U || size > target - pc) return 0;
@@ -408,11 +412,53 @@ static int pbc_instruction_boundary(const pproto *proto, size_t target) {
     return pc == target;
 }
 
+static int pbc_instruction_boundary_or_end(const pproto *proto,
+                                           size_t target) {
+    return target == proto->code_length ||
+           pbc_instruction_boundary(proto, target);
+}
+
+static int pbc_method_proto_name(const pproto *proto,
+                                 const pstring *class_name,
+                                 const pstring *method_name) {
+    size_t class_length;
+    size_t method_length;
+    if (proto == NULL || class_name == NULL || method_name == NULL) return 0;
+    class_length = class_name->length;
+    method_length = method_name->length;
+    return proto->name->length == class_length + 2U + method_length &&
+           memcmp(ps_data(proto->name), ps_data(class_name), class_length) == 0 &&
+           memcmp(ps_data(proto->name) + class_length, "::", 2U) == 0 &&
+           memcmp(ps_data(proto->name) + class_length + 2U,
+                  ps_data(method_name), method_length) == 0;
+}
+
+static int pbc_closure_proto_name(const pproto *proto, size_t index) {
+    const char *bytes;
+    size_t cursor = 9U;
+    size_t value = 0U;
+    if (proto == NULL || proto->name->length < 11U) return 0;
+    bytes = ps_data(proto->name);
+    if (memcmp(bytes, "{closure#", 9U) != 0 ||
+        bytes[proto->name->length - 1U] != '}') return 0;
+    if (bytes[cursor] == '0' && cursor + 2U < proto->name->length) return 0;
+    while (cursor + 1U < proto->name->length) {
+        unsigned digit;
+        if (bytes[cursor] < '0' || bytes[cursor] > '9') return 0;
+        digit = (unsigned)(bytes[cursor] - '0');
+        if (value > (SIZE_MAX - digit) / 10U) return 0;
+        value = value * 10U + digit;
+        cursor++;
+    }
+    return value == index;
+}
+
 static int pbc_validate_code(const pmodule *module, size_t proto_index) {
     const pproto *proto = module->protos[proto_index];
     size_t pc = 0U;
     int building_class = 0;
     int class_readonly = 0;
+    const pstring *building_class_name = NULL;
 #if PPHP_TYPECHECK
     int class_has_parent = 0;
     size_t typecheck_pc = SIZE_MAX;
@@ -523,6 +569,8 @@ static int pbc_validate_code(const pmodule *module, size_t proto_index) {
                     goto invalid;
                 }
                 building_class = 1;
+                building_class_name = (const pstring *)
+                    proto->constants[first].as.gc;
                 class_readonly = (flags & 64U) != 0U;
 #if PPHP_TYPECHECK
                 class_has_parent = parent != UINT16_MAX;
@@ -532,9 +580,13 @@ static int pbc_validate_code(const pmodule *module, size_t proto_index) {
             case OP_DEF_METHOD: {
                 uint16_t target = get_u16(proto->code, pc + 2U);
                 uint8_t flags = proto->code[pc + 4U];
+                const pstring *method_name = pbc_string_constant(proto, first)
+                    ? (const pstring *)proto->constants[first].as.gc : NULL;
                 if (!building_class || !pbc_string_constant(proto, first) ||
                     target == 0U || target >= module->count ||
                     module->protos[target]->conditional ||
+                    !pbc_method_proto_name(module->protos[target],
+                                           building_class_name, method_name) ||
                     !pbc_flag_visibility(flags) ||
                     (flags & (uint8_t)~(1U | 2U | 4U | 8U | 16U | 32U)) != 0U ||
                     (flags & (16U | 32U)) == (16U | 32U) ||
@@ -573,6 +625,7 @@ static int pbc_validate_code(const pmodule *module, size_t proto_index) {
                 if (!building_class) goto invalid;
                 building_class = 0;
                 class_readonly = 0;
+                building_class_name = NULL;
 #if PPHP_TYPECHECK
                 class_has_parent = 0;
 #endif
@@ -582,6 +635,7 @@ static int pbc_validate_code(const pmodule *module, size_t proto_index) {
                 size_t capture;
                 if (first == 0U || first >= module->count ||
                     module->protos[first]->conditional ||
+                    !pbc_closure_proto_name(module->protos[first], first) ||
                     (size_t)module->protos[first]->n_params + count >
                         module->protos[first]->n_locals) goto invalid;
                 for (capture = 0U; capture < count; capture++) {
@@ -605,7 +659,7 @@ static int pbc_validate_code(const pmodule *module, size_t proto_index) {
     for (pc = 0U; pc < proto->catch_count; pc++) {
         const pcatch *entry = &proto->catches[pc];
         if (!pbc_instruction_boundary(proto, entry->try_start) ||
-            !pbc_instruction_boundary(proto, entry->try_end) ||
+            !pbc_instruction_boundary_or_end(proto, entry->try_end) ||
             !pbc_instruction_boundary(proto, entry->handler_pc)) {
             goto invalid;
         }
@@ -643,19 +697,82 @@ invalid:
     return 0;
 }
 
+static int pbc_assign_proto_roles(pmodule *module) {
+    enum {
+        PBC_REF_FUNCTION = 1,
+        PBC_REF_METHOD = 2,
+        PBC_REF_CLOSURE = 4
+    };
+    size_t source;
+    size_t target;
+    for (target = 0U; target < module->count; target++) {
+        module->protos[target]->role = 0U;
+    }
+    for (source = 0U; source < module->count; source++) {
+        const pproto *proto = module->protos[source];
+        size_t pc = 0U;
+        while (pc < proto->code_length) {
+            uint8_t opcode = proto->code[pc];
+            size_t size = pbc_instruction_size(proto, pc);
+            uint16_t referenced = UINT16_MAX;
+            uint8_t reference_role = 0U;
+            if (opcode == OP_DEF_FUNC || opcode == OP_CLOSURE) {
+                referenced = get_u16(proto->code, pc + 1U);
+                reference_role = opcode == OP_DEF_FUNC
+                    ? PBC_REF_FUNCTION : PBC_REF_CLOSURE;
+            } else if (opcode == OP_DEF_METHOD) {
+                referenced = get_u16(proto->code, pc + 3U);
+                reference_role = PBC_REF_METHOD;
+            }
+            if (reference_role != 0U) {
+                if ((module->protos[referenced]->role & reference_role) != 0U) {
+                    return 0;
+                }
+                module->protos[referenced]->role |= reference_role;
+            }
+            pc += size;
+        }
+    }
+    for (target = 0U; target < module->count; target++) {
+        uint8_t references = module->protos[target]->role;
+        if (target == 0U) {
+            if (references != 0U) return 0;
+            module->protos[target]->role = PPROTO_MAIN;
+        } else if (references == PBC_REF_METHOD) {
+            module->protos[target]->role = PPROTO_METHOD;
+        } else if (references == PBC_REF_CLOSURE) {
+            if (module->protos[target]->is_method) return 0;
+            module->protos[target]->role = PPROTO_CLOSURE;
+        } else if (references == PBC_REF_FUNCTION || references == 0U) {
+            if ((references == PBC_REF_FUNCTION) !=
+                    (module->protos[target]->conditional != 0U) ||
+                module->protos[target]->is_method ||
+                !pbc_identifier_bytes(ps_data(module->protos[target]->name),
+                                      module->protos[target]->name->length)) {
+                return 0;
+            }
+            module->protos[target]->role = PPROTO_FUNCTION;
+        } else {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 #if PPHP_TYPECHECK
 static int pbc_validate_type_context(const pmodule *module) {
-    uint8_t *scopes = pphp_alloc(module->count);
-    uint8_t *roles = pphp_alloc(module->count);
+    enum {
+        PBC_CONTEXT_SCOPE_MASK = 3,
+        PBC_CONTEXT_METHOD = 4,
+        PBC_CONTEXT_CONSTRUCTOR = 8,
+        PBC_CONTEXT_DESTRUCTOR = 16,
+        PBC_CONTEXT_CLOSURE = 32
+    };
+    uint8_t *contexts = pphp_alloc(module->count);
     size_t i;
     int changed = 1;
-    if (scopes == NULL || roles == NULL) {
-        pphp_free(scopes);
-        pphp_free(roles);
-        return 0;
-    }
-    memset(scopes, 0, module->count);
-    memset(roles, 0, module->count);
+    if (contexts == NULL) return PPHP_E_NOMEM;
+    memset(contexts, 0, module->count);
     for (i = 0U; i < module->count; i++) {
         const pproto *proto = module->protos[i];
         size_t pc = 0U;
@@ -672,18 +789,21 @@ static int pbc_validate_type_context(const pmodule *module) {
                     proto->constants[name_index].as.gc;
                 uint8_t role = pbc_bytes_equal_ci(
                                    ps_data(name), name->length,
-                                   "__construct", 11U) ? 2U :
+                                   "__construct", 11U)
+                                   ? PBC_CONTEXT_CONSTRUCTOR :
                                pbc_bytes_equal_ci(
                                    ps_data(name), name->length,
-                                   "__destruct", 10U) ? 3U : 1U;
-                if (roles[target] != 0U ||
-                    (scopes[target] != 0U && scopes[target] != scope)) goto invalid;
-                scopes[target] = scope;
-                roles[target] = role;
+                                   "__destruct", 10U)
+                                   ? PBC_CONTEXT_DESTRUCTOR
+                                   : PBC_CONTEXT_METHOD;
+                uint8_t target_scope = contexts[target] &
+                    PBC_CONTEXT_SCOPE_MASK;
+                if ((contexts[target] & (uint8_t)~PBC_CONTEXT_SCOPE_MASK) != 0U ||
+                    (target_scope != 0U && target_scope != scope)) goto invalid;
+                contexts[target] = (uint8_t)(scope | role);
             } else if (opcode == OP_CLOSURE) {
                 uint16_t target = get_u16(proto->code, pc + 1U);
-                if (roles[target] != 0U && roles[target] != 128U) goto invalid;
-                roles[target] = 128U;
+                contexts[target] |= PBC_CONTEXT_CLOSURE;
             } else if (opcode == OP_DEF_END) {
                 scope = 0U;
             }
@@ -695,18 +815,23 @@ static int pbc_validate_type_context(const pmodule *module) {
         for (i = 0U; i < module->count; i++) {
             const pproto *proto;
             size_t pc;
-            if (scopes[i] == 0U) continue;
+            uint8_t scope = contexts[i] & PBC_CONTEXT_SCOPE_MASK;
+            if (scope == 0U) continue;
             proto = module->protos[i];
             pc = 0U;
             while (pc < proto->code_length) {
                 size_t size = pbc_instruction_size(proto, pc);
                 if (proto->code[pc] == OP_CLOSURE) {
                     uint16_t target = get_u16(proto->code, pc + 1U);
-                    if ((roles[target] & 127U) != 0U ||
-                        (scopes[target] != 0U &&
-                         scopes[target] != scopes[i])) goto invalid;
-                    if (scopes[target] == 0U) {
-                        scopes[target] = scopes[i];
+                    uint8_t target_scope = contexts[target] &
+                        PBC_CONTEXT_SCOPE_MASK;
+                    if ((contexts[target] & PBC_CONTEXT_CLOSURE) == 0U ||
+                        (target_scope != 0U && target_scope != scope)) {
+                        goto invalid;
+                    }
+                    if (target_scope == 0U) {
+                        contexts[target] = (uint8_t)(
+                            contexts[target] | scope);
                         changed = 1;
                     }
                 }
@@ -717,10 +842,14 @@ static int pbc_validate_type_context(const pmodule *module) {
     for (i = 0U; i < module->count; i++) {
         const pproto *proto = module->protos[i];
         size_t spec_index;
-        int no_value_return = (roles[i] == 2U || roles[i] == 3U ||
+        uint8_t scope = contexts[i] & PBC_CONTEXT_SCOPE_MASK;
+        uint8_t role = contexts[i] & (uint8_t)~PBC_CONTEXT_SCOPE_MASK;
+        int no_value_return = (role == PBC_CONTEXT_CONSTRUCTOR ||
+            role == PBC_CONTEXT_DESTRUCTOR ||
             (proto->return_type.count == 1U &&
              proto->return_type.members[0].kind == PTYPE_VOID));
-        if ((roles[i] == 2U || roles[i] == 3U) &&
+        if ((role == PBC_CONTEXT_CONSTRUCTOR ||
+             role == PBC_CONTEXT_DESTRUCTOR) &&
             !(proto->return_type.count == 0U ||
               (proto->return_type.count == 1U &&
                proto->return_type.members[0].kind == PTYPE_VOID))) goto invalid;
@@ -733,11 +862,11 @@ static int pbc_validate_type_context(const pmodule *module) {
             for (member = 0U; member < spec->count; member++) {
                 uint8_t kind = spec->members[member].kind;
                 if ((kind == PTYPE_SELF || kind == PTYPE_PARENT) &&
-                    scopes[i] == 0U) goto invalid;
-                if (kind == PTYPE_PARENT && scopes[i] != 2U) goto invalid;
+                    scope == 0U) goto invalid;
+                if (kind == PTYPE_PARENT && scope != 2U) goto invalid;
                 if (kind == PTYPE_STATIC &&
                     (spec_index < proto->n_params ||
-                     (roles[i] & 127U) == 0U)) goto invalid;
+                     role == 0U || role == PBC_CONTEXT_CLOSURE)) goto invalid;
             }
         }
         if (no_value_return) {
@@ -748,13 +877,11 @@ static int pbc_validate_type_context(const pmodule *module) {
             }
         }
     }
-    pphp_free(scopes);
-    pphp_free(roles);
-    return 1;
+    pphp_free(contexts);
+    return PPHP_OK;
 invalid:
-    pphp_free(scopes);
-    pphp_free(roles);
-    return 0;
+    pphp_free(contexts);
+    return PPHP_E_PARSE;
 }
 #endif
 
@@ -1109,6 +1236,7 @@ int pphp_pbc_read_file(const char *path, pmodule *module) {
 
 int pphp_pbc_load(const void *data, size_t length, pmodule *module) {
     const uint8_t *bytes = data;
+    const uint16_t float_flag = 16U;
     const uint16_t expected_flags =
         (uint16_t)((PPHP_INT64 ? 1U : 0U) |
                    (PPHP_USE_DOUBLE ? 2U : 0U) |
@@ -1122,16 +1250,25 @@ int pphp_pbc_load(const void *data, size_t length, pmodule *module) {
     size_t proto_table;
     size_t records_start;
     pro_string *strings = NULL;
+    uint16_t image_flags;
     size_t i;
     int result = PPHP_E_PARSE;
     if (bytes == NULL || module == NULL ||
         !pbc_range_available(0U, 16U, length) ||
         memcmp(bytes, "PPBC", 4U) != 0 ||
         get_u16(bytes, 4U) != (uint16_t)PPHP_PBC_FORMAT_VERSION ||
-        get_u16(bytes, 6U) != expected_flags ||
         get_u32(bytes, 8U) != length) {
         return PPHP_E_PARSE;
     }
+    image_flags = get_u16(bytes, 6U);
+    if ((image_flags & (uint16_t)~float_flag) !=
+        (expected_flags & (uint16_t)~float_flag)) {
+        return PPHP_E_PARSE;
+    }
+#if !PPHP_ENABLE_FLOAT
+    if ((image_flags & float_flag) != 0U) return PPHP_E_UNSUPPORTED;
+#endif
+    if (image_flags != expected_flags) return PPHP_E_PARSE;
     n_protos = get_u16(bytes, 12U);
     n_strings = get_u16(bytes, 14U);
     table_entries = (size_t)n_strings + (size_t)n_protos;
@@ -1416,8 +1553,15 @@ int pphp_pbc_load(const void *data, size_t length, pmodule *module) {
     for (i = 0U; i < module->count; i++) {
         if (!pbc_validate_code(module, i)) goto failed_module;
     }
+    if (!pbc_assign_proto_roles(module)) goto failed_module;
 #if PPHP_TYPECHECK
-    if (!pbc_validate_type_context(module)) goto failed_module;
+    {
+        int type_context_status = pbc_validate_type_context(module);
+        if (type_context_status != PPHP_OK) {
+            result = type_context_status;
+            goto failed_module;
+        }
+    }
 #endif
     for (i = 0U; i < n_strings; i++) strings[i].owner = module;
     result = PPHP_OK;
