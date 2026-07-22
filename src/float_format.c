@@ -201,15 +201,6 @@ static int should_round_up(const exact_decimal *exact, size_t retained) {
            ((exact->bytes[retained - 1U] - '0') & 1) != 0;
 }
 
-static int is_exact_half(const exact_decimal *exact, size_t retained) {
-    size_t i;
-    if (retained >= exact->length || exact->bytes[retained] != '5') return 0;
-    for (i = retained + 1U; i < exact->length; i++) {
-        if (exact->bytes[i] != '0') return 0;
-    }
-    return 1;
-}
-
 static int rounded_digits(const exact_decimal *exact, size_t count,
                           decimal_digits *digits) {
     size_t copied;
@@ -324,14 +315,11 @@ static int format_general(float_output *output, const exact_decimal *exact,
     int scientific;
     int fractional;
     int position;
-    int preserve_tie_zero;
     if (!rounded_digits(exact, (size_t)significant, &digits)) return 0;
     scientific = digits.exponent < -4 || digits.exponent >= significant;
     used = digits.length;
-    preserve_tie_zero = is_exact_half(exact, (size_t)significant) &&
-                        exact->bytes[(size_t)significant - 1U] == '0';
-    while (!preserve_tie_zero && used > 1U &&
-           digits.bytes[used - 1U] == '0') {
+    /* %g removes trailing fractional zeros without the alternate form. */
+    while (used > 1U && digits.bytes[used - 1U] == '0') {
         used--;
     }
     digits.length = used;

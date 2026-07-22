@@ -23,13 +23,30 @@ static pphp_float float_from_bits(uint32_t bits) {
 
 static int oracle_format(char *buffer, size_t capacity, pphp_float value,
                          char conversion, int precision) {
+    int length;
     if (conversion == 'f') {
         return snprintf(buffer, capacity, "%.*f", precision, (double)value);
     }
     if (conversion == 'e') {
         return snprintf(buffer, capacity, "%.*e", precision, (double)value);
     }
-    return snprintf(buffer, capacity, "%.*g", precision, (double)value);
+    length = snprintf(buffer, capacity, "%.*g", precision, (double)value);
+    if (length >= 0 && (size_t)length < capacity) {
+        char *exponent = strchr(buffer, 'e');
+        char *end = exponent != NULL ? exponent : buffer + length;
+        char *decimal = strchr(buffer, '.');
+        if (decimal != NULL && decimal < end) {
+            while (end > decimal + 1 && end[-1] == '0') end--;
+            if (end == decimal + 1) end--;
+            if (exponent != NULL) {
+                memmove(end, exponent, strlen(exponent) + 1U);
+            } else {
+                *end = '\0';
+            }
+            length = (int)strlen(buffer);
+        }
+    }
+    return length;
 }
 
 static int compare_with_oracle(uint32_t bits) {
@@ -95,6 +112,18 @@ TEST(general_format_selects_fixed_or_exponential_and_rounds) {
     assert_format("1.17549435e-38", (pphp_float)FLT_MIN, 'g', 9);
 }
 
+TEST(general_format_removes_rounded_zeros_only_for_general_conversion) {
+    pphp_float positive = float_from_bits(UINT32_C(0x4a800002));
+    pphp_float negative = float_from_bits(UINT32_C(0xca800002));
+    assert_format("4.1943e+06", positive, 'g', 6);
+    assert_format("-4.1943e+06", negative, 'g', 6);
+    assert_format("4.19430e+06", positive, 'e', 5);
+    assert_format("4194305.00", positive, 'f', 2);
+    assert_format("0.0001", (pphp_float)0.0001, 'g', 1);
+    assert_format("1e-05", (pphp_float)0.00001, 'g', 1);
+    assert_format("1e+06", (pphp_float)999999.5, 'g', 6);
+}
+
 TEST(regression_values_match_binary32_rounding) {
     assert_format("-2827637.2", float_from_bits(UINT32_C(0xca2c95d5)),
                   'g', 8);
@@ -152,6 +181,8 @@ int main(void) {
         {"fixed format", fixed_format_rounds_and_honors_precision},
         {"exponential format", exponential_format_uses_normalized_exponents},
         {"general format", general_format_selects_fixed_or_exponential_and_rounds},
+        {"general trailing zeros",
+         general_format_removes_rounded_zeros_only_for_general_conversion},
         {"binary32 regressions", regression_values_match_binary32_rounding},
         {"binary32 oracle sample", deterministic_binary32_sample_matches_libc},
         {"invalid requests", invalid_requests_fail_without_writing_past_capacity},

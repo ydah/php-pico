@@ -14,6 +14,8 @@
 /*
  * Format a floating-point value without field padding.  Conversion is one of
  * 'f', 'e', or 'g'.  A negative precision selects the printf default of six.
+ * The alternate form is not supported, so 'g' removes trailing fractional
+ * zeros while 'f' and 'e' retain the requested precision.
  * The return value is the byte length, or -1 when the arguments or capacity
  * are invalid.
  */
