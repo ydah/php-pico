@@ -89,9 +89,11 @@ static void print_constant(FILE *stream, const pproto *proto, uint16_t index) {
         case PT_INT:
             fprintf(stream, " ; %lld", (long long)proto->constants[index].as.i);
             break;
+#if PPHP_ENABLE_FLOAT
         case PT_FLOAT:
             fprintf(stream, " ; %.14g", (double)proto->constants[index].as.f);
             break;
+#endif
         case PT_STRING: {
             const pstring *string = (const pstring *)proto->constants[index].as.gc;
             fprintf(stream, " ; \"%.*s\"", (int)string->length, string->data);

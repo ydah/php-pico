@@ -74,9 +74,11 @@ static int normalize_key(pvalue input, pvalue *key, int *temporary) {
         case PT_INT:
             *key = input;
             return 1;
+#if PPHP_ENABLE_FLOAT
         case PT_FLOAT:
             *key = pv_int((pphp_int)input.as.f);
             return 1;
+#endif
         case PT_TRUE:
             *key = pv_int(1);
             return 1;

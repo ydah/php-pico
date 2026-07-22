@@ -32,7 +32,9 @@ typedef struct pvalue {
     uint8_t reserved[7];
     union {
         pphp_int i;
+#if PPHP_ENABLE_FLOAT
         pphp_float f;
+#endif
         pheader *gc;
         const void *ptr;
     } as;
@@ -41,7 +43,9 @@ typedef struct pvalue {
 pvalue pv_null(void);
 pvalue pv_bool(int value);
 pvalue pv_int(pphp_int value);
+#if PPHP_ENABLE_FLOAT
 pvalue pv_float(pphp_float value);
+#endif
 pvalue pv_heap(pvalue_type type, pheader *header);
 int pv_is_truthy(pvalue value);
 void pv_retain(pvalue value);

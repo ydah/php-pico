@@ -252,11 +252,15 @@ static int call_clock(pphp_state *state, const pstring *name,
 #if PPHP_INT64
         *result = pv_int((pphp_int)(microseconds / UINT64_C(1000000)));
 #else
+#if PPHP_ENABLE_FLOAT
         if (microseconds / UINT64_C(1000000) > (uint64_t)INT32_MAX) {
             *result = pv_float((pphp_float)(microseconds / UINT64_C(1000000)));
         } else {
             *result = pv_int((pphp_int)(microseconds / UINT64_C(1000000)));
         }
+#else
+        *result = pv_int((pphp_int)(microseconds / UINT64_C(1000000)));
+#endif
 #endif
         return 1;
     }
@@ -265,7 +269,12 @@ static int call_clock(pphp_state *state, const pstring *name,
         if (count > 1U) return invalid_arguments(state, name);
         if (count == 1U) as_float = pv_is_truthy(arguments[0]);
         if (as_float) {
+#if PPHP_ENABLE_FLOAT
             *result = pv_float((pphp_float)((double)microseconds / 1000000.0));
+#else
+            pphp_runtime_error(state, 0U, "float support disabled");
+            return -1;
+#endif
         } else {
             char buffer[48];
             int length = snprintf(buffer, sizeof(buffer), "0.%06llu %llu",
@@ -291,7 +300,12 @@ static int call_clock(pphp_state *state, const pstring *name,
 #if PPHP_INT64
             *result = pv_int((pphp_int)nanoseconds);
 #else
+#if PPHP_ENABLE_FLOAT
             *result = pv_float((pphp_float)nanoseconds);
+#else
+            pphp_runtime_error(state, 0U, "hrtime value exceeds integer range");
+            return -1;
+#endif
 #endif
         } else {
             parray *array = pa_new(2U);
@@ -300,11 +314,15 @@ static int call_clock(pphp_state *state, const pstring *name,
 #if PPHP_INT64
             seconds = pv_int((pphp_int)(nanoseconds / UINT64_C(1000000000)));
 #else
+#if PPHP_ENABLE_FLOAT
             seconds = nanoseconds / UINT64_C(1000000000) > (uint64_t)INT32_MAX
                           ? pv_float((pphp_float)(nanoseconds /
                                                   UINT64_C(1000000000)))
                           : pv_int((pphp_int)(nanoseconds /
                                               UINT64_C(1000000000)));
+#else
+            seconds = pv_int((pphp_int)(nanoseconds / UINT64_C(1000000000)));
+#endif
 #endif
             if (!pa_push(array, seconds) ||
                 !pa_push(array, pv_int((pphp_int)(nanoseconds %

@@ -1,6 +1,8 @@
 #include "builtins.h"
 
+#if PPHP_ENABLE_FLOAT
 #include "float_format.h"
+#endif
 #include "value_ops.h"
 #include "parray.h"
 #include "pclass.h"
@@ -11,7 +13,9 @@
 #include "system.h"
 #include "files.h"
 
+#if PPHP_ENABLE_FLOAT
 #include <math.h>
+#endif
 #include <stdio.h>
 #include <string.h>
 
@@ -36,6 +40,16 @@ int pphp_builtin_exists(const pstring *name) {
         "strlen\0strncmp\0strpos\0strrev\0strrpos\0strtolower\0strtoupper\0"
         "sort\0srand\0strval\0substr\0sprintf\0tan\0time\0trim\0uasort\0ucfirst\0uksort\0usleep\0usort\0var_dump\0sleep\0";
     const char *candidate = names;
+#if !PPHP_ENABLE_FLOAT
+    static const char float_names[] =
+        "acos\0asin\0atan\0atan2\0ceil\0cos\0exp\0fdiv\0floatval\0floor\0"
+        "fmod\0is_float\0log\0log10\0pi\0pow\0round\0sin\0sqrt\0tan\0";
+    const char *float_candidate = float_names;
+    while (*float_candidate != '\0') {
+        if (name_is(name, float_candidate)) return 0;
+        float_candidate += strlen(float_candidate) + 1U;
+    }
+#endif
     while (*candidate != '\0') {
         if (name_is(name, candidate)) return 1;
         candidate += strlen(candidate) + 1U;
@@ -185,6 +199,7 @@ static void dump_value_depth(pphp_state *state, pvalue value, unsigned depth) {
             output_integer(state, value.as.i);
             pphp_output(state, ")\n", 2U);
             break;
+#if PPHP_ENABLE_FLOAT
         case PT_FLOAT: {
             char buffer[64];
             int length = pphp_format_float(buffer, sizeof(buffer), value.as.f,
@@ -196,6 +211,7 @@ static void dump_value_depth(pphp_state *state, pvalue value, unsigned depth) {
             }
             break;
         }
+#endif
         case PT_STRING: {
             const pstring *string = (const pstring *)value.as.gc;
             pphp_output(state, "string(", 7U);
@@ -327,12 +343,19 @@ static int call_conversion_builtin(pphp_state *state, const pstring *name,
         return 1;
     }
     if (name_is(name, "floatval")) {
+#if PPHP_ENABLE_FLOAT
         pphp_float number;
         int integer;
         if (!require_count(state, "floatval", count, 1U, 1U)) return -1;
         if (!pv_to_number(arguments[0], &number, &integer)) number = 0;
         *result = pv_float(number);
         return 1;
+#else
+        (void)arguments;
+        (void)result;
+        pphp_runtime_error(state, 0U, "float support disabled");
+        return -1;
+#endif
     }
     if (name_is(name, "strval")) {
         pstring *string;
@@ -364,7 +387,13 @@ static int call_type_builtin(pphp_state *state, const pstring *name,
           name_is(name, "is_callable"))) return 0;
     if (!require_count(state, "type predicate", count, 1U, 1U)) return -1;
     if (name_is(name, "is_int")) matches = arguments[0].type == PT_INT;
-    else if (name_is(name, "is_float")) matches = arguments[0].type == PT_FLOAT;
+    else if (name_is(name, "is_float")) {
+#if PPHP_ENABLE_FLOAT
+        matches = arguments[0].type == PT_FLOAT;
+#else
+        matches = 0;
+#endif
+    }
     else if (name_is(name, "is_string")) matches = arguments[0].type == PT_STRING;
     else if (name_is(name, "is_bool")) {
         matches = arguments[0].type == PT_TRUE || arguments[0].type == PT_FALSE;
@@ -375,7 +404,10 @@ static int call_type_builtin(pphp_state *state, const pstring *name,
     else if (name_is(name, "is_numeric")) {
         pphp_float number;
         int integer;
-        matches = (arguments[0].type == PT_INT || arguments[0].type == PT_FLOAT ||
+        matches = (arguments[0].type == PT_INT ||
+#if PPHP_ENABLE_FLOAT
+                   arguments[0].type == PT_FLOAT ||
+#endif
                    arguments[0].type == PT_STRING) &&
                   pv_to_number(arguments[0], &number, &integer);
     } else {
@@ -446,24 +478,33 @@ static int call_math_builtin(pphp_state *state, const pstring *name,
     pphp_float b;
     int ai;
     int bi;
+#if !PPHP_ENABLE_FLOAT
+    if (name_is(name, "pi") || name_is(name, "fdiv") ||
+        name_is(name, "fmod") || name_is(name, "pow") ||
+        name_is(name, "atan2") || name_is(name, "floor") ||
+        name_is(name, "ceil") || name_is(name, "sqrt") ||
+        name_is(name, "exp") || name_is(name, "log10") ||
+        name_is(name, "sin") || name_is(name, "cos") ||
+        name_is(name, "tan") || name_is(name, "asin") ||
+        name_is(name, "acos") || name_is(name, "atan") ||
+        name_is(name, "log") || name_is(name, "round")) {
+        pphp_runtime_error(state, 0U, "float support disabled");
+        return -1;
+    }
+#endif
+#if PPHP_ENABLE_FLOAT
     if (name_is(name, "pi")) {
         if (!require_count(state, "pi", count, 0U, 0U)) return -1;
         *result = pv_float((pphp_float)3.14159265358979323846);
         return 1;
     }
-    if (name_is(name, "intdiv") || name_is(name, "fdiv") ||
+    if (name_is(name, "fdiv") ||
         name_is(name, "fmod") || name_is(name, "pow") ||
         name_is(name, "atan2")) {
         if (!require_count(state, "binary math", count, 2U, 2U) ||
             !numeric_argument(state, "binary math", arguments[0], &a, &ai) ||
             !numeric_argument(state, "binary math", arguments[1], &b, &bi)) return -1;
-        if (name_is(name, "intdiv")) {
-            if ((pphp_int)b == 0) {
-                pphp_runtime_error(state, 0U, "Division by zero");
-                return -1;
-            }
-            *result = pv_int((pphp_int)a / (pphp_int)b);
-        } else if (name_is(name, "fdiv")) {
+        if (name_is(name, "fdiv")) {
             *result = pv_float(a / b);
         } else if (name_is(name, "fmod")) {
             *result = pv_float((pphp_float)fmod((double)a, (double)b));
@@ -516,6 +557,18 @@ static int call_math_builtin(pphp_state *state, const pstring *name,
         if (count == 2U && arguments[1].type == PT_INT) precision = arguments[1].as.i;
         scale = pow(10.0, (double)precision);
         *result = pv_float((pphp_float)(round((double)a * scale) / scale));
+        return 1;
+    }
+#endif
+    if (name_is(name, "intdiv")) {
+        if (!require_count(state, "intdiv", count, 2U, 2U) ||
+            !numeric_argument(state, "intdiv", arguments[0], &a, &ai) ||
+            !numeric_argument(state, "intdiv", arguments[1], &b, &bi)) return -1;
+        if ((pphp_int)b == 0) {
+            pphp_runtime_error(state, 0U, "Division by zero");
+            return -1;
+        }
+        *result = pv_int((pphp_int)a / (pphp_int)b);
         return 1;
     }
     if (name_is(name, "max") || name_is(name, "min")) {
@@ -668,7 +721,12 @@ int pphp_call_builtin(pphp_state *state, const pstring *name,
             pv_release(item);
             position = next;
         }
+#if PPHP_ENABLE_FLOAT
         *result = all_integer ? pv_int((pphp_int)sum) : pv_float(sum);
+#else
+        (void)all_integer;
+        *result = pv_int(sum);
+#endif
         return 1;
     }
     if (name_is(name, "abs")) {
@@ -681,7 +739,12 @@ int pphp_call_builtin(pphp_state *state, const pstring *name,
         if (number < 0) {
             number = -number;
         }
+#if PPHP_ENABLE_FLOAT
         *result = integer ? pv_int((pphp_int)number) : pv_float(number);
+#else
+        (void)integer;
+        *result = pv_int(number);
+#endif
         return 1;
     }
     return 0;

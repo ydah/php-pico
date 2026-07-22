@@ -56,12 +56,14 @@ static int initialize_constants(pphp_state *state) {
     ok = set_constant(state, "PHP_INT_MAX",
                       pv_int((pphp_int)(PPHP_INT64 ? INT64_MAX : INT32_MAX))) &&
          set_constant(state, "PHP_INT_SIZE", pv_int((pphp_int)sizeof(pphp_int))) &&
+#if PPHP_ENABLE_FLOAT
          set_constant(state, "PHP_FLOAT_EPSILON",
                       pv_float((pphp_float)(PPHP_USE_DOUBLE ? DBL_EPSILON
                                                            : FLT_EPSILON))) &&
          set_constant(state, "M_PI", pv_float((pphp_float)3.14159265358979323846)) &&
          set_constant(state, "NAN", pv_float((pphp_float)NAN)) &&
          set_constant(state, "INF", pv_float((pphp_float)INFINITY)) &&
+#endif
          set_constant(state, "PHP_EOL", newline_value) &&
          set_constant(state, "JSON_PRETTY_PRINT", pv_int(128)) &&
          set_constant(state, "FILE_APPEND", pv_int(8)) &&
@@ -701,7 +703,10 @@ int pphp_exec_pbc(pphp_state *state, const void *pbc, size_t length) {
     state->repl_mode = 0;
     result = pphp_pbc_load(pbc, length, &module);
     if (result != PPHP_OK) {
-        pphp_runtime_error(state, 0U, "invalid or incompatible PBC image");
+        pphp_runtime_error(state, 0U,
+                           result == PPHP_E_UNSUPPORTED
+                               ? "PBC image requires float support"
+                               : "invalid or incompatible PBC image");
         return result == PPHP_E_NOMEM ? PPHP_E_RUNTIME : PPHP_E_PARSE;
     }
     result = pphp_vm_execute(state, &module);

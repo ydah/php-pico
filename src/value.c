@@ -30,11 +30,13 @@ pvalue pv_int(pphp_int number) {
     return value;
 }
 
+#if PPHP_ENABLE_FLOAT
 pvalue pv_float(pphp_float number) {
     pvalue value = make_value(PT_FLOAT);
     value.as.f = number;
     return value;
 }
+#endif
 
 pvalue pv_heap(pvalue_type type, pheader *header) {
     pvalue value = make_value(type);
@@ -51,8 +53,10 @@ int pv_is_truthy(pvalue value) {
             return 1;
         case PT_INT:
             return value.as.i != 0;
+#if PPHP_ENABLE_FLOAT
         case PT_FLOAT:
             return value.as.f != (pphp_float)0;
+#endif
         case PT_STRING: {
             const pstring *string = (const pstring *)value.as.gc;
             return string != NULL && string->length != 0U &&

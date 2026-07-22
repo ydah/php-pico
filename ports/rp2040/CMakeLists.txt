@@ -10,6 +10,10 @@ include(${PICO_SDK_PATH}/external/pico_sdk_import.cmake)
 
 project(php_pico VERSION 1.0.0 LANGUAGES C CXX ASM)
 option(PPHP_ENABLE_COMPILER "Build the PHP source compiler" ON)
+option(PPHP_ENABLE_FLOAT "Build floating-point language support" ON)
+if(NOT "${PPHP_ENABLE_FLOAT}" MATCHES "^(0|1|ON|OFF|TRUE|FALSE)$")
+  message(FATAL_ERROR "PPHP_ENABLE_FLOAT must be ON/OFF or 1/0")
+endif()
 # pico-sdk 2.3 headers use C11 static_assert; php-pico sources remain C99.
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
@@ -33,7 +37,6 @@ set(PPHP_SOURCES
   ${PPHP_ROOT}/src/api.c
   ${PPHP_ROOT}/src/exception.c
   ${PPHP_ROOT}/src/gc.c
-  ${PPHP_ROOT}/src/float_format.c
   ${PPHP_ROOT}/src/value_ops.c
   ${PPHP_ROOT}/src/pbc.c
   ${PPHP_ROOT}/src/state.c
@@ -53,6 +56,10 @@ set(PPHP_SOURCES
   ${PPHP_ROOT}/hal/rp2040/hal_rp2040.c
   ${CMAKE_CURRENT_LIST_DIR}/main.c
 )
+
+if(PPHP_ENABLE_FLOAT)
+  list(APPEND PPHP_SOURCES ${PPHP_ROOT}/src/float_format.c)
+endif()
 
 if(PPHP_ENABLE_COMPILER)
   list(APPEND PPHP_SOURCES
@@ -91,13 +98,13 @@ target_include_directories(php-pico SYSTEM PRIVATE
 target_compile_definitions(php-pico PRIVATE
   LFS_NO_MALLOC=1
   PPHP_ENABLE_COMPILER=$<BOOL:${PPHP_ENABLE_COMPILER}>
+  PPHP_ENABLE_FLOAT=$<BOOL:${PPHP_ENABLE_FLOAT}>
 )
 target_compile_options(php-pico PRIVATE
   -Os -fmerge-all-constants -ffunction-sections -fdata-sections
 )
 target_link_options(php-pico PRIVATE -Wl,--gc-sections)
 target_link_libraries(php-pico
-  m
   pico_stdlib
   pico_unique_id
   hardware_adc
@@ -111,11 +118,16 @@ target_link_libraries(php-pico
   hardware_uart
   hardware_watchdog
 )
-pico_minimize_runtime(php-pico INCLUDE
-  DEFAULT_ALARM_POOL
-  PRINTF PRINTF_MINIMAL PRINTF_LONG_LONG
-  FLOAT DOUBLE
-)
+if(PPHP_ENABLE_FLOAT)
+  target_link_libraries(php-pico m)
+  pico_minimize_runtime(php-pico INCLUDE
+    DEFAULT_ALARM_POOL PRINTF PRINTF_MINIMAL PRINTF_LONG_LONG FLOAT DOUBLE
+  )
+else()
+  pico_minimize_runtime(php-pico INCLUDE
+    DEFAULT_ALARM_POOL PRINTF PRINTF_MINIMAL PRINTF_LONG_LONG
+  )
+endif()
 pico_enable_stdio_usb(php-pico 1)
 pico_enable_stdio_uart(php-pico 1)
 pico_add_extra_outputs(php-pico)

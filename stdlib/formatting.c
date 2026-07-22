@@ -1,6 +1,8 @@
 #include "formatting.h"
 
+#if PPHP_ENABLE_FLOAT
 #include "float_format.h"
+#endif
 #include "parray.h"
 #include "value_ops.h"
 
@@ -110,6 +112,7 @@ static int append_binary(format_buffer *buffer, uint32_t value, unsigned width,
     return 1;
 }
 
+#if PPHP_ENABLE_FLOAT
 static size_t normalized_float_length(char *bytes, size_t length) {
     size_t position;
     for (position = 0U; position + 3U < length; position++) {
@@ -167,6 +170,7 @@ static int append_formatted_float(format_buffer *buffer, pphp_float value,
     }
     return 1;
 }
+#endif
 
 static int append_formatted(pphp_state *state, const pstring *format,
                             const pvalue *arguments, size_t count,
@@ -306,10 +310,14 @@ static int append_formatted(pphp_state *state, const pstring *format,
                                          (int)(unsigned char)(pphp_int)number)) {
                 return 0;
             }
-        } else if (conversion == 'f' || conversion == 'e' || conversion == 'g') {
+        }
+#if PPHP_ENABLE_FLOAT
+        else if (conversion == 'f' || conversion == 'e' || conversion == 'g') {
             if (!append_formatted_float(buffer, number, conversion, precision,
                                         width, zero_pad, left_align)) return 0;
-        } else {
+        }
+#endif
+        else {
             return 0;
         }
     }
@@ -331,10 +339,12 @@ static int append_print_value(format_buffer *buffer, pvalue value,
         case PT_INT:
             length = snprintf(number, sizeof(number), "%lld", (long long)value.as.i);
             return length >= 0 && buffer_append(buffer, number, (size_t)length);
+#if PPHP_ENABLE_FLOAT
         case PT_FLOAT:
             length = pphp_format_float(number, sizeof(number), value.as.f,
                                        'g', 14);
             return length >= 0 && buffer_append(buffer, number, (size_t)length);
+#endif
         case PT_STRING: {
             const pstring *string = (const pstring *)value.as.gc;
             return buffer_append(buffer, string->data, string->length);

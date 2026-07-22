@@ -312,7 +312,12 @@ static int call_array_product(pphp_state *state, const pstring *name,
         pv_release(value);
         position = next;
     }
+#if PPHP_ENABLE_FLOAT
     *result = all_integer ? pv_int((pphp_int)product) : pv_float(product);
+#else
+    (void)all_integer;
+    *result = pv_int(product);
+#endif
     return 1;
 }
 

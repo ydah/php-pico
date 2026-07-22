@@ -471,12 +471,18 @@ static int execute_cast(pphp_state *state, uint8_t target) {
     pvalue result = pv_null();
     if (target == PT_TRUE) {
         result = pv_bool(pv_is_truthy(value));
-    } else if (target == PT_INT || target == PT_FLOAT) {
+    } else if (target == PT_INT
+#if PPHP_ENABLE_FLOAT
+               || target == PT_FLOAT
+#endif
+    ) {
         pphp_float number = 0;
         int integer = 0;
         (void)pv_to_number_prefix(value, &number, &integer);
-        result = target == PT_INT ? pv_int((pphp_int)number)
-                                  : pv_float(number);
+        result = pv_int((pphp_int)number);
+#if PPHP_ENABLE_FLOAT
+        if (target == PT_FLOAT) result = pv_float(number);
+#endif
     } else if (target == PT_STRING) {
         pstring *string = pv_to_string(value);
         if (string == NULL) {
@@ -1560,7 +1566,11 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                 if (!pv_to_number_prefix(value, &number, &integer)) {
                     pphp_runtime_error(state, frame->line, "unsupported operand type for unary -");
                 } else {
+#if PPHP_ENABLE_FLOAT
                     (void)push(state, integer ? pv_int(-(pphp_int)number) : pv_float(-number));
+#else
+                    (void)push(state, pv_int(-number));
+#endif
                 }
                 pv_release(value);
                 break;

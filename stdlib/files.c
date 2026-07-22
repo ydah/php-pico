@@ -182,9 +182,18 @@ static int call_path_operation(pphp_state *state, const pstring *name,
 #if PPHP_INT64
             *result = pv_int((pphp_int)size);
 #else
+#if PPHP_ENABLE_FLOAT
             *result = (uint64_t)size > (uint64_t)INT32_MAX
                           ? pv_float((pphp_float)size)
                           : pv_int((pphp_int)size);
+#else
+            if ((uint64_t)size > (uint64_t)INT32_MAX) {
+                pphp_runtime_error(state, 0U,
+                                   "filesize exceeds integer range");
+                return -1;
+            }
+            *result = pv_int((pphp_int)size);
+#endif
 #endif
         }
         return 1;

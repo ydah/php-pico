@@ -1,11 +1,15 @@
 #include "json.h"
 
+#if PPHP_ENABLE_FLOAT
 #include "float_format.h"
+#endif
 #include "parray.h"
 #include "pclass.h"
 #include "value_ops.h"
 
+#if PPHP_ENABLE_FLOAT
 #include <math.h>
+#endif
 #include <stdio.h>
 #include <string.h>
 
@@ -201,11 +205,13 @@ static int encode_value(json_buffer *buffer, pvalue value, int pretty,
         case PT_INT:
             length = snprintf(number, sizeof(number), "%lld", (long long)value.as.i);
             return length >= 0 && append(buffer, number, (size_t)length);
+#if PPHP_ENABLE_FLOAT
         case PT_FLOAT:
             if (!isfinite((double)value.as.f)) return append(buffer, "null", 4U);
             length = pphp_format_float(number, sizeof(number), value.as.f,
                                        'g', PPHP_USE_DOUBLE ? 17 : 9);
             return length >= 0 && append(buffer, number, (size_t)length);
+#endif
         case PT_STRING: {
             const pstring *string = (const pstring *)value.as.gc;
             return encode_string(buffer, string->data, string->length);
@@ -491,7 +497,11 @@ static pvalue parse_number(json_parser *parser) {
             number <= (pphp_float)INT32_MAX) {
             return pv_int((pphp_int)number);
         }
+#if PPHP_ENABLE_FLOAT
         return pv_float(number);
+#else
+        goto invalid;
+#endif
     }
 invalid:
     parser->failed = 1;

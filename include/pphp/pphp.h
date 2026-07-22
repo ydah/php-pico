@@ -19,7 +19,8 @@ enum {
     PPHP_E_PARSE = 1,
     PPHP_E_RUNTIME = 2,
     PPHP_E_NOMEM = 3,
-    PPHP_E_IO = 4
+    PPHP_E_IO = 4,
+    PPHP_E_UNSUPPORTED = 5
 };
 
 typedef struct pphp_state pphp_state;
@@ -80,7 +81,9 @@ const char *pphp_arg_str(pphp_ctx *context, int index, size_t *length);
 pobject *pphp_this(pphp_ctx *context);
 void pphp_ret_null(pphp_ctx *context);
 void pphp_ret_int(pphp_ctx *context, pphp_int value);
+#if PPHP_ENABLE_FLOAT
 void pphp_ret_float(pphp_ctx *context, pphp_float value);
+#endif
 void pphp_ret_bool(pphp_ctx *context, int value);
 void pphp_ret_strn(pphp_ctx *context, const char *bytes, size_t length);
 void pphp_ret_value(pphp_ctx *context, pvalue value);

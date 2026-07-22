@@ -1,12 +1,16 @@
 #include "value_ops.h"
 
+#if PPHP_ENABLE_FLOAT
 #include "float_format.h"
+#endif
 #include "pstring.h"
 #include "parray.h"
 #include "pclass.h"
 #include "pphp/pphp.h"
 
+#if PPHP_ENABLE_FLOAT
 #include <math.h>
+#endif
 #include <stdio.h>
 #include <string.h>
 
@@ -15,11 +19,15 @@ static int string_number(const char *text, size_t length, pphp_float *number,
     size_t i = 0U;
     int sign = 1;
     pphp_float value = 0;
+#if PPHP_ENABLE_FLOAT
     pphp_float scale = 1;
+#endif
     int digits = 0;
     int fraction = 0;
     int exponent = 0;
+#if PPHP_ENABLE_FLOAT
     int exponent_sign = 1;
+#endif
     while (i < length && (text[i] == ' ' || text[i] == '\t' || text[i] == '\n' ||
                           text[i] == '\r')) {
         i++;
@@ -32,6 +40,7 @@ static int string_number(const char *text, size_t length, pphp_float *number,
         digits++;
     }
     if (i < length && text[i] == '.') {
+#if PPHP_ENABLE_FLOAT
         fraction = 1;
         i++;
         while (i < length && text[i] >= '0' && text[i] <= '9') {
@@ -39,11 +48,15 @@ static int string_number(const char *text, size_t length, pphp_float *number,
             value += (pphp_float)(text[i++] - '0') * scale;
             digits++;
         }
+#else
+        return 0;
+#endif
     }
     if (digits == 0) {
         return 0;
     }
     if (i < length && (text[i] == 'e' || text[i] == 'E')) {
+#if PPHP_ENABLE_FLOAT
         size_t exponent_start = i++;
         int exponent_digits = 0;
         if (i < length && (text[i] == '+' || text[i] == '-')) {
@@ -62,6 +75,9 @@ static int string_number(const char *text, size_t length, pphp_float *number,
         } else {
             fraction = 1;
         }
+#else
+        return 0;
+#endif
     }
     if (require_complete) {
         while (i < length &&
@@ -72,7 +88,11 @@ static int string_number(const char *text, size_t length, pphp_float *number,
         if (i != length) return 0;
     }
     if (exponent != 0) {
+#if PPHP_ENABLE_FLOAT
         value *= (pphp_float)pow(10.0, (double)(exponent * exponent_sign));
+#else
+        return 0;
+#endif
     }
     *number = sign < 0 ? -value : value;
     *is_integer = !fraction;
@@ -85,10 +105,12 @@ int pv_to_number(pvalue value, pphp_float *number, int *is_integer) {
             *number = (pphp_float)value.as.i;
             *is_integer = 1;
             return 1;
+#if PPHP_ENABLE_FLOAT
         case PT_FLOAT:
             *number = value.as.f;
             *is_integer = 0;
             return 1;
+#endif
         case PT_TRUE:
             *number = (pphp_float)1;
             *is_integer = 1;
@@ -118,12 +140,31 @@ int pv_to_number_prefix(pvalue value, pphp_float *number, int *is_integer) {
 }
 
 static pvalue numeric_result(pphp_float number, int integers) {
+#if PPHP_ENABLE_FLOAT
     if (integers && number >= (pphp_float)INT32_MIN && number <= (pphp_float)INT32_MAX &&
         number == (pphp_float)(pphp_int)number) {
         return pv_int((pphp_int)number);
     }
     return pv_float(number);
+#else
+    (void)integers;
+    return pv_int(number);
+#endif
 }
+
+#if !PPHP_ENABLE_FLOAT
+static int integer_power(pphp_int base, pphp_int exponent, pphp_int *result) {
+    pphp_int value = 1;
+    if (exponent < 0) return 0;
+    while (exponent != 0) {
+        if ((exponent & 1) != 0) value *= base;
+        exponent >>= 1;
+        if (exponent != 0) base *= base;
+    }
+    *result = value;
+    return 1;
+}
+#endif
 
 pstring *pv_to_string(pvalue value) {
     char buffer[64];
@@ -137,10 +178,12 @@ pstring *pv_to_string(pvalue value) {
         case PT_INT:
             length = snprintf(buffer, sizeof(buffer), "%lld", (long long)value.as.i);
             return length < 0 ? NULL : ps_new(buffer, (size_t)length);
+#if PPHP_ENABLE_FLOAT
         case PT_FLOAT:
             length = pphp_format_float(buffer, sizeof(buffer), value.as.f,
                                        'g', 14);
             return length < 0 ? NULL : ps_new(buffer, (size_t)length);
+#endif
         case PT_STRING:
             return ps_new(((const pstring *)value.as.gc)->data,
                           ((const pstring *)value.as.gc)->length);
@@ -214,7 +257,15 @@ int pv_binary_operation(pv_operation operation, pvalue left, pvalue right,
                 *error = "Division by zero";
                 return 0;
             }
+#if PPHP_ENABLE_FLOAT
             *result = numeric_result(a / b, ai && bi && fmod((double)a, (double)b) == 0.0);
+#else
+            if (a % b != 0) {
+                *error = "non-integral division requires float support";
+                return 0;
+            }
+            *result = pv_int(a / b);
+#endif
             return 1;
         case PV_MOD:
             if ((pphp_int)b == 0) {
@@ -223,7 +274,17 @@ int pv_binary_operation(pv_operation operation, pvalue left, pvalue right,
             }
             *result = pv_int((pphp_int)a % (pphp_int)b);
             return 1;
-        case PV_POW: *result = numeric_result((pphp_float)pow((double)a, (double)b), 0); return 1;
+        case PV_POW:
+#if PPHP_ENABLE_FLOAT
+            *result = numeric_result((pphp_float)pow((double)a, (double)b), 0);
+#else
+            if (!integer_power(a, b, &a)) {
+                *error = "negative exponent requires float support";
+                return 0;
+            }
+            *result = pv_int(a);
+#endif
+            return 1;
         case PV_BAND: *result = pv_int((pphp_int)a & (pphp_int)b); return 1;
         case PV_BOR: *result = pv_int((pphp_int)a | (pphp_int)b); return 1;
         case PV_BXOR: *result = pv_int((pphp_int)a ^ (pphp_int)b); return 1;

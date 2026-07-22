@@ -19,6 +19,10 @@
 #define PPHP_ENABLE_FLOAT 1
 #endif
 
+#if PPHP_ENABLE_FLOAT != 0 && PPHP_ENABLE_FLOAT != 1
+#error "PPHP_ENABLE_FLOAT must be 0 or 1"
+#endif
+
 #ifndef PPHP_ENABLE_COMPILER
 #define PPHP_ENABLE_COMPILER 1
 #endif
@@ -81,7 +85,11 @@ typedef int64_t pphp_int;
 typedef int32_t pphp_int;
 #endif
 
-#if PPHP_USE_DOUBLE
+#if !PPHP_ENABLE_FLOAT
+/* Integer-only builds keep the internal numeric API source-compatible
+ * without introducing a floating-point C type or operation. */
+typedef pphp_int pphp_float;
+#elif PPHP_USE_DOUBLE
 typedef double pphp_float;
 #else
 typedef float pphp_float;

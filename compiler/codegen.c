@@ -156,6 +156,7 @@ static pphp_int parse_integer_token(pc_token token, int *overflow) {
     return (pphp_int)value;
 }
 
+#if PPHP_ENABLE_FLOAT
 static pphp_float parse_float_token(pc_token token) {
     size_t i = 0U;
     pphp_float value = 0;
@@ -196,6 +197,7 @@ static pphp_float parse_float_token(pc_token token) {
     }
     return value;
 }
+#endif
 
 static int escape_hex_digit(char byte) {
     if (byte >= '0' && byte <= '9') return byte - '0';
@@ -1611,12 +1613,20 @@ static void compile_expression(generator *gen, const pc_ast *node) {
                 emit_byte(gen, OP_LOAD_I32, node->line);
                 emit_i32(gen, (int32_t)value, node->line);
             } else {
+#if PPHP_ENABLE_FLOAT
                 emit_constant(gen, pv_float((pphp_float)(uint32_t)value), node->line);
+#else
+                fail(gen, node->line, "integer literal requires float support");
+#endif
             }
             break;
         }
         case AST_FLOAT:
+#if PPHP_ENABLE_FLOAT
             emit_constant(gen, pv_float(parse_float_token(node->as.literal.token)), node->line);
+#else
+            fail(gen, node->line, "float support disabled");
+#endif
             break;
         case AST_STRING: {
             pstring *string = decode_string(node->as.literal.token);
@@ -1688,6 +1698,12 @@ static void compile_expression(generator *gen, const pc_ast *node) {
                 compile_increment(gen, node);
                 break;
             }
+#if !PPHP_ENABLE_FLOAT
+            if (node->as.unary.op == T_FLOAT_TYPE) {
+                fail(gen, node->line, "float support disabled");
+                break;
+            }
+#endif
             compile_expression(gen, node->as.unary.operand);
             if (node->as.unary.op == T_MINUS) emit_byte(gen, OP_NEG, node->line);
             else if (node->as.unary.op == T_BANG) emit_byte(gen, OP_NOT, node->line);

@@ -231,9 +231,11 @@ void pphp_ret_null(pphp_ctx *context) { set_result(context, pv_null()); }
 void pphp_ret_int(pphp_ctx *context, pphp_int value) {
     set_result(context, pv_int(value));
 }
+#if PPHP_ENABLE_FLOAT
 void pphp_ret_float(pphp_ctx *context, pphp_float value) {
     set_result(context, pv_float(value));
 }
+#endif
 void pphp_ret_bool(pphp_ctx *context, int value) {
     set_result(context, pv_bool(value));
 }

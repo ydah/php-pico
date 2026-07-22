@@ -295,7 +295,12 @@ static int collect_strings(const pmodule *module, string_list *strings) {
 }
 
 static size_t serialized_constant_size(pvalue value) {
+#if PPHP_ENABLE_FLOAT
     return value.type == PT_FLOAT && sizeof(pphp_float) == 8U ? 16U : 8U;
+#else
+    (void)value;
+    return 8U;
+#endif
 }
 
 static int string_index(const string_list *strings, const pstring *string,
@@ -399,6 +404,7 @@ int pphp_pbc_write_file(const pmodule *module, const char *path) {
                 bytes[offset] = 0U;
                 put_u32(bytes, offset + 4U, (uint32_t)(int32_t)value.as.i);
                 offset += 8U;
+#if PPHP_ENABLE_FLOAT
             } else if (value.type == PT_FLOAT && sizeof(pphp_float) == 4U) {
                 uint32_t bits;
                 float number = (float)value.as.f;
@@ -406,12 +412,14 @@ int pphp_pbc_write_file(const pmodule *module, const char *path) {
                 bytes[offset] = 1U;
                 put_u32(bytes, offset + 4U, bits);
                 offset += 8U;
+#endif
             } else if (value.type == PT_STRING) {
                 uint16_t sid;
                 if (!string_index(&strings, (pstring *)value.as.gc, &sid)) goto done;
                 bytes[offset] = 2U;
                 put_u32(bytes, offset + 4U, sid);
                 offset += 8U;
+#if PPHP_ENABLE_FLOAT
             } else if (value.type == PT_FLOAT) {
                 uint64_t bits;
                 double number = (double)value.as.f;
@@ -420,6 +428,7 @@ int pphp_pbc_write_file(const pmodule *module, const char *path) {
                 put_u32(bytes, offset + 8U, (uint32_t)(bits & UINT32_MAX));
                 put_u32(bytes, offset + 12U, (uint32_t)(bits >> 32U));
                 offset += 16U;
+#endif
             } else {
                 goto done;
             }
@@ -591,17 +600,23 @@ int pphp_pbc_load(const void *data, size_t length, pmodule *module) {
                 value = pv_int((pphp_int)(int32_t)get_u32(bytes, offset + 4U));
                 offset += 8U;
             } else if (tag == 1U) {
+#if PPHP_ENABLE_FLOAT
                 uint32_t bits = get_u32(bytes, offset + 4U);
                 float number;
                 memcpy(&number, &bits, sizeof(number));
                 value = pv_float((pphp_float)number);
                 offset += 8U;
+#else
+                result = PPHP_E_UNSUPPORTED;
+                goto failed_module;
+#endif
             } else if (tag == 2U) {
                 uint32_t sid = get_u32(bytes, offset + 4U);
                 if (sid >= n_strings) goto failed_module;
                 value = pv_heap(PT_STRING, &strings[sid]->header);
                 offset += 8U;
             } else if (tag == 3U) {
+#if PPHP_ENABLE_FLOAT
                 uint64_t bits;
                 double number;
                 if (offset + 16U > length) goto failed_module;
@@ -610,6 +625,10 @@ int pphp_pbc_load(const void *data, size_t length, pmodule *module) {
                 memcpy(&number, &bits, sizeof(number));
                 value = pv_float((pphp_float)number);
                 offset += 16U;
+#else
+                result = PPHP_E_UNSUPPORTED;
+                goto failed_module;
+#endif
             } else {
                 goto failed_module;
             }

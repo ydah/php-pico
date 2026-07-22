@@ -203,8 +203,13 @@ static int adc_sample(pphp_ctx *context, int voltage) {
     if (hal_failed(context, "ADC read",
                    hal_adc_read_u16(data->pin, &sample)) < 0) return -1;
     if (voltage) {
+#if PPHP_ENABLE_FLOAT
         pphp_ret_float(context,
                        (pphp_float)((double)sample * 3.3 / 65536.0));
+#else
+        return pphp_raise(context, "RuntimeException",
+                          "float support disabled");
+#endif
     } else {
         pphp_ret_int(context, (pphp_int)sample);
     }

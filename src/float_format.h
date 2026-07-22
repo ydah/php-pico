@@ -5,7 +5,7 @@
 
 #include <stddef.h>
 
-#if PPHP_USE_DOUBLE
+#if PPHP_ENABLE_FLOAT && PPHP_USE_DOUBLE
 #define PPHP_FLOAT_FORMAT_BUFFER_SIZE 384U
 #else
 #define PPHP_FLOAT_FORMAT_BUFFER_SIZE 128U
@@ -17,7 +17,9 @@
  * The return value is the byte length, or -1 when the arguments or capacity
  * are invalid.
  */
+#if PPHP_ENABLE_FLOAT
 int pphp_format_float(char *buffer, size_t capacity, pphp_float value,
                       char conversion, int precision);
+#endif
 
 #endif
