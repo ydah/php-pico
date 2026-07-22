@@ -109,7 +109,7 @@ const pmethod *pclass_find_method(const pclass *class_entry,
 pobject *pobject_new(pphp_state *state, pclass *class_entry);
 pobject *pobject_clone(const pobject *source);
 void pobject_destroy(pobject *object);
-void pobject_run_destructor(pobject *object);
+int pobject_run_destructor(pobject *object);
 int pclass_is_a(const pclass *class_entry, const pclass *expected);
 int pclass_member_visible(uint8_t flags, const pclass *owner,
                           const pclass *scope);

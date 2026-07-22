@@ -525,10 +525,10 @@ void pobject_mark_property_written(pobject *object, uint8_t slot) {
     written[slot] = 1U;
 }
 
-void pobject_run_destructor(pobject *object) {
+int pobject_run_destructor(pobject *object) {
     int needs_guard;
     if (object == NULL || object->owner_state == NULL ||
-        (object->header.flags & UINT8_C(0xc0)) != 0U) return;
+        (object->header.flags & UINT8_C(0xc0)) != 0U) return 0;
     needs_guard = object->header.refcnt == 0U;
     if (object->owner_state != NULL &&
         (object->header.flags & UINT8_C(0xc0)) == 0U) {
@@ -563,8 +563,10 @@ void pobject_run_destructor(pobject *object) {
                            sizeof(object->owner_state->error), "%s",
                            saved_error);
             object->owner_state->error_line = saved_line;
+            return 1;
         }
     }
+    return 0;
 }
 
 void pobject_destroy(pobject *object) {

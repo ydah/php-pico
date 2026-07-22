@@ -595,6 +595,30 @@ static void release_range(pphp_state *state, size_t begin, size_t end) {
     }
 }
 
+static void release_frame_owners(pframe *frame) {
+    if (frame == NULL) return;
+    if (frame->has_return_override) {
+        pv_release(frame->return_override);
+        frame->return_override = pv_null();
+        frame->has_return_override = 0;
+    }
+    if (!frame->owns_closure_context) return;
+    frame->owns_closure_context = 0U;
+    pmodule_release((pmodule *)frame->module);
+    pclass_release_runtime(frame->called_scope);
+    pclass_release_runtime(frame->called_class);
+    frame->module = NULL;
+    frame->called_scope = NULL;
+    frame->called_class = NULL;
+}
+
+static void release_all_frames(pphp_state *state) {
+    while (state != NULL && state->frame_count != 0U) {
+        state->frame_count--;
+        release_frame_owners(&state->frames[state->frame_count]);
+    }
+}
+
 static int throw_exception(pphp_state *state, pvalue exception,
                            size_t throw_pc) {
     if (exception.type == PT_OBJECT) {
@@ -644,10 +668,7 @@ static int throw_exception(pphp_state *state, pvalue exception,
         }
         release_range(state, frame->base, state->stack_count);
         state->stack_count = frame->base;
-        if (frame->has_return_override) {
-            pv_release(frame->return_override);
-            frame->has_return_override = 0;
-        }
+        release_frame_owners(frame);
         state->frame_count--;
         if (state->frame_count != 0U) {
             pframe *caller = &state->frames[state->frame_count - 1U];
@@ -1048,7 +1069,6 @@ static int call_value(pphp_state *state, pframe *caller,
         state->stack[base + callee->n_params + i] = closure->captures[i];
         pv_retain(closure->captures[i]);
     }
-    pv_release(callable);
     state->stack_count = base + callee->n_locals;
     memset(&state->frames[state->frame_count], 0,
            sizeof(state->frames[state->frame_count]));
@@ -1062,6 +1082,11 @@ static int call_value(pphp_state *state, pframe *caller,
     state->frames[state->frame_count].return_override = pv_null();
     state->frames[state->frame_count].called_scope = closure->called_scope;
     state->frames[state->frame_count].called_class = closure->called_class;
+    pmodule_retain((pmodule *)closure->module);
+    pclass_retain_runtime(closure->called_scope);
+    pclass_retain_runtime(closure->called_class);
+    state->frames[state->frame_count].owns_closure_context = 1U;
+    pv_release(callable);
     state->frame_count++;
     return 1;
 }
@@ -1435,6 +1460,7 @@ static int return_from_function(pphp_state *state, pvalue result) {
     }
     release_range(state, base, state->stack_count);
     state->stack_count = base;
+    release_frame_owners(frame);
     state->frame_count--;
     if (state->frame_count == 0U) {
         pv_release(result);
@@ -1505,7 +1531,7 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                 }
                 release_range(state, 0U, state->stack_count);
                 state->stack_count = 0U;
-                state->frame_count = 0U;
+                release_all_frames(state);
                 break;
             case OP_POP: {
                 pvalue value = pop(state);
@@ -2821,27 +2847,15 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
             pclass_destroy(state->building_class);
             state->building_class = NULL;
         }
-        for (i = 0U; i < state->frame_count; i++) {
-            if (state->frames[i].has_return_override) {
-                pv_release(state->frames[i].return_override);
-                state->frames[i].has_return_override = 0;
-            }
-        }
         release_range(state, 0U, state->stack_count);
         state->stack_count = 0U;
-        state->frame_count = 0U;
+        release_all_frames(state);
         return PPHP_E_RUNTIME;
     }
     if (state->exit_requested) {
-        for (i = 0U; i < state->frame_count; i++) {
-            if (state->frames[i].has_return_override) {
-                pv_release(state->frames[i].return_override);
-                state->frames[i].has_return_override = 0;
-            }
-        }
         release_range(state, 0U, state->stack_count);
         state->stack_count = 0U;
-        state->frame_count = 0U;
+        release_all_frames(state);
     }
     return PPHP_OK;
 }

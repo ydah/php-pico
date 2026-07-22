@@ -5,6 +5,7 @@
 #include "parser.h"
 #endif
 #include "vm.h"
+#include "closure.h"
 #include "pclass.h"
 #include "parray.h"
 #include "pphp/hal.h"
@@ -617,69 +618,259 @@ void pphp_clear_classes(pphp_state *state) {
     state->class_capacity = 0U;
 }
 
-static int value_keeps_class_graph(pvalue value) {
-    return value.type == PT_ARRAY || value.type == PT_OBJECT ||
-           value.type == PT_CLOSURE;
+typedef struct class_reachability {
+    pphp_state *state;
+    uint8_t *reachable_classes;
+    pclass **class_queue;
+    size_t class_queue_count;
+    size_t class_queue_cursor;
+    pheader **containers;
+    size_t container_count;
+    size_t container_capacity;
+    size_t container_cursor;
+    int failed;
+} class_reachability;
+
+static void reachability_destroy(class_reachability *reachability) {
+    if (reachability == NULL) return;
+    pphp_free(reachability->reachable_classes);
+    pphp_free(reachability->class_queue);
+    pphp_free(reachability->containers);
+    memset(reachability, 0, sizeof(*reachability));
 }
 
-static int table_keeps_class_graph(const parray *table) {
+static int reachability_class_index(const class_reachability *reachability,
+                                    const pclass *class_entry,
+                                    size_t *index) {
     size_t i;
-    if (table == NULL) return 0;
-    for (i = 0U; i < table->used; i++) {
-        if (table->entries[i].key.type != PT_NULL &&
-            value_keeps_class_graph(table->entries[i].value)) return 1;
-    }
-    return 0;
-}
-
-static int state_has_live_user_class_graph(const pphp_state *state) {
-    size_t i;
-    for (i = 0U; i < state->class_count; i++) {
-        const pclass *class_entry = state->classes[i];
-        size_t property;
-        if (class_entry->persistent) continue;
-        if (class_entry->runtime_refs != 0U ||
-            table_keeps_class_graph(class_entry->static_properties) ||
-            table_keeps_class_graph(class_entry->constants)) return 1;
-        for (property = 0U; property < class_entry->property_count;
-             property++) {
-            if (value_keeps_class_graph(
-                    class_entry->properties[property].default_value)) return 1;
+    if (reachability == NULL || class_entry == NULL) return 0;
+    for (i = 0U; i < reachability->state->class_count; i++) {
+        if (reachability->state->classes[i] == class_entry) {
+            if (index != NULL) *index = i;
+            return 1;
         }
     }
     return 0;
+}
+
+static void reachability_mark_class(class_reachability *reachability,
+                                    pclass *class_entry) {
+    size_t index;
+    if (reachability == NULL || reachability->failed || class_entry == NULL ||
+        !reachability_class_index(reachability, class_entry, &index) ||
+        reachability->reachable_classes[index]) return;
+    reachability->reachable_classes[index] = 1U;
+    reachability->class_queue[reachability->class_queue_count++] = class_entry;
+}
+
+static int reachability_has_container(const class_reachability *reachability,
+                                      const pheader *header) {
+    size_t i;
+    if (reachability == NULL || header == NULL) return 0;
+    for (i = 0U; i < reachability->container_count; i++) {
+        if (reachability->containers[i] == header) return 1;
+    }
+    return 0;
+}
+
+static void reachability_mark_value(class_reachability *reachability,
+                                    pvalue value) {
+    pheader **resized;
+    size_t capacity;
+    if (reachability == NULL || reachability->failed || value.as.gc == NULL ||
+        (value.type != PT_ARRAY && value.type != PT_OBJECT &&
+         value.type != PT_CLOSURE) ||
+        reachability_has_container(reachability, value.as.gc)) return;
+    if (reachability->container_count == reachability->container_capacity) {
+        capacity = reachability->container_capacity == 0U
+                       ? 16U : reachability->container_capacity * 2U;
+        if (capacity < reachability->container_capacity ||
+            capacity > SIZE_MAX / sizeof(*resized)) {
+            reachability->failed = 1;
+            return;
+        }
+        resized = pphp_realloc(reachability->containers,
+                               capacity * sizeof(*resized));
+        if (resized == NULL) {
+            reachability->failed = 1;
+            return;
+        }
+        reachability->containers = resized;
+        reachability->container_capacity = capacity;
+    }
+    reachability->containers[reachability->container_count++] = value.as.gc;
+}
+
+static void reachability_mark_table(class_reachability *reachability,
+                                    const parray *table) {
+    size_t i;
+    if (table == NULL) return;
+    for (i = 0U; i < table->used; i++) {
+        if (table->entries[i].key.type == PT_NULL) continue;
+        reachability_mark_value(reachability, table->entries[i].key);
+        reachability_mark_value(reachability, table->entries[i].value);
+    }
+}
+
+static void reachability_expand_class(class_reachability *reachability,
+                                      pclass *class_entry) {
+    size_t i;
+    reachability_mark_class(reachability, class_entry->parent);
+    for (i = 0U; i < class_entry->interface_count; i++) {
+        reachability_mark_class(reachability, class_entry->interfaces[i]);
+    }
+    for (i = 0U; i < class_entry->property_count; i++) {
+        reachability_mark_value(reachability,
+                                class_entry->properties[i].default_value);
+    }
+    reachability_mark_table(reachability, class_entry->static_properties);
+    reachability_mark_table(reachability, class_entry->constants);
+}
+
+static void reachability_expand_container(class_reachability *reachability,
+                                          pheader *header) {
+    size_t i;
+    if (header->type == PT_ARRAY) {
+        reachability_mark_table(reachability, (const parray *)header);
+        return;
+    }
+    if (header->type == PT_OBJECT) {
+        pobject *object = (pobject *)header;
+        reachability_mark_class(reachability, object->class_entry);
+        for (i = 0U; i < object->class_entry->property_count; i++) {
+            reachability_mark_value(reachability, object->slots[i]);
+        }
+        return;
+    }
+    if (header->type == PT_CLOSURE) {
+        pclosure *closure = (pclosure *)header;
+        reachability_mark_class(reachability, closure->called_scope);
+        reachability_mark_class(reachability, closure->called_class);
+        for (i = 0U; i < closure->capture_count; i++) {
+            reachability_mark_value(reachability, closure->captures[i]);
+        }
+    }
+}
+
+static int reachability_build(pphp_state *state,
+                              class_reachability *reachability) {
+    size_t i;
+    memset(reachability, 0, sizeof(*reachability));
+    reachability->state = state;
+    if (state->class_count != 0U) {
+        reachability->reachable_classes = pphp_alloc(state->class_count);
+        reachability->class_queue = pphp_alloc(
+            state->class_count * sizeof(*reachability->class_queue));
+        if (reachability->reachable_classes == NULL ||
+            reachability->class_queue == NULL) {
+            reachability_destroy(reachability);
+            return 0;
+        }
+        memset(reachability->reachable_classes, 0, state->class_count);
+    }
+    for (i = 0U; i < state->class_count; i++) {
+        if (state->classes[i]->persistent) {
+            reachability_mark_class(reachability, state->classes[i]);
+        }
+    }
+    reachability_mark_table(reachability, state->globals);
+    reachability_mark_table(reachability, state->statics);
+    reachability_mark_table(reachability, state->constants);
+    reachability_mark_table(reachability, state->included_files);
+    for (i = 0U; i < state->stack_count; i++) {
+        reachability_mark_value(reachability, state->stack[i]);
+    }
+    for (i = 0U; i < state->frame_count; i++) {
+        pframe *frame = &state->frames[i];
+        reachability_mark_class(reachability, frame->called_scope);
+        reachability_mark_class(reachability, frame->called_class);
+        if (frame->has_return_override) {
+            reachability_mark_value(reachability, frame->return_override);
+        }
+    }
+    if (state->oom_exception != NULL) {
+        reachability_mark_value(
+            reachability,
+            pv_heap(PT_OBJECT, &state->oom_exception->header));
+    }
+    while (!reachability->failed &&
+           (reachability->class_queue_cursor <
+                reachability->class_queue_count ||
+            reachability->container_cursor < reachability->container_count)) {
+        while (reachability->class_queue_cursor <
+               reachability->class_queue_count) {
+            reachability_expand_class(
+                reachability,
+                reachability->class_queue[
+                    reachability->class_queue_cursor++]);
+        }
+        while (reachability->container_cursor <
+               reachability->container_count) {
+            reachability_expand_container(
+                reachability,
+                reachability->containers[
+                    reachability->container_cursor++]);
+        }
+    }
+    if (reachability->failed) {
+        reachability_destroy(reachability);
+        return 0;
+    }
+    return 1;
+}
+
+static int run_unreachable_object_destructors(
+    pphp_state *state, const class_reachability *reachability) {
+    pobject *object = state->gc_objects;
+    int invoked = 0;
+    if (object != NULL) pv_retain(pv_heap(PT_OBJECT, &object->header));
+    while (object != NULL) {
+        pobject *next = object->gc_next;
+        if (next != NULL) pv_retain(pv_heap(PT_OBJECT, &next->header));
+        if (!reachability_has_container(reachability, &object->header)) {
+            invoked |= pobject_run_destructor(object);
+        }
+        pv_release(pv_heap(PT_OBJECT, &object->header));
+        object = next;
+    }
+    return invoked;
 }
 
 void pphp_clear_user_classes(pphp_state *state) {
+    class_reachability reachability;
     size_t read_index;
+    size_t write_index;
+    int invoked;
     if (state == NULL) return;
-    if (state_has_live_user_class_graph(state)) return;
-    if (state->oom_exception != NULL &&
-        !state->oom_exception->class_entry->persistent) {
-        pv_release(pv_heap(PT_OBJECT, &state->oom_exception->header));
-        state->oom_exception = NULL;
-    }
-    if (state->building_class != NULL && !state->building_class->persistent) {
+    do {
+        if (!reachability_build(state, &reachability)) return;
+        invoked = run_unreachable_object_destructors(state, &reachability);
+        if (invoked) reachability_destroy(&reachability);
+    } while (invoked);
+    if (state->building_class != NULL &&
+        !state->building_class->persistent) {
         pclass_release(state->building_class);
         state->building_class = NULL;
     }
-    do {
-        size_t removed = 0U;
-        for (read_index = state->class_count; read_index > 0U; read_index--) {
-            pclass *class_entry = state->classes[read_index - 1U];
-            if (class_entry->persistent || class_entry->refcnt != 1U) continue;
-            pclass_release(class_entry);
-            if (read_index < state->class_count) {
-                memmove(state->classes + read_index - 1U,
-                        state->classes + read_index,
-                        (state->class_count - read_index) *
-                            sizeof(*state->classes));
-            }
-            state->class_count--;
-            removed++;
+    for (read_index = 0U; read_index < state->class_count; read_index++) {
+        if (!reachability.reachable_classes[read_index] &&
+            !state->classes[read_index]->persistent) {
+            pclass_release_values(state->classes[read_index]);
         }
-        if (removed == 0U) break;
-    } while (state->class_count != 0U);
+    }
+    (void)pphp_gc_collect(state);
+    write_index = 0U;
+    for (read_index = 0U; read_index < state->class_count; read_index++) {
+        pclass *class_entry = state->classes[read_index];
+        if (!reachability.reachable_classes[read_index] &&
+            !class_entry->persistent) {
+            pclass_release(class_entry);
+        } else {
+            state->classes[write_index++] = class_entry;
+        }
+    }
+    state->class_count = write_index;
+    reachability_destroy(&reachability);
 }
 
 void pphp_set_output(pphp_state *state, pphp_output_fn output, void *context) {

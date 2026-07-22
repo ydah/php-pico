@@ -669,6 +669,261 @@ TEST(transient_pbc_modules_are_released_after_success_and_failure) {
     ASSERT_EQ(0, remove(failure_path));
 }
 
+TEST(closure_frames_retain_last_callable_owners) {
+    static const char *const invokes[] = {
+        "<?php echo (array_shift($frameOwners))('normal');",
+        "<?php try { (array_shift($frameOwners))('throw'); }"
+        " catch (Exception $e) { echo 'X'; }",
+        "<?php try { (array_shift($frameOwners))('error'); }"
+        " catch (Error $e) { echo 'E'; }",
+        "<?php (array_shift($frameOwners))('exit');"
+    };
+    static const char *const expected[] = {"Fok", "FX", "FE", ""};
+    static const char *const invoke_paths[] = {
+        "build/host/test_frame_owner_normal.pbc",
+        "build/host/test_frame_owner_throw.pbc",
+        "build/host/test_frame_owner_error.pbc",
+        "build/host/test_frame_owner_exit.pbc"
+    };
+    const char *setup_path = "build/host/test_frame_owner_setup.pbc";
+    const char *setup =
+        "<?php $frameOwners = [function ($mode) {"
+        " try {"
+        "  if ($mode === 'throw') { throw new Exception('frame'); }"
+        "  if ($mode === 'error') { missing_frame_owner_call(); }"
+        "  if ($mode === 'exit') { exit(7); }"
+        "  return 'ok';"
+        " } finally { echo 'F'; }"
+        "}];";
+    uint8_t *setup_pbc;
+    uint8_t *invoke_pbc[4];
+    size_t setup_length;
+    size_t invoke_lengths[4];
+    size_t i;
+
+    pphp_pool_init(vm_pool, sizeof(vm_pool));
+    ASSERT_TRUE(write_source_pbc(setup + 6U, setup_path));
+    for (i = 0U; i < 4U; i++) {
+        ASSERT_TRUE(write_source_pbc(invokes[i] + 6U, invoke_paths[i]));
+    }
+    setup_pbc = read_pbc_from_libc(setup_path, &setup_length);
+    ASSERT_TRUE(setup_pbc != NULL);
+    for (i = 0U; i < 4U; i++) {
+        invoke_pbc[i] = read_pbc_from_libc(invoke_paths[i],
+                                           &invoke_lengths[i]);
+        ASSERT_TRUE(invoke_pbc[i] != NULL);
+    }
+
+    for (i = 0U; i < 4U; i++) {
+        pphp_state *state = pphp_open(vm_pool, sizeof(vm_pool));
+        output_buffer output;
+        ASSERT_TRUE(state != NULL);
+        memset(&output, 0, sizeof(output));
+        pphp_set_output(state, capture_output, &output);
+        ASSERT_EQ(PPHP_OK,
+                  pphp_exec_source(state, setup, strlen(setup),
+                                   "frame-owner-setup"));
+        ASSERT_EQ(PPHP_OK,
+                  pphp_exec_source(state, invokes[i], strlen(invokes[i]),
+                                   "frame-owner-invoke"));
+        ASSERT_STR(expected[i], output.bytes);
+        ASSERT_EQ(i == 3U, pphp_exit_requested(state));
+        if (i == 3U) ASSERT_EQ(7, pphp_exit_status(state));
+        pphp_close(state);
+    }
+    for (i = 0U; i < 4U; i++) {
+        pphp_state *state = pphp_open(vm_pool, sizeof(vm_pool));
+        output_buffer output;
+        ASSERT_TRUE(state != NULL);
+        memset(&output, 0, sizeof(output));
+        pphp_set_output(state, capture_output, &output);
+        ASSERT_EQ(PPHP_OK, pphp_exec_pbc(state, setup_pbc, setup_length));
+        ASSERT_EQ(PPHP_OK,
+                  pphp_exec_pbc(state, invoke_pbc[i], invoke_lengths[i]));
+        ASSERT_STR(expected[i], output.bytes);
+        ASSERT_EQ(i == 3U, pphp_exit_requested(state));
+        if (i == 3U) ASSERT_EQ(7, pphp_exit_status(state));
+        pphp_close(state);
+    }
+
+    free(setup_pbc);
+    ASSERT_EQ(0, remove(setup_path));
+    for (i = 0U; i < 4U; i++) {
+        free(invoke_pbc[i]);
+        ASSERT_EQ(0, remove(invoke_paths[i]));
+    }
+}
+
+TEST(closure_frames_retain_called_scope) {
+    const char *setup_path = "build/host/test_frame_scope_setup.pbc";
+    const char *invoke_path = "build/host/test_frame_scope_invoke.pbc";
+    const char *setup =
+        "<?php class FrameOwnerScope {"
+        " private static function hidden() { return 'scope'; }"
+        " public static function make() {"
+        "  return function () { return self::hidden(); };"
+        " }"
+        "} $frameOwners = [FrameOwnerScope::make()];";
+    const char *invoke =
+        "<?php echo (array_shift($frameOwners))();";
+    uint8_t *setup_pbc;
+    uint8_t *invoke_pbc;
+    size_t setup_length;
+    size_t invoke_length;
+    size_t mode;
+
+    pphp_pool_init(vm_pool, sizeof(vm_pool));
+    ASSERT_TRUE(write_source_pbc(setup + 6U, setup_path));
+    ASSERT_TRUE(write_source_pbc(invoke + 6U, invoke_path));
+    setup_pbc = read_pbc_from_libc(setup_path, &setup_length);
+    invoke_pbc = read_pbc_from_libc(invoke_path, &invoke_length);
+    ASSERT_TRUE(setup_pbc != NULL);
+    ASSERT_TRUE(invoke_pbc != NULL);
+    for (mode = 0U; mode < 2U; mode++) {
+        pphp_state *state = pphp_open(vm_pool, sizeof(vm_pool));
+        output_buffer output;
+        ASSERT_TRUE(state != NULL);
+        memset(&output, 0, sizeof(output));
+        pphp_set_output(state, capture_output, &output);
+        if (mode == 0U) {
+            ASSERT_EQ(PPHP_OK,
+                      pphp_exec_source(state, setup, strlen(setup),
+                                       "frame-scope-setup"));
+            ASSERT_EQ(PPHP_OK,
+                      pphp_exec_source(state, invoke, strlen(invoke),
+                                       "frame-scope-invoke"));
+        } else {
+            ASSERT_EQ(PPHP_OK,
+                      pphp_exec_pbc(state, setup_pbc, setup_length));
+            ASSERT_EQ(PPHP_OK,
+                      pphp_exec_pbc(state, invoke_pbc, invoke_length));
+        }
+        ASSERT_STR("scope", output.bytes);
+        pphp_close(state);
+    }
+    free(setup_pbc);
+    free(invoke_pbc);
+    ASSERT_EQ(0, remove(setup_path));
+    ASSERT_EQ(0, remove(invoke_path));
+}
+
+TEST(class_reachability_sweeps_dead_graphs_beside_live_graphs) {
+    const char *success_path = "build/host/test_class_reach_success.pbc";
+    const char *failure_path = "build/host/test_class_reach_failure.pbc";
+    const char *live_setup =
+        "<?php interface LiveMarker {}"
+        "class LiveParent {}"
+        "class LiveChild extends LiveParent implements LiveMarker {"
+        " public function value() { return 'live'; }"
+        "}"
+        "class SharedNode {}"
+        "$liveObject = new LiveChild();"
+        "$sharedNode = new SharedNode();";
+    const char *success =
+        "<?php class TempShared { public static $value; }"
+        "TempShared::$value = $sharedNode;"
+        "interface TempInterface {}"
+        "class TempParent {}"
+        "class TempChild extends TempParent implements TempInterface {}"
+        "class TempClosureCycle {"
+        " public static $values = [];"
+        " private static function hidden() { return 1; }"
+        " public static function init() {"
+        "  self::$values = [function () { return self::hidden(); }];"
+        " }"
+        "}"
+        "TempClosureCycle::init();"
+        "class TempHolder { public static $value; }"
+        "class TempVictim {"
+        " public function __destruct() { echo TempHelper::$message; }"
+        "}"
+        "class TempHelper { public static $message = 'D'; }"
+        "TempHolder::$value = new TempVictim();"
+        "class TempSelf {"
+        " public static $value;"
+        " public function __destruct() { echo 'S'; }"
+        "}"
+        "TempSelf::$value = new TempSelf();";
+    const char *failure =
+        "<?php class TempFailure {"
+        " public static $value; public static $message = 'F';"
+        " public function __destruct() { echo self::$message; }"
+        "}"
+        "TempFailure::$value = new TempFailure();"
+        "throw new Exception('expected failure');";
+    uint8_t *success_pbc;
+    uint8_t *failure_pbc;
+    size_t success_length;
+    size_t failure_length;
+    size_t baseline_classes;
+    size_t baseline_modules;
+    size_t baseline_used;
+    size_t i;
+    pphp_state *state;
+    output_buffer output;
+
+    pphp_pool_init(vm_pool, sizeof(vm_pool));
+    ASSERT_TRUE(write_source_pbc(success + 6U, success_path));
+    ASSERT_TRUE(write_source_pbc(failure + 6U, failure_path));
+    success_pbc = read_pbc_from_libc(success_path, &success_length);
+    failure_pbc = read_pbc_from_libc(failure_path, &failure_length);
+    ASSERT_TRUE(success_pbc != NULL);
+    ASSERT_TRUE(failure_pbc != NULL);
+    state = pphp_open(vm_pool, sizeof(vm_pool));
+    ASSERT_TRUE(state != NULL);
+    memset(&output, 0, sizeof(output));
+    pphp_set_output(state, capture_output, &output);
+    ASSERT_EQ(PPHP_OK,
+              pphp_exec_source(state, live_setup, strlen(live_setup),
+                               "class-reach-live"));
+
+    ASSERT_EQ(PPHP_OK,
+              pphp_exec_source(state, success, strlen(success),
+                               "class-reach-success"));
+    ASSERT_EQ(PPHP_E_RUNTIME,
+              pphp_exec_source(state, failure, strlen(failure),
+                               "class-reach-failure"));
+    ASSERT_EQ(PPHP_OK, pphp_exec_pbc(state, success_pbc, success_length));
+    ASSERT_EQ(PPHP_E_RUNTIME,
+              pphp_exec_pbc(state, failure_pbc, failure_length));
+    baseline_classes = state->class_count;
+    baseline_modules = state->repl_module_count;
+    baseline_used = pphp_pool_get_stats().used;
+
+    for (i = 0U; i < 32U; i++) {
+        ASSERT_EQ(PPHP_OK,
+                  pphp_exec_source(state, success, strlen(success),
+                                   "class-reach-success"));
+        ASSERT_EQ(PPHP_E_RUNTIME,
+                  pphp_exec_source(state, failure, strlen(failure),
+                                   "class-reach-failure"));
+        ASSERT_EQ(baseline_classes, state->class_count);
+        ASSERT_EQ(baseline_modules, state->repl_module_count);
+        ASSERT_EQ(baseline_used, pphp_pool_get_stats().used);
+    }
+    for (i = 0U; i < 32U; i++) {
+        ASSERT_EQ(PPHP_OK,
+                  pphp_exec_pbc(state, success_pbc, success_length));
+        ASSERT_EQ(PPHP_E_RUNTIME,
+                  pphp_exec_pbc(state, failure_pbc, failure_length));
+        ASSERT_EQ(baseline_classes, state->class_count);
+        ASSERT_EQ(baseline_modules, state->repl_module_count);
+        ASSERT_EQ(baseline_used, pphp_pool_get_stats().used);
+    }
+    ASSERT_TRUE(pphp_find_class(state, "LiveChild", 9U) != NULL);
+    ASSERT_TRUE(pphp_find_class(state, "LiveParent", 10U) != NULL);
+    ASSERT_TRUE(pphp_find_class(state, "LiveMarker", 10U) != NULL);
+    ASSERT_TRUE(pphp_find_class(state, "SharedNode", 10U) != NULL);
+    ASSERT_TRUE(pphp_find_class(state, "TempShared", 10U) == NULL);
+    ASSERT_TRUE(pphp_find_class(state, "TempClosureCycle", 16U) == NULL);
+    ASSERT_TRUE(output.length >= 4U + 64U * 3U);
+    pphp_close(state);
+    free(success_pbc);
+    free(failure_pbc);
+    ASSERT_EQ(0, remove(success_path));
+    ASSERT_EQ(0, remove(failure_path));
+}
+
 TEST(pbc_loader_rejects_truncated_and_wrapping_sections) {
     uint8_t bytes[128];
 
@@ -1684,6 +1939,9 @@ int main(void) {
         {"source retained lifetimes", source_modules_outlive_objects_kept_in_globals},
         {"shutdown class lifetimes", shutdown_destructors_run_before_class_metadata_is_released},
         {"transient PBC lifetimes", transient_pbc_modules_are_released_after_success_and_failure},
+        {"closure frame owners", closure_frames_retain_last_callable_owners},
+        {"closure frame scope", closure_frames_retain_called_scope},
+        {"class graph reachability", class_reachability_sweeps_dead_graphs_beside_live_graphs},
         {"PBC malformed bounds", pbc_loader_rejects_truncated_and_wrapping_sections},
         {"array COW runtime", arrays_use_copy_on_write_and_normalized_keys},
         {"language conformance", language_conformance_covers_casts_lvalues_nullsafe_and_interpolation},

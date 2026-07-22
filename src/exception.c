@@ -12,6 +12,7 @@ static pclass *register_builtin_class(pphp_state *state, const char *name,
         pclass_destroy(class_entry);
         return NULL;
     }
+    class_entry->persistent = 1U;
     return class_entry;
 }
 

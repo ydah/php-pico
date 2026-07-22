@@ -23,6 +23,7 @@ typedef struct pframe {
     int has_return_override;
     pclass *called_scope;
     pclass *called_class;
+    uint8_t owns_closure_context;
 } pframe;
 
 typedef struct pnative_function {
