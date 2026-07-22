@@ -26,6 +26,7 @@ typedef struct pphp_numeric {
     pphp_int integer;
     int is_integer;
     int integer_exact;
+    int integer_out_of_range;
     int string_status;
 } pphp_numeric;
 

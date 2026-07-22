@@ -226,6 +226,15 @@ Warning: A non-numeric value encountered on line 1
 assert_output "$warnings_on" "$numeric_source" "$numeric_on"
 assert_output "$warnings_off" "$numeric_source" '15:-2:4:3'
 
+boundary_numeric_source='echo gettype("2147483648tail" + 0), ":", gettype("-2147483649tail" + 0), "\n";'
+boundary_numeric_on='Warning: A non-numeric value encountered on line 1
+Warning: A non-numeric value encountered on line 1
+double:double'
+assert_output "$warnings_on" "$boundary_numeric_source" "$boundary_numeric_on"
+assert_output "$warnings_off" "$boundary_numeric_source" 'double:double'
+assert_output "$rp_equivalent" "$boundary_numeric_source" "$boundary_numeric_on"
+assert_output "$ubsan" "$boundary_numeric_source" "$boundary_numeric_on"
+
 if "$warnings_on" -r 'echo "not-numeric" + 1;' \
         >"$temporary/invalid-on.out" 2>"$temporary/invalid-on.err"; then
     fail 'fully non-numeric addition unexpectedly succeeded'
@@ -252,7 +261,7 @@ echo $pbcMissing, "missing\n";
 $pbcMissing = null;
 unset($pbcMissing);
 echo $pbcMissing, "again\n";
-echo "7tail" + 2, "\n";
+echo gettype("2147483648tail" + 0), "\n";
 class PbcQuietProbe { public $value = 6; }
 $pbcEffects = 0;
 function pbc_quiet_name() { global $pbcEffects; $pbcEffects++; return "value"; }
@@ -286,14 +295,14 @@ missing
 Warning: Undefined variable $pbcMissing on line 6
 again
 Warning: A non-numeric value encountered on line 7
-9
+double
 0:1:7:0
 1:0:6:3
 0:1:7:0:1:7:0:1:0:1:3:0:6:5:9:5:12:8:13'
 pbc_without='0:4
 missing
 again
-9
+double
 0:1:7:0
 1:0:6:3
 0:1:7:0:1:7:0:1:0:1:3:0:6:5:9:5:12:8:13'

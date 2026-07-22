@@ -1789,10 +1789,10 @@ static void compile_expression(generator *gen, const pc_ast *node) {
             } else if (magnitude <= (uint64_t)PPHP_INT_MAXIMUM) {
                 emit_constant(gen, pv_int((pphp_int)magnitude), node->line);
             } else {
-#if PPHP_INT64
-                fail(gen, node->line, "integer literal is out of range");
-#elif PPHP_ENABLE_FLOAT
+#if PPHP_ENABLE_FLOAT
                 emit_constant(gen, pv_float((pphp_float)magnitude), node->line);
+#elif PPHP_INT64
+                fail(gen, node->line, "integer literal is out of range");
 #else
                 fail(gen, node->line, "integer literal requires float support");
 #endif

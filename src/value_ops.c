@@ -176,14 +176,20 @@ static int integer_binary_float(pv_operation operation, pphp_int left,
 
 static int string_integer_exact(const char *text, size_t length,
                                 int require_complete, pphp_int *result,
-                                int *out_of_range, size_t *consumed) {
+                                int *out_of_range, uint64_t *magnitude_out,
+                                int *magnitude_valid_out, int *negative_out,
+                                size_t *consumed) {
     size_t position = 0U;
     int negative = 0;
     int digits = 0;
     int in_range = 1;
+    int magnitude_valid = 1;
     uint64_t magnitude = 0U;
     uint64_t limit;
     *out_of_range = 0;
+    *magnitude_out = 0U;
+    *magnitude_valid_out = 0;
+    *negative_out = 0;
     *consumed = 0U;
     while (position < length &&
            (text[position] == ' ' || text[position] == '\t' ||
@@ -196,13 +202,14 @@ static int string_integer_exact(const char *text, size_t length,
     while (position < length && text[position] >= '0' &&
            text[position] <= '9') {
         unsigned digit = (unsigned)(text[position++] - '0');
-        if (in_range) {
-            if (magnitude > (limit - digit) / 10U) {
-                in_range = 0;
+        if (magnitude_valid) {
+            if (magnitude > (UINT64_MAX - digit) / 10U) {
+                magnitude_valid = 0;
             } else {
                 magnitude = magnitude * 10U + digit;
             }
         }
+        if (in_range && (!magnitude_valid || magnitude > limit)) in_range = 0;
         digits++;
     }
     if (digits == 0 ||
@@ -214,6 +221,9 @@ static int string_integer_exact(const char *text, size_t length,
             text[position] == '\n' || text[position] == '\r')) position++;
     *consumed = position;
     if (require_complete && position != length) return 0;
+    *magnitude_out = magnitude;
+    *magnitude_valid_out = magnitude_valid;
+    *negative_out = negative;
     if (!in_range) {
         *out_of_range = 1;
         return 0;
@@ -318,10 +328,14 @@ static int floating_string_number(const char *text, size_t length,
 static int string_numeric(const char *text, size_t length,
                           int require_complete, pphp_numeric *numeric) {
     int out_of_range;
+    uint64_t magnitude;
+    int magnitude_valid;
+    int negative;
     size_t consumed = 0U;
     numeric->string_status = PPHP_NUMERIC_STRING_INVALID;
     if (string_integer_exact(text, length, require_complete,
-                             &numeric->integer, &out_of_range, &consumed)) {
+                             &numeric->integer, &out_of_range, &magnitude,
+                             &magnitude_valid, &negative, &consumed)) {
         numeric->number = (pphp_float)numeric->integer;
         numeric->is_integer = 1;
         numeric->integer_exact = 1;
@@ -331,9 +345,23 @@ static int string_numeric(const char *text, size_t length,
         return 1;
     }
 #if PPHP_ENABLE_FLOAT
+    if (out_of_range && magnitude_valid) {
+        numeric->number = (pphp_float)magnitude;
+        if (negative) numeric->number = -numeric->number;
+        numeric->is_integer = 0;
+        numeric->integer_out_of_range = 1;
+        numeric->string_status = consumed < length
+                                     ? PPHP_NUMERIC_STRING_TRAILING
+                                     : PPHP_NUMERIC_STRING_EXACT;
+        return 1;
+    }
     if (!floating_string_number(text, length, &numeric->number,
                                 &numeric->is_integer,
                                 require_complete, &consumed)) return 0;
+    if (out_of_range) {
+        numeric->is_integer = 0;
+        numeric->integer_out_of_range = 1;
+    }
     numeric->integer_exact = 0;
     numeric->string_status = consumed < length
                                  ? PPHP_NUMERIC_STRING_TRAILING
@@ -573,8 +601,10 @@ int pv_binary_operation(pv_operation operation, pvalue left, pvalue right,
             {
                 pphp_int left_integer;
                 pphp_int right_integer;
-                if (!pphp_number_to_integer(a, 0, &left_integer) ||
-                    !pphp_number_to_integer(b, 0, &right_integer)) {
+                if (!pphp_numeric_to_integer(&left_numeric, 0,
+                                             &left_integer) ||
+                    !pphp_numeric_to_integer(&right_numeric, 0,
+                                             &right_integer)) {
                     *error = "integer conversion is out of range";
                     return 0;
                 }
@@ -613,8 +643,10 @@ int pv_binary_operation(pv_operation operation, pvalue left, pvalue right,
         {
             pphp_int left_integer;
             pphp_int right_integer;
-            if (!pphp_number_to_integer(a, 0, &left_integer) ||
-                !pphp_number_to_integer(b, 0, &right_integer)) {
+            if (!pphp_numeric_to_integer(&left_numeric, 0,
+                                         &left_integer) ||
+                !pphp_numeric_to_integer(&right_numeric, 0,
+                                         &right_integer)) {
                 *error = "integer conversion is out of range";
                 return 0;
             }
@@ -657,6 +689,7 @@ int pphp_number_to_integer(pphp_float number, int exact, pphp_int *result) {
 
 int pphp_numeric_to_integer(const pphp_numeric *numeric, int exact,
                             pphp_int *result) {
+    if (numeric->integer_out_of_range) return 0;
     if (numeric->integer_exact) {
         *result = numeric->integer;
         return 1;

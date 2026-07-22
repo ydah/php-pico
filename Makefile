@@ -59,6 +59,7 @@ NO_FLOAT_PBC_HOST_BINARY := build/host/php-pico-no-float-pbc
 NO_FLOAT_UBSAN_BINARY := build/host/php-pico-no-float-ubsan
 NO_FLOAT_INT64_BINARY := build/host/php-pico-no-float-int64
 NO_FLOAT_INT64_PBC_BINARY := build/host/php-pico-no-float-int64-pbc
+FLOAT_INT64_BINARY := build/host/php-pico-float-int64
 FLOAT_REFERENCE_BINARY := build/host/php-pico-default-float
 RP2040_HOST_BINARY := build/host/php-pico-rp2040
 RP2040_UBSAN_BINARY := build/host/php-pico-rp2040-ubsan
@@ -156,6 +157,14 @@ $(NO_FLOAT_INT64_PBC_BINARY): FORCE $(RUNTIME_COMMON_SOURCES) tools/disasm.c por
 	$(CC) $(filter-out -DPPHP_ENABLE_FLOAT=%,$(PBC_CPPFLAGS)) \
 		-DPPHP_ENABLE_FLOAT=0 -DPPHP_INT64=1 $(CFLAGS) \
 		$(RUNTIME_COMMON_SOURCES) tools/disasm.c ports/host/main.c -o $@
+
+$(FLOAT_INT64_BINARY): FORCE $(RUNTIME_COMMON_SOURCES) src/float_format.c $(COMPILER_SOURCES) compiler/codegen.c tools/disasm.c shell/p2sh.c shell/p2sh_device.c ports/host/main.c
+	@mkdir -p $(@D)
+	$(CC) $(filter-out -DPPHP_ENABLE_FLOAT=%,$(COMPILER_CPPFLAGS)) \
+		-DPPHP_ENABLE_FLOAT=1 -DPPHP_INT64=1 -DPPHP_USE_DOUBLE=1 $(CFLAGS) \
+		$(RUNTIME_COMMON_SOURCES) src/float_format.c $(COMPILER_SOURCES) \
+		compiler/codegen.c tools/disasm.c shell/p2sh.c shell/p2sh_device.c \
+		ports/host/main.c $(LDFLAGS) -lm -o $@
 
 $(FLOAT_REFERENCE_BINARY): FORCE $(RUNTIME_COMMON_SOURCES) src/float_format.c $(COMPILER_SOURCES) compiler/codegen.c tools/disasm.c shell/p2sh.c shell/p2sh_device.c ports/host/main.c
 	@mkdir -p $(@D)
@@ -283,8 +292,9 @@ test-float-format: $(RP2040_HOST_BINARY) $(FLOAT_FORMAT_TEST_BINARY) test-rp-int
 	$(FLOAT_FORMAT_TEST_BINARY)
 	sh tests/cli/float_format_device.sh $(RP2040_HOST_BINARY)
 
-test-rp-integer-boundary: $(RP2040_UBSAN_BINARY)
-	sh tests/cli/integer_float_boundary.sh $(RP2040_UBSAN_BINARY)
+test-rp-integer-boundary: $(RP2040_UBSAN_BINARY) $(FLOAT_INT64_BINARY)
+	sh tests/cli/integer_float_boundary.sh $(RP2040_UBSAN_BINARY) \
+		$(FLOAT_INT64_BINARY)
 
 test-warnings-config: FORCE tests/unit/test_warnings_config.c
 	@mkdir -p build/host

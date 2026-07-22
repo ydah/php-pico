@@ -16,6 +16,7 @@
 #if PPHP_ENABLE_FLOAT
 #include <math.h>
 #endif
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -598,7 +599,15 @@ static int call_math_builtin(pphp_state *state, const pstring *name,
         double scale;
         if (!require_count(state, "round", count, 1U, 2U) ||
             !numeric_argument(state, "round", arguments[0], &a, &ai)) return -1;
-        if (count == 2U && arguments[1].type == PT_INT) precision = arguments[1].as.i;
+        if (count == 2U && arguments[1].type == PT_INT) {
+            if (arguments[1].as.i < INT_MIN ||
+                arguments[1].as.i > INT_MAX) {
+                pphp_runtime_error(state, 0U,
+                                   "round() precision is out of range");
+                return -1;
+            }
+            precision = (int)arguments[1].as.i;
+        }
         scale = pow(10.0, (double)precision);
         *result = pv_float((pphp_float)(round((double)a * scale) / scale));
         return 1;

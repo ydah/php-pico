@@ -2,6 +2,7 @@
 set -eu
 
 binary=${1:?RP2040-compatible UBSan binary required}
+int64_binary=${2:?64-bit integer and float binary required}
 temporary=$(mktemp -d "${TMPDIR:-/tmp}/php-pico-rp-integer.XXXXXX")
 trap 'rm -rf "$temporary"' EXIT HUP INT TERM
 
@@ -24,6 +25,16 @@ if "$binary" -r 'echo "2147483648" % 1;' \
     echo 'out-of-range numeric string conversion unexpectedly succeeded' >&2
     exit 1
 fi
+
+if "$binary" -r 'echo "-2147483649" % 1;' \
+    > "$temporary/negative-conversion.out" \
+    2> "$temporary/negative-conversion.err"; then
+    echo 'negative out-of-range numeric string conversion unexpectedly succeeded' >&2
+    exit 1
+fi
+test ! -s "$temporary/negative-conversion.out"
+grep -q 'integer conversion is out of range' \
+    "$temporary/negative-conversion.err"
 test ! -s "$temporary/conversion.out"
 grep -q 'integer conversion is out of range' "$temporary/conversion.err"
 if grep -q 'runtime error:' "$temporary/conversion.err"; then
@@ -51,3 +62,66 @@ int(16777217)
 double:double:int(-2147483648)'
 test "$(cat "$temporary/exact.out")" = "$expected_exact"
 test ! -s "$temporary/exact.err"
+
+assert_boundaries() {
+    target=$1
+    label=$2
+    maximum=$3
+    positive_out=$4
+    minimum=$5
+    negative_out=$6
+    expected='integer:double:integer:double|integer:double:integer:double|integer:double:integer:double'
+    source="echo gettype($maximum), ':', gettype($positive_out), ':', gettype($minimum), ':', gettype($negative_out), '|'; echo gettype(\"$maximum\" + 0), ':', gettype(\"$positive_out\" + 0), ':', gettype(\"$minimum\" + 0), ':', gettype(\"$negative_out\" + 0), '|'; echo gettype(json_decode(\"$maximum\")), ':', gettype(json_decode(\"$positive_out\")), ':', gettype(json_decode(\"$minimum\")), ':', gettype(json_decode(\"$negative_out\"));"
+
+    "$target" -r "$source" > "$temporary/$label-source.out" \
+        2> "$temporary/$label-source.err"
+    test "$(cat "$temporary/$label-source.out")" = "$expected"
+    test ! -s "$temporary/$label-source.err"
+
+    printf '%s\n' "<?php $source" > "$temporary/$label.php"
+    "$target" "$temporary/$label.php" > "$temporary/$label-file.out" \
+        2> "$temporary/$label-file.err"
+    test "$(cat "$temporary/$label-file.out")" = "$expected"
+    test ! -s "$temporary/$label-file.err"
+
+    "$target" -c "$temporary/$label.php" -o "$temporary/$label.pbc"
+    "$target" "$temporary/$label.pbc" > "$temporary/$label-pbc.out" \
+        2> "$temporary/$label-pbc.err"
+    test "$(cat "$temporary/$label-pbc.out")" = "$expected"
+    test ! -s "$temporary/$label-pbc.err"
+}
+
+assert_boundaries "$binary" int32 2147483647 2147483648 \
+    -2147483648 -2147483649
+assert_boundaries "$int64_binary" int64 9223372036854775807 \
+    9223372036854775808 -9223372036854775808 -9223372036854775809
+
+assert_integer_conversion_error() {
+    target=$1
+    label=$2
+    source=$3
+    if "$target" -r "$source" > "$temporary/$label.out" \
+        2> "$temporary/$label.err"; then
+        echo "$label unexpectedly succeeded" >&2
+        exit 1
+    fi
+    test ! -s "$temporary/$label.out"
+    grep -q 'integer conversion is out of range' "$temporary/$label.err"
+}
+
+assert_integer_conversion_error "$binary" int32-positive-cast \
+    'echo (int) "2147483648";'
+assert_integer_conversion_error "$binary" int32-negative-cast \
+    'echo (int) "-2147483649";'
+assert_integer_conversion_error "$int64_binary" int64-positive-cast \
+    'echo (int) "9223372036854775808";'
+assert_integer_conversion_error "$int64_binary" int64-negative-cast \
+    'echo (int) "-9223372036854775809";'
+
+if "$int64_binary" -r 'echo round(1.0, 9223372036854775807);' \
+    > "$temporary/int64-round.out" 2> "$temporary/int64-round.err"; then
+    echo 'out-of-range 64-bit round precision unexpectedly succeeded' >&2
+    exit 1
+fi
+test ! -s "$temporary/int64-round.out"
+grep -q 'round() precision is out of range' "$temporary/int64-round.err"
