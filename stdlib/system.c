@@ -270,7 +270,8 @@ static int call_clock(pphp_state *state, const pstring *name,
         if (count == 1U) as_float = pv_is_truthy(arguments[0]);
         if (as_float) {
 #if PPHP_ENABLE_FLOAT
-            *result = pv_float((pphp_float)((double)microseconds / 1000000.0));
+            *result = pv_float((pphp_float)microseconds /
+                               (pphp_float)1000000);
 #else
             pphp_runtime_error(state, 0U, "float support disabled");
             return -1;

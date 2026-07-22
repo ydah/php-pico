@@ -12,6 +12,7 @@ project(php_pico VERSION 1.0.0 LANGUAGES C CXX ASM)
 option(PPHP_ENABLE_COMPILER "Build the PHP source compiler" ON)
 option(PPHP_ENABLE_FLOAT "Build floating-point language support" ON)
 option(PPHP_WARNINGS "Emit PHP-compatible runtime warnings" ON)
+option(PPHP_RP2040_LTO "Use release LTO for php-pico sources" ON)
 if(NOT "${PPHP_ENABLE_FLOAT}" MATCHES "^(0|1|ON|OFF|TRUE|FALSE)$")
   message(FATAL_ERROR "PPHP_ENABLE_FLOAT must be ON/OFF or 1/0")
 endif()
@@ -86,6 +87,15 @@ set_source_files_properties(
   PROPERTIES COMPILE_OPTIONS "-Wall;-Wextra;-Wno-conversion;-Wno-shadow;-Wno-unused-function"
 )
 
+# Keep Pico SDK sources outside LTO: GNU ld --wrap is used by the SDK for
+# printf and math shims, and whole-target LTO bypasses those wrapper symbols.
+# Optimizing the firmware sources still provides cross-file dead-code removal.
+if(PPHP_RP2040_LTO)
+  set_property(SOURCE ${PPHP_SOURCES} APPEND PROPERTY
+    COMPILE_OPTIONS "$<$<CONFIG:Release>:-Os;-flto>"
+  )
+endif()
+
 add_executable(php-pico ${PPHP_SOURCES})
 target_include_directories(php-pico PRIVATE
   ${PPHP_ROOT}/include
@@ -110,6 +120,12 @@ target_compile_options(php-pico PRIVATE
   -Os -fmerge-all-constants -ffunction-sections -fdata-sections
 )
 target_link_options(php-pico PRIVATE -Wl,--gc-sections)
+if(PPHP_RP2040_LTO)
+  target_link_options(php-pico PRIVATE
+    "$<$<CONFIG:Release>:-Os>"
+    "$<$<CONFIG:Release>:-flto>"
+  )
+endif()
 target_link_libraries(php-pico
   pico_stdlib
   pico_unique_id

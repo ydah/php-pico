@@ -210,7 +210,7 @@ static int encode_value(json_buffer *buffer, pvalue value, int pretty,
             return length >= 0 && append(buffer, number, (size_t)length);
 #if PPHP_ENABLE_FLOAT
         case PT_FLOAT:
-            if (!isfinite((double)value.as.f)) return append(buffer, "null", 4U);
+            if (!isfinite(value.as.f)) return append(buffer, "null", 4U);
             length = pphp_format_float(number, sizeof(number), value.as.f,
                                        'g', PPHP_USE_DOUBLE ? 17 : 9);
             return length >= 0 && append(buffer, number, (size_t)length);

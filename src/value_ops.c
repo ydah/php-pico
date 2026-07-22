@@ -2,15 +2,13 @@
 
 #if PPHP_ENABLE_FLOAT
 #include "float_format.h"
+#include "float_math.h"
 #endif
 #include "pstring.h"
 #include "parray.h"
 #include "pclass.h"
 #include "pphp/pphp.h"
 
-#if PPHP_ENABLE_FLOAT
-#include <math.h>
-#endif
 #include <limits.h>
 #include <stdio.h>
 #include <string.h>
@@ -322,8 +320,8 @@ static int integer_binary_float(pv_operation operation, pphp_int left,
             if (right >= 0 && pphp_integer_power(left, right, &integer)) {
                 *result = pv_int(integer);
             } else {
-                *result = pv_float((pphp_float)pow((double)left,
-                                                   (double)right));
+                *result = pv_float(PPHP_FLOAT_MATH(pow)(
+                    (pphp_float)left, (pphp_float)right));
             }
             return 1;
         case PV_BAND: *result = pv_int(left & right); return 1;
@@ -479,7 +477,8 @@ static int floating_string_number(const char *text, size_t length,
     if (require_complete && i != length) return 0;
     if (exponent != 0) {
 #if PPHP_ENABLE_FLOAT
-        value *= (pphp_float)pow(10.0, (double)(exponent * exponent_sign));
+        value *= PPHP_FLOAT_MATH(pow)(
+            (pphp_float)10, (pphp_float)(exponent * exponent_sign));
 #else
         return 0;
 #endif
@@ -748,7 +747,7 @@ int pv_binary_operation(pv_operation operation, pvalue left, pvalue right,
 #if PPHP_ENABLE_FLOAT
             *result = numeric_result(
                 a / b, left_numeric.is_integer && right_numeric.is_integer &&
-                           fmod((double)a, (double)b) == 0.0);
+                           PPHP_FLOAT_MATH(fmod)(a, b) == (pphp_float)0);
 #else
             if (pphp_integer_division_overflows(a, b)) goto integer_overflow;
             if (a % b != 0) {
@@ -794,7 +793,7 @@ int pv_binary_operation(pv_operation operation, pvalue left, pvalue right,
 #endif
         case PV_POW:
 #if PPHP_ENABLE_FLOAT
-            *result = numeric_result((pphp_float)pow((double)a, (double)b), 0);
+            *result = numeric_result(PPHP_FLOAT_MATH(pow)(a, b), 0);
 #else
             if (b < 0) {
                 *error = "negative exponent requires float support";

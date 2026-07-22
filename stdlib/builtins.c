@@ -2,6 +2,7 @@
 
 #if PPHP_ENABLE_FLOAT
 #include "float_format.h"
+#include "float_math.h"
 #endif
 #include "value_ops.h"
 #include "parray.h"
@@ -13,9 +14,6 @@
 #include "system.h"
 #include "files.h"
 
-#if PPHP_ENABLE_FLOAT
-#include <math.h>
-#endif
 #include <limits.h>
 #include <stdio.h>
 #include <string.h>
@@ -552,11 +550,11 @@ static int call_math_builtin(pphp_state *state, const pstring *name,
         if (name_is(name, "fdiv")) {
             *result = pv_float(a / b);
         } else if (name_is(name, "fmod")) {
-            *result = pv_float((pphp_float)fmod((double)a, (double)b));
+            *result = pv_float(PPHP_FLOAT_MATH(fmod)(a, b));
         } else if (name_is(name, "pow")) {
-            *result = pv_float((pphp_float)pow((double)a, (double)b));
+            *result = pv_float(PPHP_FLOAT_MATH(pow)(a, b));
         } else {
-            *result = pv_float((pphp_float)atan2((double)a, (double)b));
+            *result = pv_float(PPHP_FLOAT_MATH(atan2)(a, b));
         }
         return 1;
     }
@@ -566,21 +564,21 @@ static int call_math_builtin(pphp_state *state, const pstring *name,
         name_is(name, "cos") || name_is(name, "tan") ||
         name_is(name, "asin") || name_is(name, "acos") ||
         name_is(name, "atan")) {
-        double value;
+        pphp_float value;
         if (!require_count(state, "unary math", count, 1U, 1U) ||
             !numeric_argument(state, "unary math", arguments[0], &a, &ai)) return -1;
-        if (name_is(name, "floor")) value = floor((double)a);
-        else if (name_is(name, "ceil")) value = ceil((double)a);
-        else if (name_is(name, "sqrt")) value = sqrt((double)a);
-        else if (name_is(name, "exp")) value = exp((double)a);
-        else if (name_is(name, "log10")) value = log10((double)a);
-        else if (name_is(name, "sin")) value = sin((double)a);
-        else if (name_is(name, "cos")) value = cos((double)a);
-        else if (name_is(name, "tan")) value = tan((double)a);
-        else if (name_is(name, "asin")) value = asin((double)a);
-        else if (name_is(name, "acos")) value = acos((double)a);
-        else value = atan((double)a);
-        *result = pv_float((pphp_float)value);
+        if (name_is(name, "floor")) value = PPHP_FLOAT_MATH(floor)(a);
+        else if (name_is(name, "ceil")) value = PPHP_FLOAT_MATH(ceil)(a);
+        else if (name_is(name, "sqrt")) value = PPHP_FLOAT_MATH(sqrt)(a);
+        else if (name_is(name, "exp")) value = PPHP_FLOAT_MATH(exp)(a);
+        else if (name_is(name, "log10")) value = PPHP_FLOAT_MATH(log10)(a);
+        else if (name_is(name, "sin")) value = PPHP_FLOAT_MATH(sin)(a);
+        else if (name_is(name, "cos")) value = PPHP_FLOAT_MATH(cos)(a);
+        else if (name_is(name, "tan")) value = PPHP_FLOAT_MATH(tan)(a);
+        else if (name_is(name, "asin")) value = PPHP_FLOAT_MATH(asin)(a);
+        else if (name_is(name, "acos")) value = PPHP_FLOAT_MATH(acos)(a);
+        else value = PPHP_FLOAT_MATH(atan)(a);
+        *result = pv_float(value);
         return 1;
     }
     if (name_is(name, "log")) {
@@ -588,15 +586,16 @@ static int call_math_builtin(pphp_state *state, const pstring *name,
             !numeric_argument(state, "log", arguments[0], &a, &ai)) return -1;
         if (count == 2U) {
             if (!numeric_argument(state, "log", arguments[1], &b, &bi)) return -1;
-            *result = pv_float((pphp_float)(log((double)a) / log((double)b)));
+            *result = pv_float(PPHP_FLOAT_MATH(log)(a) /
+                               PPHP_FLOAT_MATH(log)(b));
         } else {
-            *result = pv_float((pphp_float)log((double)a));
+            *result = pv_float(PPHP_FLOAT_MATH(log)(a));
         }
         return 1;
     }
     if (name_is(name, "round")) {
         int precision = 0;
-        double scale;
+        pphp_float scale;
         if (!require_count(state, "round", count, 1U, 2U) ||
             !numeric_argument(state, "round", arguments[0], &a, &ai)) return -1;
         if (count == 2U && arguments[1].type == PT_INT) {
@@ -608,8 +607,9 @@ static int call_math_builtin(pphp_state *state, const pstring *name,
             }
             precision = (int)arguments[1].as.i;
         }
-        scale = pow(10.0, (double)precision);
-        *result = pv_float((pphp_float)(round((double)a * scale) / scale));
+        scale = PPHP_FLOAT_MATH(pow)((pphp_float)10,
+                                      (pphp_float)precision);
+        *result = pv_float(PPHP_FLOAT_MATH(round)(a * scale) / scale);
         return 1;
     }
 #endif
