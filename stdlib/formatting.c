@@ -138,8 +138,15 @@ static int append_formatted_float(format_buffer *buffer, pphp_float value,
     size_t length;
     size_t padding;
     size_t start = 0U;
+    size_t value_start;
+    int special;
     if (formatted < 0) return 0;
     length = normalized_float_length(number, (size_t)formatted);
+    value_start = length != 0U && number[0] == '-' ? 1U : 0U;
+    special = length - value_start == 3U &&
+              (memcmp(number + value_start, "inf", 3U) == 0 ||
+               memcmp(number + value_start, "nan", 3U) == 0);
+    if (special) zero_pad = 0;
     padding = width > length ? (size_t)width - length : 0U;
     if (!left_align && zero_pad && length != 0U && number[0] == '-') {
         if (!buffer_character(buffer, '-')) return 0;

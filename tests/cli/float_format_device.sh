@@ -13,3 +13,12 @@ float(-0)
 [1.25,null,-0]'
 
 test "$actual" = "$expected"
+
+paths=$(
+    "$binary" -r \
+        "\$tiny = 1.0 / 100000.0; echo sprintf('%.9g', \$tiny), ':', \$tiny, ':'; var_dump(\$tiny); echo str_replace(\"\\n\", '|', print_r([\$tiny], true)), ':', json_encode(\$tiny), ':', sprintf('[%08f][%08f][%08f]', INF, -INF, NAN);"
+)
+expected_paths='9.99999975e-6:9.9999997473788e-06:float(9.9999997473788e-06)
+Array|(|    [0] => 9.9999997473788e-06|)|:9.99999975e-06:[     inf][    -inf][     nan]'
+
+test "$paths" = "$expected_paths"
