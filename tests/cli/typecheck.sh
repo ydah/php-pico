@@ -183,22 +183,31 @@ class ContextChild extends ContextBase {
 }
 echo get_class((new ContextChild())->closures());'
 assert_output "$typecheck_on" "$context_source" 'ContextChild'
+assert_output "$typecheck_off" "$context_source" 'ContextChild'
 assert_failure "$typecheck_on" 'function bad(): self {}' \
     'self type requires class scope' top-self
+assert_failure "$typecheck_off" 'function bad(): self {}' \
+    'self type requires class scope' top-self-off
 assert_failure "$typecheck_on" '$bad = function (): parent {};' \
     'parent type requires class scope' closure-parent
 assert_failure "$typecheck_on" '$bad = fn (): static => null;' \
     'static type is only valid as a method return type' arrow-static
 assert_failure "$typecheck_on" 'class Bad { public function value(): parent {} }' \
     'parent type requires a parent class' missing-parent
+assert_failure "$typecheck_off" 'class Bad { public function value(): parent {} }' \
+    'parent type requires a parent class' missing-parent-off
 assert_failure "$typecheck_off" 'function bad(): void { return 1; }' \
     'a void function must not return a value' void-return-off
 assert_failure "$typecheck_on" 'class Bad { public function __Construct() { return 1; } }' \
     'a void function must not return a value' constructor-return
+assert_failure "$typecheck_off" 'class Bad { public function __Construct() { return 1; } }' \
+    'a void function must not return a value' constructor-return-off
 assert_failure "$typecheck_on" 'class Bad { public function __DESTRUCT() { return 1; } }' \
     'a void function must not return a value' destructor-return
 assert_failure "$typecheck_on" 'class Bad { public function __construct(): int {} }' \
     'constructor may only declare void' constructor-type
+assert_failure "$typecheck_off" 'class Bad { public function __construct(): int {} }' \
+    'constructor may only declare void' constructor-type-off
 
 variance_source='interface VariantContract {
     public function convert(VariantBase|int $value): VariantBase;
