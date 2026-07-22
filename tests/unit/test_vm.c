@@ -1673,6 +1673,52 @@ TEST(failed_forward_variance_rolls_back_definitions) {
     ASSERT_EQ(0, remove(pbc_path));
     ASSERT_EQ(0, remove(include_path));
 }
+
+TEST(first_failed_execution_preserves_exception_runtime) {
+    const char *bad_source =
+        "class FirstFailureBase {"
+        " public function f(FirstFailureA $v): FirstFailureB {"
+        "  return new FirstFailureB();"
+        " }"
+        "}"
+        "class FirstFailureBad extends FirstFailureBase {"
+        " public function f(FirstFailureC $v): FirstFailureD {"
+        "  return new FirstFailureD();"
+        " }"
+        "}"
+        "class FirstFailureA {} class FirstFailureB {}"
+        "class FirstFailureC {} class FirstFailureD {}";
+    const char *success =
+        "class FirstFailureRecovered {} echo 'recovered';";
+    pphp_state *state = pphp_open(vm_pool, sizeof(vm_pool));
+    output_buffer output;
+    size_t failed_used = 0U;
+    size_t i;
+
+    ASSERT_TRUE(state != NULL);
+    memset(&output, 0, sizeof(output));
+    pphp_set_output(state, capture_output, &output);
+    for (i = 0U; i < 8U; i++) {
+        ASSERT_EQ(PPHP_E_RUNTIME,
+                  pphp_exec_source_mode(state, bad_source,
+                                        strlen(bad_source),
+                                        "first-failure", 1));
+        ASSERT_TRUE(pphp_find_class(state, "Throwable", 9U) != NULL);
+        ASSERT_TRUE(state->oom_exception != NULL);
+        ASSERT_TRUE(pphp_find_class(state, "FirstFailureBad", 15U) == NULL);
+        if (i == 0U) {
+            failed_used = pphp_pool_get_stats().used;
+        } else {
+            ASSERT_EQ(failed_used, pphp_pool_get_stats().used);
+        }
+    }
+    ASSERT_EQ(PPHP_OK,
+              pphp_exec_source_mode(state, success, strlen(success),
+                                    "first-failure-recovery", 1));
+    ASSERT_STR("recovered", output.bytes);
+    pphp_close(state);
+    ASSERT_EQ(0, pphp_pool_get_stats().used);
+}
 #endif
 
 TEST(arrays_use_copy_on_write_and_normalized_keys) {
@@ -2629,6 +2675,7 @@ int main(void) {
         {"PBC declared type corruption", pbc_loader_rejects_corrupt_declared_type_metadata},
         {"PBC type context OOM", pbc_type_context_reports_allocation_failure},
         {"failed definition rollback", failed_forward_variance_rolls_back_definitions},
+        {"first failure exception roots", first_failed_execution_preserves_exception_runtime},
 #endif
         {"array COW runtime", arrays_use_copy_on_write_and_normalized_keys},
         {"language conformance", language_conformance_covers_casts_lvalues_nullsafe_and_interpolation},

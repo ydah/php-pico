@@ -296,6 +296,13 @@ typedef struct definition_checkpoint {
     const pmodule *module;
 } definition_checkpoint;
 
+static int ensure_exception_runtime(pphp_state *state) {
+    if (pphp_find_class(state, "Throwable", 9U) != NULL) {
+        return state->oom_exception != NULL;
+    }
+    return pphp_register_exception_classes(state);
+}
+
 static definition_checkpoint checkpoint_definitions(const pphp_state *state) {
     definition_checkpoint checkpoint;
     checkpoint.class_count = state->class_count;
@@ -557,6 +564,12 @@ int pphp_exec_include(pphp_state *state, const char *path, uint8_t mode,
         pv_release(path_value);
         (void)snprintf(state->error, sizeof(state->error), "%s", owner->error);
         state->error_line = owner->error_line;
+        return PPHP_E_RUNTIME;
+    }
+    if (!ensure_exception_runtime(owner)) {
+        pmodule_destroy(&module);
+        pv_release(path_value);
+        pphp_runtime_error(state, 0U, "cannot initialize exception classes");
         return PPHP_E_RUNTIME;
     }
     checkpoint = checkpoint_definitions(owner);
@@ -1039,6 +1052,11 @@ int pphp_exec_source_mode(pphp_state *state, const char *source, size_t length,
         return PPHP_E_RUNTIME;
     }
     if (!repl) pphp_clear_user_classes(state);
+    if (!ensure_exception_runtime(state)) {
+        pmodule_destroy(&module);
+        pphp_runtime_error(state, 0U, "cannot initialize exception classes");
+        return PPHP_E_RUNTIME;
+    }
     checkpoint = checkpoint_definitions(state);
     if (retained && !retain_module(state, &module, &execution_module)) {
         pmodule_destroy(&module);
@@ -1122,6 +1140,11 @@ static int exec_pbc(pphp_state *state, const void *pbc, size_t length,
         return PPHP_E_RUNTIME;
     }
     pphp_clear_user_classes(state);
+    if (!ensure_exception_runtime(state)) {
+        pmodule_destroy(&module);
+        pphp_runtime_error(state, 0U, "cannot initialize exception classes");
+        return PPHP_E_RUNTIME;
+    }
     checkpoint = checkpoint_definitions(state);
     if (retained && !retain_module(state, &module, &execution_module)) {
         pmodule_destroy(&module);
