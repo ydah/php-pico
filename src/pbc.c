@@ -233,6 +233,156 @@ static int pbc_advance(size_t *offset, size_t need, size_t length) {
     return 1;
 }
 
+static int pbc_validate_code(const pproto *proto) {
+    size_t pc = 0U;
+    while (pc < proto->code_length) {
+        uint8_t opcode = proto->code[pc++];
+        size_t operands = 0U;
+        switch ((pphp_opcode)opcode) {
+            case OP_LOAD_I8:
+            case OP_LOAD_LOCAL:
+            case OP_LOAD_LOCAL_QUIET:
+            case OP_STORE_LOCAL:
+            case OP_UNSET_LOCAL:
+            case OP_BIND_GLOBAL:
+            case OP_ECHO:
+            case OP_CALL_VALUE:
+            case OP_INCLUDE:
+            case OP_CAST:
+            case OP_NEW_OBJ_DYNAMIC:
+            case OP_MCALL_DYNAMIC:
+                operands = 1U;
+                break;
+            case OP_LOAD_CONST:
+            case OP_LOAD_NAMED_CONST:
+            case OP_DEF_CONST:
+            case OP_DEF_FUNC:
+            case OP_CALL_ARRAY:
+            case OP_MCALL_ARRAY:
+            case OP_NEW_OBJ_ARRAY:
+            case OP_DEF_CCONST:
+            case OP_DEF_INTERFACE:
+            case OP_JMP:
+            case OP_JMP_IF:
+            case OP_JMP_UNLESS:
+            case OP_JMP_IF_KEEP:
+            case OP_JMP_UNLESS_KEEP:
+            case OP_JMP_NOTNULL_KEEP:
+            case OP_JMP_IFNULL_KEEP:
+            case OP_LINE:
+            case OP_NEW_ARRAY:
+            case OP_PROP_GET:
+            case OP_PROP_GET_QUIET:
+            case OP_PROP_SET:
+            case OP_INSTANCEOF:
+                operands = 2U;
+                break;
+            case OP_CALL:
+            case OP_NEW_OBJ:
+            case OP_MCALL:
+            case OP_FE_NEXT:
+            case OP_STATIC_INIT:
+                operands = 3U;
+                break;
+            case OP_SPROP_GET:
+            case OP_SPROP_SET:
+            case OP_CLSCONST:
+            case OP_SCALL_ARRAY:
+            case OP_LOAD_I32:
+                operands = 4U;
+                break;
+            case OP_SCALL:
+            case OP_DEF_CLASS:
+            case OP_DEF_METHOD:
+                operands = 5U;
+                break;
+            case OP_DEF_PROP:
+                operands = PPHP_TYPECHECK ? 6U : 3U;
+                break;
+            case OP_CLOSURE:
+                if (!pbc_range_available(pc, 3U, proto->code_length)) return 0;
+                operands = 3U + (size_t)proto->code[pc + 2U] * 2U;
+                break;
+            case OP_NOP:
+            case OP_HALT:
+            case OP_POP:
+            case OP_DUP:
+            case OP_SWAP:
+            case OP_LOAD_NULL:
+            case OP_LOAD_TRUE:
+            case OP_LOAD_FALSE:
+            case OP_LOAD_ARGC:
+            case OP_ADD:
+            case OP_SUB:
+            case OP_MUL:
+            case OP_DIV:
+            case OP_MOD:
+            case OP_POW:
+            case OP_NEG:
+            case OP_CONCAT:
+            case OP_BAND:
+            case OP_BOR:
+            case OP_BXOR:
+            case OP_BNOT:
+            case OP_SHL:
+            case OP_SHR:
+            case OP_EQ:
+            case OP_NE:
+            case OP_IDENT:
+            case OP_NIDENT:
+            case OP_LT:
+            case OP_LE:
+            case OP_GT:
+            case OP_GE:
+            case OP_CMP:
+            case OP_NOT:
+            case OP_INSTANCEOF_DYNAMIC:
+            case OP_RET:
+            case OP_RET_NULL:
+            case OP_CALL_VALUE_ARRAY:
+#if PPHP_TYPECHECK
+            case OP_TYPECHECK_ARGS:
+#endif
+            case OP_ARR_PUSH:
+            case OP_ARR_SET:
+            case OP_IDX_GET:
+            case OP_IDX_SET:
+            case OP_IDX_APPEND:
+            case OP_FE_INIT:
+            case OP_FE_FREE:
+            case OP_ARR_EXTEND:
+            case OP_ARR_SEPARATE:
+            case OP_IDX_UNSET:
+            case OP_IDX_GET_QUIET:
+            case OP_NEW_OBJ_DYNAMIC_ARRAY:
+            case OP_THROW:
+            case OP_CLONE:
+            case OP_DEF_END:
+            case OP_PROP_GET_DYNAMIC:
+            case OP_PROP_SET_DYNAMIC:
+            case OP_PROP_GET_DYNAMIC_QUIET:
+            case OP_MCALL_DYNAMIC_ARRAY:
+                break;
+            default:
+                return 0;
+        }
+        if (!pbc_range_available(pc, operands, proto->code_length)) return 0;
+#if PPHP_TYPECHECK
+        if (opcode == OP_DEF_PROP) {
+            uint16_t name_index = get_u16(proto->code, pc);
+            uint16_t type_index = get_u16(proto->code, pc + 3U);
+            if (name_index >= proto->constant_count ||
+                proto->constants[name_index].type != PT_STRING ||
+                (type_index != UINT16_MAX &&
+                 (type_index >= proto->constant_count ||
+                  proto->constants[type_index].type != PT_STRING))) return 0;
+        }
+#endif
+        pc += operands;
+    }
+    return pc == proto->code_length;
+}
+
 static int strings_add(string_list *list, pstring *string, uint16_t *index) {
     size_t i;
     for (i = 0U; i < list->count; i++) {
@@ -702,6 +852,11 @@ int pphp_pbc_load(const void *data, size_t length, pmodule *module) {
         proto->is_method = (uint8_t)((bytes[offset + 2U] & 2U) != 0U);
         proto->conditional = (uint8_t)((bytes[offset + 2U] & 8U) != 0U);
         local_count = bytes[offset + 3U];
+        if ((bytes[offset + 2U] & (uint8_t)~11U) != 0U ||
+            proto->n_params > 31U || proto->n_required > proto->n_params ||
+            (proto->variadic && proto->n_params == 0U) ||
+            (size_t)proto->n_params + (proto->is_method ? 1U : 0U) >
+                local_count) goto failed_module;
         proto->max_stack = get_u16(bytes, offset + 6U);
         proto->code = (uint8_t *)(uintptr_t)(bytes + offset + 16U);
         proto->owns_code = 0U;
@@ -840,12 +995,25 @@ int pphp_pbc_load(const void *data, size_t length, pmodule *module) {
                 uint8_t kind = bytes[offset];
                 uint16_t sid = get_u16(bytes, offset + 1U);
                 pstring *type_name = NULL;
+                size_t previous;
                 if (kind < PTYPE_INT || kind > PTYPE_NAMED ||
                     (kind == PTYPE_NAMED && sid >= n_strings) ||
-                    (kind != PTYPE_NAMED && sid != UINT16_MAX)) {
+                    (kind != PTYPE_NAMED && sid != UINT16_MAX) ||
+                    (j < proto->n_params &&
+                     (kind == PTYPE_VOID || kind == PTYPE_STATIC)) ||
+                    (member_count > 1U &&
+                     (kind == PTYPE_VOID || kind == PTYPE_MIXED)) ||
+                    (!PPHP_ENABLE_FLOAT && kind == PTYPE_FLOAT)) {
                     goto failed_module;
                 }
                 if (kind == PTYPE_NAMED) type_name = &strings[sid].base;
+                for (previous = 0U; previous < spec->count; previous++) {
+                    if (spec->members[previous].kind == kind &&
+                        (kind != PTYPE_NAMED ||
+                         ps_equal(spec->members[previous].name, type_name))) {
+                        goto failed_module;
+                    }
+                }
                 if (!ptype_spec_add_string(spec, kind, type_name)) {
                     result = PPHP_E_NOMEM;
                     goto failed_module;
@@ -854,6 +1022,7 @@ int pphp_pbc_load(const void *data, size_t length, pmodule *module) {
             }
         }
 #endif
+        if (!pbc_validate_code(proto)) goto failed_module;
         if (!size_align4(&offset) || offset != limit) goto failed_module;
     }
     for (i = 0U; i < n_strings; i++) strings[i].owner = module;

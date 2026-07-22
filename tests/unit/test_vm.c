@@ -6,6 +6,7 @@
 #include "codegen.h"
 #include "parser.h"
 #include "pbc.h"
+#include "opcode.h"
 #include "vm.h"
 
 #include <stdint.h>
@@ -72,6 +73,40 @@ static void test_put_u32(uint8_t *bytes, size_t offset, uint32_t value) {
     bytes[offset + 2U] = (uint8_t)((value >> 16U) & 0xffU);
     bytes[offset + 3U] = (uint8_t)(value >> 24U);
 }
+
+#if PPHP_TYPECHECK
+static uint16_t test_get_u16(const uint8_t *bytes, size_t offset) {
+    return (uint16_t)((uint16_t)bytes[offset] |
+                      (uint16_t)((uint16_t)bytes[offset + 1U] << 8U));
+}
+
+static uint32_t test_get_u32(const uint8_t *bytes, size_t offset) {
+    uint32_t value = bytes[offset];
+    value |= (uint32_t)bytes[offset + 1U] << 8U;
+    value |= (uint32_t)bytes[offset + 2U] << 16U;
+    value |= (uint32_t)bytes[offset + 3U] << 24U;
+    return value;
+}
+
+static size_t test_align4(size_t value) {
+    return (value + 3U) & ~(size_t)3U;
+}
+
+static size_t test_proto_type_offset(const uint8_t *bytes,
+                                     size_t proto_offset) {
+    uint16_t code_length = test_get_u16(bytes, proto_offset + 8U);
+    uint16_t constant_count = test_get_u16(bytes, proto_offset + 10U);
+    uint16_t catch_count = test_get_u16(bytes, proto_offset + 12U);
+    uint8_t local_count = bytes[proto_offset + 3U];
+    size_t offset = proto_offset + 16U + test_align4(code_length);
+    size_t i;
+    for (i = 0U; i < constant_count; i++) {
+        uint8_t tag = bytes[offset];
+        offset += tag == 3U || tag == 4U ? 16U : 8U;
+    }
+    return offset + (size_t)local_count * 2U + (size_t)catch_count * 10U;
+}
+#endif
 
 static void minimal_pbc(uint8_t *bytes, size_t length) {
     uint16_t flags = (uint16_t)((PPHP_INT64 ? 1U : 0U) |
@@ -1015,6 +1050,88 @@ TEST(pbc_loader_rejects_truncated_and_wrapping_sections) {
     test_put_u16(bytes, 40U, 1U);
     ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(bytes, 53U));
 }
+
+#if PPHP_TYPECHECK
+TEST(pbc_loader_rejects_corrupt_declared_type_metadata) {
+    const char *path = "build/host/test_type_metadata.pbc";
+    const char *source =
+        "class TypeBlobClass { public int $value = 1; }"
+        "function typed(TypeBlobClass|int $value): string { return 'ok'; }"
+        "echo typed(new TypeBlobClass());";
+    uint8_t *bytes;
+    uint8_t *mutated;
+    size_t length;
+    uint16_t n_strings;
+    uint16_t n_protos;
+    size_t proto_table;
+    size_t main_proto;
+    size_t typed_proto;
+    size_t typed_type;
+    size_t property_opcode = SIZE_MAX;
+    size_t i;
+    pphp_pool_init(vm_pool, sizeof(vm_pool));
+    ASSERT_TRUE(write_source_pbc(source, path));
+    bytes = read_pbc_from_libc(path, &length);
+    ASSERT_TRUE(bytes != NULL);
+    mutated = malloc(length);
+    ASSERT_TRUE(mutated != NULL);
+    n_strings = test_get_u16(bytes, 14U);
+    n_protos = test_get_u16(bytes, 12U);
+    ASSERT_TRUE(n_protos >= 2U);
+    proto_table = 16U + (size_t)n_strings * 4U;
+    main_proto = test_get_u32(bytes, proto_table);
+    typed_proto = test_get_u32(bytes, proto_table + 4U);
+    ASSERT_EQ(1, bytes[typed_proto]);
+    typed_type = test_proto_type_offset(bytes, typed_proto);
+    ASSERT_EQ(2, bytes[typed_type]);
+    ASSERT_EQ(PTYPE_NAMED, bytes[typed_type + 1U]);
+
+    memcpy(mutated, bytes, length);
+    mutated[typed_type] = 17U;
+    ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(mutated, length));
+
+    memcpy(mutated, bytes, length);
+    mutated[typed_type + 1U] = 0U;
+    ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(mutated, length));
+
+    memcpy(mutated, bytes, length);
+    test_put_u16(mutated, typed_type + 2U, n_strings);
+    ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(mutated, length));
+
+    memcpy(mutated, bytes, length);
+    mutated[typed_proto] = 2U;
+    ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(mutated, length));
+
+    memcpy(mutated, bytes, length);
+    test_put_u32(mutated, 8U, (uint32_t)(length - 1U));
+    ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(mutated, length - 1U));
+
+    memcpy(mutated, bytes, length);
+    test_put_u32(mutated, proto_table + 4U, (uint32_t)(typed_proto + 1U));
+    ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(mutated, length));
+
+    memcpy(mutated, bytes, length);
+    test_put_u32(mutated, proto_table + 4U, (uint32_t)main_proto);
+    ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(mutated, length));
+
+    for (i = main_proto + 16U;
+         i < main_proto + 16U + test_get_u16(bytes, main_proto + 8U); i++) {
+        if (bytes[i] == OP_DEF_PROP) {
+            property_opcode = i;
+            break;
+        }
+    }
+    ASSERT_TRUE(property_opcode != SIZE_MAX);
+    memcpy(mutated, bytes, length);
+    test_put_u16(mutated, property_opcode + 4U,
+                 test_get_u16(bytes, main_proto + 10U));
+    ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(mutated, length));
+
+    free(mutated);
+    free(bytes);
+    ASSERT_EQ(0, remove(path));
+}
+#endif
 
 TEST(arrays_use_copy_on_write_and_normalized_keys) {
     const char *source =
@@ -1966,6 +2083,9 @@ int main(void) {
         {"closure frame scope", closure_frames_retain_called_scope},
         {"class graph reachability", class_reachability_sweeps_dead_graphs_beside_live_graphs},
         {"PBC malformed bounds", pbc_loader_rejects_truncated_and_wrapping_sections},
+#if PPHP_TYPECHECK
+        {"PBC declared type corruption", pbc_loader_rejects_corrupt_declared_type_metadata},
+#endif
         {"array COW runtime", arrays_use_copy_on_write_and_normalized_keys},
         {"language conformance", language_conformance_covers_casts_lvalues_nullsafe_and_interpolation},
         {"member lvalues", member_lvalues_and_dynamic_names_preserve_cow_and_evaluation_order},
