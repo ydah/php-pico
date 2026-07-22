@@ -29,6 +29,8 @@ typedef enum pphp_opcode {
     OP_BIND_GLOBAL = 0x19,
     OP_STATIC_INIT = 0x1a,
     OP_LOAD_NAMED_CONST = 0x1b,
+    OP_LOAD_LOCAL_QUIET = 0x1c,
+    OP_UNSET_LOCAL = 0x1d,
     OP_ADD = 0x20,
     OP_SUB = 0x21,
     OP_MUL = 0x22,

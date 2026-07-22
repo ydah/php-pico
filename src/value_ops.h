@@ -26,13 +26,21 @@ typedef struct pphp_numeric {
     pphp_int integer;
     int is_integer;
     int integer_exact;
+    int string_status;
 } pphp_numeric;
+
+enum {
+    PPHP_NUMERIC_STRING_EXACT = 0,
+    PPHP_NUMERIC_STRING_TRAILING = 1,
+    PPHP_NUMERIC_STRING_INVALID = 2
+};
 
 int pv_to_number(pvalue value, pphp_float *number, int *is_integer);
 int pv_to_number_prefix(pvalue value, pphp_float *number, int *is_integer);
 int pv_to_numeric(pvalue value, int require_complete, pphp_numeric *numeric);
 int pv_binary_operation(pv_operation operation, pvalue left, pvalue right,
-                        pvalue *result, const char **error);
+                        pvalue *result, const char **error,
+                        unsigned *non_numeric_operands);
 int pv_compare(pvalue left, pvalue right, int strict, int *result,
                const char **error);
 pstring *pv_to_string(pvalue value);

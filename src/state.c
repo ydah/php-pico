@@ -598,6 +598,40 @@ void pphp_output(pphp_state *state, const char *bytes, size_t length) {
     }
 }
 
+#if PPHP_WARNINGS
+void pphp_warning(pphp_state *state, uint32_t line, const char *format, ...) {
+    static const char prefix[] = "Warning: ";
+    char output[320];
+    const size_t suffix_reserve = 32U;
+    size_t used = sizeof(prefix) - 1U;
+    size_t message_capacity = sizeof(output) - used - suffix_reserve;
+    va_list arguments;
+    int length;
+    if (state == NULL || format == NULL) return;
+    if (line == 0U && state->frame_count != 0U) {
+        line = state->frames[state->frame_count - 1U].line;
+    }
+    memcpy(output, prefix, used);
+    va_start(arguments, format);
+    length = vsnprintf(output + used, message_capacity, format, arguments);
+    va_end(arguments);
+    if (length > 0) {
+        size_t appended = (size_t)length;
+        if (appended >= message_capacity) appended = message_capacity - 1U;
+        used += appended;
+    }
+    length = snprintf(output + used, sizeof(output) - used,
+                      " on line %lu\n", (unsigned long)line);
+    if (length <= 0) return;
+    if ((size_t)length >= sizeof(output) - used) {
+        used = sizeof(output) - 1U;
+    } else {
+        used += (size_t)length;
+    }
+    pphp_output(state, output, used);
+}
+#endif
+
 void pphp_runtime_error(pphp_state *state, uint32_t line, const char *format, ...) {
     va_list arguments;
     if (state == NULL || state->error[0] != '\0') {

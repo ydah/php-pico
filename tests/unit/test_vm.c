@@ -319,7 +319,12 @@ TEST(language_conformance_covers_casts_lvalues_nullsafe_and_interpolation) {
         " \"{$copy['node'][$key]}\";";
     output_buffer output;
     ASSERT_EQ(PPHP_OK, execute(source, &output, NULL, 0U));
+#if PPHP_WARNINGS
+    ASSERT_STR("Warning: A non-numeric value encountered on line 1\n"
+               "1:13:1:3:5::3", output.bytes);
+#else
     ASSERT_STR("1:13:1:3:5::3", output.bytes);
+#endif
 }
 
 TEST(member_lvalues_and_dynamic_names_preserve_cow_and_evaluation_order) {

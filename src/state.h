@@ -94,6 +94,11 @@ struct pphp_state {
 };
 
 void pphp_output(pphp_state *state, const char *bytes, size_t length);
+#if PPHP_WARNINGS
+void pphp_warning(pphp_state *state, uint32_t line, const char *format, ...);
+#else
+#define pphp_warning(...) ((void)0)
+#endif
 void pphp_runtime_error(pphp_state *state, uint32_t line, const char *format, ...);
 int pphp_exec_source_mode(pphp_state *state, const char *source, size_t length,
                           const char *chunk_name, int repl);

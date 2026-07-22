@@ -21,7 +21,9 @@ static size_t operand_size(uint8_t opcode) {
     switch ((pphp_opcode)opcode) {
         case OP_LOAD_I8:
         case OP_LOAD_LOCAL:
+        case OP_LOAD_LOCAL_QUIET:
         case OP_STORE_LOCAL:
+        case OP_UNSET_LOCAL:
         case OP_BIND_GLOBAL:
         case OP_ECHO:
         case OP_CALL_VALUE:
@@ -123,7 +125,9 @@ static int disassemble_proto(FILE *stream, const pproto *proto, size_t index) {
                 fprintf(stream, " %d", (int)(int8_t)proto->code[pc]);
                 break;
             case OP_LOAD_LOCAL:
+            case OP_LOAD_LOCAL_QUIET:
             case OP_STORE_LOCAL:
+            case OP_UNSET_LOCAL:
             case OP_BIND_GLOBAL:
             case OP_ECHO:
             case OP_CALL_VALUE:

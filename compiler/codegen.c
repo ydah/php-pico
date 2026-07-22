@@ -443,6 +443,7 @@ static int temporary_slot(generator *gen, uint32_t line, uint8_t *slot) {
 }
 
 static void compile_expression(generator *gen, const pc_ast *node);
+static void compile_quiet_expression(generator *gen, const pc_ast *node);
 static void compile_statement(generator *gen, const pc_ast *node);
 static void compile_class_definition(generator *gen, const pc_ast *class_node);
 static void compile_parameter_defaults(generator *gen,
@@ -921,6 +922,7 @@ typedef struct index_lvalue {
     const pc_ast *root_member;
     int root_is_static;
     int root_is_dynamic;
+    int root_quiet;
     size_t depth;
 } index_lvalue;
 
@@ -941,12 +943,13 @@ static void clear_temporary_slot(generator *gen, uint8_t slot,
 }
 
 static int prepare_index_lvalue(generator *gen, const pc_ast *leaf,
-                                index_lvalue *lvalue) {
+                                index_lvalue *lvalue, int quiet_root) {
     const pc_ast *reverse[PPHP_PARSE_DEPTH_MAX];
     const pc_ast *cursor = leaf;
     size_t count = 0U;
     size_t i;
     memset(lvalue, 0, sizeof(*lvalue));
+    lvalue->root_quiet = quiet_root;
     while (cursor != NULL && cursor->kind == AST_INDEX) {
         if (count >= PPHP_PARSE_DEPTH_MAX) {
             fail(gen, leaf->line, "array assignment nesting exceeds limit");
@@ -1030,7 +1033,12 @@ static int prepare_index_lvalue(generator *gen, const pc_ast *leaf,
         }
         if (i + 1U < count) {
             if (i == 0U) {
-                emit_load_slot(gen, lvalue->root_slot, index->line);
+                if (lvalue->root_member == NULL && lvalue->root_quiet) {
+                    emit_byte(gen, OP_LOAD_LOCAL_QUIET, index->line);
+                    emit_byte(gen, lvalue->root_slot, index->line);
+                } else {
+                    emit_load_slot(gen, lvalue->root_slot, index->line);
+                }
             } else {
                 emit_load_slot(gen, lvalue->parent_slots[i - 1U],
                                index->line);
@@ -1049,10 +1057,14 @@ static int prepare_index_lvalue(generator *gen, const pc_ast *leaf,
 
 static void emit_index_parent(generator *gen, const index_lvalue *lvalue,
                               size_t index, uint32_t line) {
-    emit_load_slot(gen,
-                   index == 0U ? lvalue->root_slot
-                               : lvalue->parent_slots[index - 1U],
-                   line);
+    uint8_t slot = index == 0U ? lvalue->root_slot
+                               : lvalue->parent_slots[index - 1U];
+    if (index == 0U && lvalue->root_member == NULL && lvalue->root_quiet) {
+        emit_byte(gen, OP_LOAD_LOCAL_QUIET, line);
+        emit_byte(gen, slot, line);
+    } else {
+        emit_load_slot(gen, slot, line);
+    }
 }
 
 static void emit_index_current(generator *gen, const index_lvalue *lvalue,
@@ -1174,7 +1186,9 @@ static void compile_index_assignment(generator *gen, const pc_ast *node) {
     pc_token_type operation = node->as.binary.op;
     uint8_t value_slot;
     size_t complete = 0U;
-    if (!prepare_index_lvalue(gen, node->as.binary.left, &lvalue) ||
+    if (!prepare_index_lvalue(gen, node->as.binary.left, &lvalue,
+                              operation == T_EQUAL ||
+                                  operation == T_COALESCE_EQUAL) ||
         !temporary_slot(gen, node->line, &value_slot)) {
         return;
     }
@@ -1184,7 +1198,10 @@ static void compile_index_assignment(generator *gen, const pc_ast *node) {
         return;
     }
     if (operation == T_COALESCE_EQUAL) {
-        emit_index_current(gen, &lvalue, node->line);
+        size_t leaf = lvalue.depth - 1U;
+        emit_index_parent(gen, &lvalue, leaf, node->line);
+        emit_load_slot(gen, lvalue.key_slots[leaf], node->line);
+        emit_byte(gen, OP_IDX_GET_QUIET, node->line);
         complete = emit_jump(gen, OP_JMP_NOTNULL_KEEP, node->line);
     } else if (operation != T_EQUAL) {
         pphp_opcode opcode = binary_opcode(compound_operator(operation));
@@ -1328,7 +1345,8 @@ static void compile_assignment(generator *gen, const pc_ast *node) {
     }
     if (operation == T_COALESCE_EQUAL) {
         size_t complete;
-        emit_load_slot(gen, slot, node->line);
+        emit_byte(gen, OP_LOAD_LOCAL_QUIET, node->line);
+        emit_byte(gen, slot, node->line);
         complete = emit_jump(gen, OP_JMP_NOTNULL_KEEP, node->line);
         compile_expression(gen, node->as.binary.right);
         emit_byte(gen, OP_DUP, node->line);
@@ -1360,7 +1378,7 @@ static void compile_increment(generator *gen, const pc_ast *node) {
         index_lvalue lvalue;
         uint8_t value_slot;
         uint8_t old_slot = 0U;
-        if (!prepare_index_lvalue(gen, node->as.unary.operand, &lvalue) ||
+        if (!prepare_index_lvalue(gen, node->as.unary.operand, &lvalue, 0) ||
             lvalue.indices[lvalue.depth - 1U]->as.index.key == NULL ||
             !temporary_slot(gen, node->line, &value_slot) ||
             (node->as.unary.postfix &&
@@ -1501,12 +1519,14 @@ static void compile_increment(generator *gen, const pc_ast *node) {
 static void compile_short_circuit(generator *gen, const pc_ast *node) {
     pphp_opcode opcode;
     size_t jump;
-    compile_expression(gen, node->as.binary.left);
     if (node->as.binary.op == T_COALESCE) {
+        compile_quiet_expression(gen, node->as.binary.left);
         opcode = OP_JMP_NOTNULL_KEEP;
     } else if (node->as.binary.op == T_BOOL_OR || node->as.binary.op == T_OR) {
+        compile_expression(gen, node->as.binary.left);
         opcode = OP_JMP_IF_KEEP;
     } else {
+        compile_expression(gen, node->as.binary.left);
         opcode = OP_JMP_UNLESS_KEEP;
     }
     jump = emit_jump(gen, opcode, node->line);
@@ -1568,6 +1588,14 @@ static void compile_argument_array(generator *gen, const pc_ast *argument,
 
 static void compile_quiet_expression(generator *gen, const pc_ast *node) {
     if (node == NULL || gen->failed) return;
+    if (node->kind == AST_VARIABLE) {
+        uint8_t slot;
+        if (variable_slot(gen, node->as.literal.token, &slot)) {
+            emit_byte(gen, OP_LOAD_LOCAL_QUIET, node->line);
+            emit_byte(gen, slot, node->line);
+        }
+        return;
+    }
     if (node->kind == AST_INDEX && node->as.index.key != NULL) {
         compile_quiet_expression(gen, node->as.index.base);
         compile_expression(gen, node->as.index.key);
@@ -1725,6 +1753,11 @@ static void compile_expression(generator *gen, const pc_ast *node) {
             }
             compile_expression(gen, node->as.unary.operand);
             if (node->as.unary.op == T_MINUS) emit_byte(gen, OP_NEG, node->line);
+            else if (node->as.unary.op == T_PLUS) {
+                emit_byte(gen, OP_LOAD_I8, node->line);
+                emit_byte(gen, 0U, node->line);
+                emit_byte(gen, OP_ADD, node->line);
+            }
             else if (node->as.unary.op == T_BANG) emit_byte(gen, OP_NOT, node->line);
             else if (node->as.unary.op == T_TILDE) emit_byte(gen, OP_BNOT, node->line);
             else if (node->as.unary.op == T_CLONE) emit_byte(gen, OP_CLONE, node->line);
@@ -1741,7 +1774,7 @@ static void compile_expression(generator *gen, const pc_ast *node) {
                 emit_byte(gen, OP_CAST, node->line);
                 emit_byte(gen, target, node->line);
             }
-            else if (node->as.unary.op != T_PLUS) {
+            else {
                 fail(gen, node->line, "unsupported unary operator");
             }
             break;
@@ -2191,15 +2224,14 @@ static void compile_expression(generator *gen, const pc_ast *node) {
             if (node->as.unary.operand->kind == AST_VARIABLE) {
                 uint8_t slot;
                 if (variable_slot(gen, node->as.unary.operand->as.literal.token, &slot)) {
-                    emit_byte(gen, OP_LOAD_NULL, node->line);
-                    emit_byte(gen, OP_DUP, node->line);
-                    emit_byte(gen, OP_STORE_LOCAL, node->line);
+                    emit_byte(gen, OP_UNSET_LOCAL, node->line);
                     emit_byte(gen, slot, node->line);
+                    emit_byte(gen, OP_LOAD_NULL, node->line);
                 }
             } else if (node->as.unary.operand->kind == AST_INDEX) {
                 index_lvalue lvalue;
                 if (prepare_index_lvalue(gen, node->as.unary.operand,
-                                         &lvalue)) {
+                                         &lvalue, 1)) {
                     unset_index_value(gen, &lvalue, node->line);
                 }
             } else {

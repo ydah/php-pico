@@ -176,7 +176,7 @@ static int integer_binary_float(pv_operation operation, pphp_int left,
 
 static int string_integer_exact(const char *text, size_t length,
                                 int require_complete, pphp_int *result,
-                                int *out_of_range) {
+                                int *out_of_range, size_t *consumed) {
     size_t position = 0U;
     int negative = 0;
     int digits = 0;
@@ -184,6 +184,7 @@ static int string_integer_exact(const char *text, size_t length,
     uint64_t magnitude = 0U;
     uint64_t limit;
     *out_of_range = 0;
+    *consumed = 0U;
     while (position < length &&
            (text[position] == ' ' || text[position] == '\t' ||
             text[position] == '\n' || text[position] == '\r')) position++;
@@ -208,12 +209,11 @@ static int string_integer_exact(const char *text, size_t length,
         (position < length &&
          (text[position] == '.' || text[position] == 'e' ||
           text[position] == 'E'))) return 0;
-    if (require_complete) {
-        while (position < length &&
-               (text[position] == ' ' || text[position] == '\t' ||
-                text[position] == '\n' || text[position] == '\r')) position++;
-        if (position != length) return 0;
-    }
+    while (position < length &&
+           (text[position] == ' ' || text[position] == '\t' ||
+            text[position] == '\n' || text[position] == '\r')) position++;
+    *consumed = position;
+    if (require_complete && position != length) return 0;
     if (!in_range) {
         *out_of_range = 1;
         return 0;
@@ -230,7 +230,7 @@ static int string_integer_exact(const char *text, size_t length,
 #if PPHP_ENABLE_FLOAT
 static int floating_string_number(const char *text, size_t length,
                                   pphp_float *number, int *is_integer,
-                                  int require_complete) {
+                                  int require_complete, size_t *consumed) {
     size_t i = 0U;
     int sign = 1;
     pphp_float value = 0;
@@ -243,6 +243,7 @@ static int floating_string_number(const char *text, size_t length,
 #if PPHP_ENABLE_FLOAT
     int exponent_sign = 1;
 #endif
+    *consumed = 0U;
     while (i < length && (text[i] == ' ' || text[i] == '\t' || text[i] == '\n' ||
                           text[i] == '\r')) {
         i++;
@@ -294,14 +295,13 @@ static int floating_string_number(const char *text, size_t length,
         return 0;
 #endif
     }
-    if (require_complete) {
-        while (i < length &&
-               (text[i] == ' ' || text[i] == '\t' || text[i] == '\n' ||
-                text[i] == '\r')) {
-            i++;
-        }
-        if (i != length) return 0;
+    while (i < length &&
+           (text[i] == ' ' || text[i] == '\t' || text[i] == '\n' ||
+            text[i] == '\r')) {
+        i++;
     }
+    *consumed = i;
+    if (require_complete && i != length) return 0;
     if (exponent != 0) {
 #if PPHP_ENABLE_FLOAT
         value *= (pphp_float)pow(10.0, (double)(exponent * exponent_sign));
@@ -318,21 +318,34 @@ static int floating_string_number(const char *text, size_t length,
 static int string_numeric(const char *text, size_t length,
                           int require_complete, pphp_numeric *numeric) {
     int out_of_range;
+    size_t consumed = 0U;
+    numeric->string_status = PPHP_NUMERIC_STRING_INVALID;
     if (string_integer_exact(text, length, require_complete,
-                             &numeric->integer, &out_of_range)) {
+                             &numeric->integer, &out_of_range, &consumed)) {
         numeric->number = (pphp_float)numeric->integer;
         numeric->is_integer = 1;
         numeric->integer_exact = 1;
+        numeric->string_status = consumed < length
+                                     ? PPHP_NUMERIC_STRING_TRAILING
+                                     : PPHP_NUMERIC_STRING_EXACT;
         return 1;
     }
 #if PPHP_ENABLE_FLOAT
     if (!floating_string_number(text, length, &numeric->number,
                                 &numeric->is_integer,
-                                require_complete)) return 0;
+                                require_complete, &consumed)) return 0;
     numeric->integer_exact = 0;
+    numeric->string_status = consumed < length
+                                 ? PPHP_NUMERIC_STRING_TRAILING
+                                 : PPHP_NUMERIC_STRING_EXACT;
     return 1;
 #else
-    if (out_of_range) numeric->is_integer = -1;
+    if (out_of_range) {
+        numeric->is_integer = -1;
+        numeric->string_status = consumed < length
+                                     ? PPHP_NUMERIC_STRING_TRAILING
+                                     : PPHP_NUMERIC_STRING_EXACT;
+    }
     return 0;
 #endif
 }
@@ -425,11 +438,15 @@ pstring *pv_to_string(pvalue value) {
 }
 
 int pv_binary_operation(pv_operation operation, pvalue left, pvalue right,
-                        pvalue *result, const char **error) {
+                        pvalue *result, const char **error,
+                        unsigned *non_numeric_operands) {
     pphp_numeric left_numeric = {0};
     pphp_numeric right_numeric = {0};
     pphp_float a;
     pphp_float b;
+    int left_converted;
+    int right_converted;
+    if (non_numeric_operands != NULL) *non_numeric_operands = 0U;
     if (operation == PV_CONCAT) {
         pstring *left_string = pv_to_string(left);
         pstring *right_string = pv_to_string(right);
@@ -473,8 +490,21 @@ int pv_binary_operation(pv_operation operation, pvalue left, pvalue right,
         *result = pv_heap(PT_STRING, &joined->header);
         return 1;
     }
-    if (!pv_to_numeric(left, left.type != PT_STRING, &left_numeric) ||
-        !pv_to_numeric(right, right.type != PT_STRING, &right_numeric)) {
+    left_converted = pv_to_numeric(left, left.type != PT_STRING,
+                                   &left_numeric);
+    right_converted = pv_to_numeric(right, right.type != PT_STRING,
+                                    &right_numeric);
+    if (non_numeric_operands != NULL) {
+        if (left.type == PT_STRING &&
+            left_numeric.string_status != PPHP_NUMERIC_STRING_EXACT) {
+            *non_numeric_operands |= 1U;
+        }
+        if (right.type == PT_STRING &&
+            right_numeric.string_status != PPHP_NUMERIC_STRING_EXACT) {
+            *non_numeric_operands |= 2U;
+        }
+    }
+    if (!left_converted || !right_converted) {
         *error = left_numeric.is_integer < 0 || right_numeric.is_integer < 0
                      ? "integer overflow requires float support"
                      : "unsupported operand types";

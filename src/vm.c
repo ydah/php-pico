@@ -83,6 +83,27 @@ static void slot_mask_clear(uint8_t *mask, uint8_t slot) {
     mask[slot >> 3U] &= (uint8_t)~(uint8_t)(1U << (slot & 7U));
 }
 
+static pvalue undefined_local_value(void) {
+    pvalue value = pv_null();
+    value.reserved[0] = 1U;
+    return value;
+}
+
+static int local_value_is_undefined(pvalue value) {
+    return value.type == PT_NULL && value.reserved[0] != 0U;
+}
+
+#if PPHP_WARNINGS
+static void warn_undefined_variable(pphp_state *state, const pframe *frame,
+                                    uint8_t slot) {
+    const pstring *name = frame->proto->locals[slot];
+    pphp_warning(state, frame->line, "Undefined variable $%.*s",
+                 (int)name->length, name->data);
+}
+#else
+#define warn_undefined_variable(...) ((void)0)
+#endif
+
 static pstring *static_slot_key(pphp_state *state, const pframe *frame,
                                 uint8_t slot) {
     const pstring *function_name = frame->proto->name;
@@ -116,13 +137,18 @@ static parray *slot_storage(pphp_state *state, const pframe *frame,
 }
 
 static int read_local_value(pphp_state *state, pframe *frame, uint8_t slot,
-                            pvalue *result) {
+                            int quiet, pvalue *result) {
     pstring *key;
     parray *storage = slot_storage(state, frame, slot, &key);
     *result = pv_null();
     if (storage == NULL) {
-        *result = state->stack[frame->base + slot];
-        pv_retain(*result);
+        pvalue value = state->stack[frame->base + slot];
+        if (local_value_is_undefined(value)) {
+            if (!quiet) warn_undefined_variable(state, frame, slot);
+        } else {
+            *result = value;
+            pv_retain(*result);
+        }
         return 1;
     }
     if (key == NULL) {
@@ -130,13 +156,17 @@ static int read_local_value(pphp_state *state, pframe *frame, uint8_t slot,
                            "out of memory resolving variable storage");
         return 0;
     }
-    (void)pa_get(storage, pv_heap(PT_STRING, &key->header), result);
+    if (!pa_get(storage, pv_heap(PT_STRING, &key->header), result) && !quiet) {
+        warn_undefined_variable(state, frame, slot);
+    }
     return 1;
 }
 
-static int load_local_value(pphp_state *state, pframe *frame, uint8_t slot) {
+static int load_local_value(pphp_state *state, pframe *frame, uint8_t slot,
+                            int quiet) {
     pvalue value;
-    return read_local_value(state, frame, slot, &value) && push(state, value);
+    return read_local_value(state, frame, slot, quiet, &value) &&
+           push(state, value);
 }
 
 static int store_local_value(pphp_state *state, pframe *frame, uint8_t slot,
@@ -156,6 +186,23 @@ static int store_local_value(pphp_state *state, pframe *frame, uint8_t slot,
         return 0;
     }
     pv_release(value);
+    return 1;
+}
+
+static int unset_local_value(pphp_state *state, pframe *frame, uint8_t slot) {
+    pstring *key;
+    parray *storage = slot_storage(state, frame, slot, &key);
+    if (storage == NULL) {
+        pv_release(state->stack[frame->base + slot]);
+        state->stack[frame->base + slot] = undefined_local_value();
+        return 1;
+    }
+    if (key == NULL) {
+        pphp_runtime_error(state, frame->line,
+                           "out of memory resolving variable storage");
+        return 0;
+    }
+    (void)pa_remove(storage, pv_heap(PT_STRING, &key->header));
     return 1;
 }
 
@@ -280,6 +327,7 @@ static int execute_binary(pphp_state *state, uint8_t opcode) {
     pvalue left = pop(state);
     pvalue result = pv_null();
     const char *error = NULL;
+    unsigned non_numeric_operands = 0U;
     int ok;
     if (opcode == OP_CONCAT &&
         (left.type == PT_OBJECT || right.type == PT_OBJECT)) {
@@ -294,13 +342,20 @@ static int execute_binary(pphp_state *state, uint8_t opcode) {
             pvalue left_value = pv_heap(PT_STRING, &left_string->header);
             pvalue right_value = pv_heap(PT_STRING, &right_string->header);
             ok = pv_binary_operation(PV_CONCAT, left_value, right_value,
-                                     &result, &error);
+                                     &result, &error, NULL);
             pv_release(left_value);
             pv_release(right_value);
         }
     } else {
         ok = pv_binary_operation(operation_for(opcode), left, right,
-                                 &result, &error);
+                                 &result, &error,
+                                 &non_numeric_operands);
+    }
+    if ((non_numeric_operands & 1U) != 0U) {
+        pphp_warning(state, 0U, "A non-numeric value encountered");
+    }
+    if ((non_numeric_operands & 2U) != 0U) {
+        pphp_warning(state, 0U, "A non-numeric value encountered");
     }
     pv_release(left);
     pv_release(right);
@@ -769,14 +824,14 @@ static int bind_arguments(pphp_state *state, const pproto *callee,
                 state->stack + argument_base, supplied * sizeof(*state->stack));
     }
     for (i = supplied; i < fixed_count; i++) {
-        state->stack[target_base + local_offset + i] = pv_null();
+        state->stack[target_base + local_offset + i] = undefined_local_value();
     }
     if (callee->variadic) {
         state->stack[target_base + local_offset + fixed_count] =
             pv_heap(PT_ARRAY, &rest->header);
     }
     for (i = local_offset + callee->n_params; i < callee->n_locals; i++) {
-        state->stack[target_base + i] = pv_null();
+        state->stack[target_base + i] = undefined_local_value();
     }
     return 1;
 }
@@ -1416,7 +1471,7 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
     state->frames[0].called_scope = NULL;
     state->frames[0].called_class = NULL;
     for (i = 0U; i < state->stack_count; i++) {
-        state->stack[i] = pv_null();
+        state->stack[i] = undefined_local_value();
     }
     while (state->frame_count != 0U && state->error[0] == '\0' &&
            !state->exit_requested) {
@@ -1497,7 +1552,17 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                 if (slot >= frame->proto->n_locals) {
                     pphp_runtime_error(state, frame->line, "local index out of range");
                 } else {
-                    (void)load_local_value(state, frame, slot);
+                    (void)load_local_value(state, frame, slot, 0);
+                }
+                break;
+            }
+            case OP_LOAD_LOCAL_QUIET: {
+                uint8_t slot = read_u8(state, frame);
+                if (slot >= frame->proto->n_locals) {
+                    pphp_runtime_error(state, frame->line,
+                                       "local index out of range");
+                } else {
+                    (void)load_local_value(state, frame, slot, 1);
                 }
                 break;
             }
@@ -1509,6 +1574,16 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                     pphp_runtime_error(state, frame->line, "local index out of range");
                 } else {
                     (void)store_local_value(state, frame, slot, value);
+                }
+                break;
+            }
+            case OP_UNSET_LOCAL: {
+                uint8_t slot = read_u8(state, frame);
+                if (slot >= frame->proto->n_locals) {
+                    pphp_runtime_error(state, frame->line,
+                                       "local index out of range");
+                } else {
+                    (void)unset_local_value(state, frame, slot);
                 }
                 break;
             }
@@ -1576,8 +1651,14 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
             case OP_NEG: {
                 pvalue value = pop(state);
                 pphp_numeric numeric;
-                if (!pv_to_numeric(value, value.type != PT_STRING,
-                                   &numeric)) {
+                int converted = pv_to_numeric(value, value.type != PT_STRING,
+                                              &numeric);
+                if (value.type == PT_STRING &&
+                    numeric.string_status != PPHP_NUMERIC_STRING_EXACT) {
+                    pphp_warning(state, frame->line,
+                                 "A non-numeric value encountered");
+                }
+                if (!converted) {
                     pphp_runtime_error(
                         state, frame->line, "%s",
                         numeric.is_integer < 0
@@ -1613,8 +1694,14 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
             case OP_BNOT: {
                 pvalue value = pop(state);
                 pphp_numeric numeric;
-                if (!pv_to_numeric(value, value.type != PT_STRING,
-                                   &numeric)) {
+                int converted = pv_to_numeric(value, value.type != PT_STRING,
+                                              &numeric);
+                if (value.type == PT_STRING &&
+                    numeric.string_status != PPHP_NUMERIC_STRING_EXACT) {
+                    pphp_warning(state, frame->line,
+                                 "A non-numeric value encountered");
+                }
+                if (!converted) {
                     pphp_runtime_error(
                         state, frame->line, "%s",
                         numeric.is_integer < 0
@@ -2651,7 +2738,7 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                     if (kind != 0U || slot >= frame->proto->n_locals) {
                         valid = 0;
                         captures[capture] = pv_null();
-                    } else if (!read_local_value(state, frame, slot,
+                    } else if (!read_local_value(state, frame, slot, 0,
                                                  &captures[capture])) {
                         valid = 0;
                     }

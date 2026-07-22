@@ -1,13 +1,20 @@
 CC ?= cc
 PPHP_ENABLE_COMPILER ?= 1
 PPHP_ENABLE_FLOAT ?= 1
+PPHP_WARNINGS ?= 1
 ifeq ($(strip $(PPHP_ENABLE_FLOAT)),)
 $(error PPHP_ENABLE_FLOAT must be 0 or 1)
 endif
 ifneq ($(filter $(PPHP_ENABLE_FLOAT),0 1),$(PPHP_ENABLE_FLOAT))
 $(error PPHP_ENABLE_FLOAT must be 0 or 1)
 endif
-BASE_CPPFLAGS := -Iinclude -Isrc -Istdlib -Itools -Ipgems -DPPHP_HOST=1 -DPPHP_ENABLE_FLOAT=$(PPHP_ENABLE_FLOAT)
+ifeq ($(strip $(PPHP_WARNINGS)),)
+$(error PPHP_WARNINGS must be 0 or 1)
+endif
+ifneq ($(filter $(PPHP_WARNINGS),0 1),$(PPHP_WARNINGS))
+$(error PPHP_WARNINGS must be 0 or 1)
+endif
+BASE_CPPFLAGS := -Iinclude -Isrc -Istdlib -Itools -Ipgems -DPPHP_HOST=1 -DPPHP_ENABLE_FLOAT=$(PPHP_ENABLE_FLOAT) -DPPHP_WARNINGS=$(PPHP_WARNINGS)
 COMPILER_CPPFLAGS := $(BASE_CPPFLAGS) -Icompiler -Ishell -DPPHP_ENABLE_COMPILER=1
 PBC_CPPFLAGS := $(BASE_CPPFLAGS) -DPPHP_ENABLE_COMPILER=0
 ifeq ($(PPHP_ENABLE_COMPILER),1)
@@ -56,6 +63,13 @@ FLOAT_REFERENCE_BINARY := build/host/php-pico-default-float
 RP2040_HOST_BINARY := build/host/php-pico-rp2040
 RP2040_UBSAN_BINARY := build/host/php-pico-rp2040-ubsan
 FLOAT_FORMAT_TEST_BINARY := build/host/test_float_format
+WARNINGS_ON_HOST_BINARY := build/host/php-pico-warnings-on
+WARNINGS_OFF_HOST_BINARY := build/host/php-pico-warnings-off
+WARNINGS_ON_PBC_BINARY := build/host/php-pico-warnings-pbc-on
+WARNINGS_OFF_PBC_BINARY := build/host/php-pico-warnings-pbc-off
+WARNINGS_NO_FLOAT_BINARY := build/host/php-pico-warnings-no-float
+WARNINGS_RP_BINARY := build/host/php-pico-warnings-rp
+WARNINGS_UBSAN_BINARY := build/host/php-pico-warnings-ubsan
 TEST_BINARY := build/host/test_core
 LEXER_TEST_BINARY := build/host/test_lexer
 PARSER_TEST_BINARY := build/host/test_parser
@@ -66,7 +80,7 @@ ASAN_PARSER_BINARY := build/host/test_parser_asan
 ASAN_VM_BINARY := build/host/test_vm_asan
 ASAN_LEAKS := $(if $(filter Darwin,$(shell uname -s)),0,1)
 
-.PHONY: all FORCE host host-pbc host-rp2040 rp2040 test test-unit test-compiler-off test-no-float test-no-float-ubsan test-float-format test-rp-integer-boundary test-phpt test-target test-asan test-diff bench size clean
+.PHONY: all FORCE host host-pbc host-rp2040 rp2040 test test-unit test-compiler-off test-no-float test-no-float-ubsan test-float-format test-rp-integer-boundary test-warnings test-phpt test-target test-asan test-diff bench size clean
 
 FORCE:
 
@@ -168,6 +182,52 @@ $(FLOAT_FORMAT_TEST_BINARY): FORCE src/float_format.c tests/unit/test_float_form
 		-DPPHP_DEVICE_FLOAT_FORMAT=1 $(CFLAGS) src/float_format.c \
 		tests/unit/test_float_format.c $(LDFLAGS) $(LDLIBS) -o $@
 
+$(WARNINGS_ON_HOST_BINARY): FORCE $(COMPILER_HOST_SOURCES)
+	@mkdir -p $(@D)
+	$(CC) $(filter-out -DPPHP_WARNINGS=%,$(COMPILER_CPPFLAGS)) \
+		-DPPHP_WARNINGS=1 $(CFLAGS) $(COMPILER_HOST_SOURCES) \
+		$(LDFLAGS) $(LDLIBS) -o $@
+
+$(WARNINGS_OFF_HOST_BINARY): FORCE $(COMPILER_HOST_SOURCES)
+	@mkdir -p $(@D)
+	$(CC) $(filter-out -DPPHP_WARNINGS=%,$(COMPILER_CPPFLAGS)) \
+		-DPPHP_WARNINGS=0 $(CFLAGS) $(COMPILER_HOST_SOURCES) \
+		$(LDFLAGS) $(LDLIBS) -o $@
+
+$(WARNINGS_ON_PBC_BINARY): FORCE $(PBC_HOST_SOURCES)
+	@mkdir -p $(@D)
+	$(CC) $(filter-out -DPPHP_WARNINGS=%,$(PBC_CPPFLAGS)) \
+		-DPPHP_WARNINGS=1 $(CFLAGS) $(PBC_HOST_SOURCES) \
+		$(LDFLAGS) $(LDLIBS) -o $@
+
+$(WARNINGS_OFF_PBC_BINARY): FORCE $(PBC_HOST_SOURCES)
+	@mkdir -p $(@D)
+	$(CC) $(filter-out -DPPHP_WARNINGS=%,$(PBC_CPPFLAGS)) \
+		-DPPHP_WARNINGS=0 $(CFLAGS) $(PBC_HOST_SOURCES) \
+		$(LDFLAGS) $(LDLIBS) -o $@
+
+$(WARNINGS_NO_FLOAT_BINARY): FORCE $(RUNTIME_COMMON_SOURCES) $(COMPILER_SOURCES) compiler/codegen.c tools/disasm.c shell/p2sh.c shell/p2sh_device.c ports/host/main.c
+	@mkdir -p $(@D)
+	$(CC) $(filter-out -DPPHP_ENABLE_FLOAT=% -DPPHP_WARNINGS=%,$(COMPILER_CPPFLAGS)) \
+		-DPPHP_ENABLE_FLOAT=0 -DPPHP_WARNINGS=1 $(CFLAGS) \
+		$(RUNTIME_COMMON_SOURCES) $(COMPILER_SOURCES) compiler/codegen.c \
+		tools/disasm.c shell/p2sh.c shell/p2sh_device.c ports/host/main.c \
+		$(LDFLAGS) -o $@
+
+$(WARNINGS_RP_BINARY): FORCE $(COMPILER_HOST_SOURCES)
+	@mkdir -p $(@D)
+	$(CC) $(filter-out -DPPHP_WARNINGS=%,$(COMPILER_CPPFLAGS)) \
+		-DPPHP_WARNINGS=1 -DPPHP_INT64=0 -DPPHP_USE_DOUBLE=0 \
+		-DPPHP_DEVICE_FLOAT_FORMAT=1 $(CFLAGS) $(COMPILER_HOST_SOURCES) \
+		$(LDFLAGS) $(LDLIBS) -o $@
+
+$(WARNINGS_UBSAN_BINARY): FORCE $(COMPILER_HOST_SOURCES)
+	@mkdir -p $(@D)
+	$(CC) $(filter-out -DPPHP_WARNINGS=%,$(COMPILER_CPPFLAGS)) \
+		-DPPHP_WARNINGS=1 $(CFLAGS) -O1 -g -fno-omit-frame-pointer \
+		-fsanitize=undefined $(COMPILER_HOST_SOURCES) \
+		-fsanitize=undefined $(LDLIBS) -o $@
+
 $(TEST_BINARY): FORCE $(TEST_SOURCES)
 	@mkdir -p $(@D)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(TEST_SOURCES) $(LDFLAGS) -o $@
@@ -186,10 +246,10 @@ $(VM_TEST_BINARY): FORCE $(VM_TEST_SOURCES)
 
 ifeq ($(PPHP_ENABLE_FLOAT),1)
 TEST_UNIT_DEPENDENCIES := $(TEST_BINARY) $(LEXER_TEST_BINARY) $(PARSER_TEST_BINARY) $(VM_TEST_BINARY) $(FLOAT_FORMAT_TEST_BINARY) $(HOST_BINARY)
-TEST_DEPENDENCIES := test-unit test-compiler-off test-no-float test-float-format test-phpt
+TEST_DEPENDENCIES := test-unit test-compiler-off test-no-float test-float-format test-warnings test-phpt
 else
 TEST_UNIT_DEPENDENCIES := $(TEST_BINARY) $(LEXER_TEST_BINARY) $(PARSER_TEST_BINARY) $(HOST_BINARY)
-TEST_DEPENDENCIES := test-unit test-compiler-off test-no-float
+TEST_DEPENDENCIES := test-unit test-compiler-off test-no-float test-warnings
 endif
 
 test-unit: $(TEST_UNIT_DEPENDENCIES)
@@ -221,6 +281,12 @@ test-float-format: $(RP2040_HOST_BINARY) $(FLOAT_FORMAT_TEST_BINARY) test-rp-int
 
 test-rp-integer-boundary: $(RP2040_UBSAN_BINARY)
 	sh tests/cli/integer_float_boundary.sh $(RP2040_UBSAN_BINARY)
+
+test-warnings: $(WARNINGS_ON_HOST_BINARY) $(WARNINGS_OFF_HOST_BINARY) $(WARNINGS_ON_PBC_BINARY) $(WARNINGS_OFF_PBC_BINARY) $(WARNINGS_NO_FLOAT_BINARY) $(WARNINGS_RP_BINARY) $(WARNINGS_UBSAN_BINARY)
+	sh tests/cli/warnings.sh $(WARNINGS_ON_HOST_BINARY) \
+		$(WARNINGS_OFF_HOST_BINARY) $(WARNINGS_ON_PBC_BINARY) \
+		$(WARNINGS_OFF_PBC_BINARY) $(WARNINGS_NO_FLOAT_BINARY) \
+		$(WARNINGS_RP_BINARY) $(WARNINGS_UBSAN_BINARY)
 
 test-phpt: $(HOST_BINARY)
 	sh tools/phpt_run.sh --binary $(HOST_BINARY) tests/phpt

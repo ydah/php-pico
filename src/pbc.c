@@ -767,6 +767,8 @@ const char *pphp_opcode_name(uint8_t opcode) {
         case OP_BIND_GLOBAL: return "BIND_GLOBAL";
         case OP_STATIC_INIT: return "STATIC_INIT";
         case OP_LOAD_NAMED_CONST: return "LOAD_NAMED_CONST";
+        case OP_LOAD_LOCAL_QUIET: return "LOAD_LOCAL_QUIET";
+        case OP_UNSET_LOCAL: return "UNSET_LOCAL";
         case OP_ADD: return "ADD";
         case OP_SUB: return "SUB";
         case OP_MUL: return "MUL";
