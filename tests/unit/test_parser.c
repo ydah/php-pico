@@ -66,6 +66,12 @@ TEST(control_flow_and_functions_build_structured_ast) {
     loop = function->next;
     ASSERT_EQ(AST_FUNCTION, function->kind);
     ASSERT_EQ(2, function->as.function.parameter_count);
+    ASSERT_EQ(AST_TYPE, function->as.function.parameters->as.parameter.type->kind);
+    ASSERT_EQ(T_INT_TYPE,
+              function->as.function.parameters->as.parameter.type
+                  ->as.type_decl.name.type);
+    ASSERT_EQ(T_INT_TYPE,
+              function->as.function.return_type->as.type_decl.name.type);
     ASSERT_EQ(AST_FOR, loop->kind);
     ASSERT_EQ(AST_BLOCK, loop->as.for_stmt.body->kind);
     pc_arena_destroy(&arena);
@@ -158,6 +164,9 @@ TEST(classes_properties_methods_and_new_parse) {
     ASSERT_EQ(AST_CLASS, class_node->kind);
     ASSERT_TRUE((class_node->as.class_decl.flags & PC_MOD_FINAL) != 0U);
     ASSERT_EQ(AST_PROPERTY, class_node->as.class_decl.members->kind);
+    ASSERT_EQ(T_INT_TYPE,
+              class_node->as.class_decl.members->as.property.type
+                  ->as.type_decl.name.type);
     ASSERT_EQ(AST_FUNCTION, class_node->as.class_decl.members->next->kind);
     ASSERT_EQ(AST_ASSIGN, class_node->next->as.expression.expression->kind);
     ASSERT_EQ(AST_NEW,
@@ -265,6 +274,11 @@ TEST(closures_and_arrow_functions_parse_capture_modes) {
     ASSERT_TRUE(!first->as.closure.is_arrow);
     ASSERT_EQ(AST_VARIABLE, first->as.closure.captures->kind);
     ASSERT_EQ(AST_BLOCK, first->as.closure.body->kind);
+    ASSERT_EQ(T_INT_TYPE,
+              first->as.closure.parameters->as.parameter.type
+                  ->as.type_decl.name.type);
+    ASSERT_EQ(T_INT_TYPE,
+              first->as.closure.return_type->as.type_decl.name.type);
     ASSERT_EQ(AST_CLOSURE, second->kind);
     ASSERT_TRUE(second->as.closure.is_arrow);
     ASSERT_TRUE(second->as.closure.is_static);
@@ -273,6 +287,29 @@ TEST(closures_and_arrow_functions_parse_capture_modes) {
     program = parse_source("function () use (&$value) {};", &arena, &parser);
     ASSERT_TRUE(program == NULL);
     ASSERT_TRUE(strstr(pc_parser_error(&parser), "by reference") != NULL);
+    pc_arena_destroy(&arena);
+}
+
+TEST(nullable_and_union_types_are_preserved) {
+    pc_arena arena;
+    pc_parser parser;
+    pc_ast *program = parse_source(
+        "function typed(?int $first, string|bool|null $second): self {}",
+        &arena, &parser);
+    pc_ast *function;
+    pc_ast *first_type;
+    pc_ast *second_type;
+    ASSERT_TRUE(program != NULL);
+    function = program->as.list.items;
+    first_type = function->as.function.parameters->as.parameter.type;
+    second_type = function->as.function.parameters->next->as.parameter.type;
+    ASSERT_EQ(T_NULL, first_type->as.type_decl.name.type);
+    ASSERT_EQ(T_INT_TYPE, first_type->next->as.type_decl.name.type);
+    ASSERT_TRUE(first_type->next->next == NULL);
+    ASSERT_EQ(T_STRING_TYPE, second_type->as.type_decl.name.type);
+    ASSERT_EQ(T_BOOL_TYPE, second_type->next->as.type_decl.name.type);
+    ASSERT_EQ(T_NULL, second_type->next->next->as.type_decl.name.type);
+    ASSERT_EQ(T_SELF, function->as.function.return_type->as.type_decl.name.type);
     pc_arena_destroy(&arena);
 }
 
@@ -290,7 +327,8 @@ int main(void) {
         {"exception syntax", try_catch_union_and_finally_build_exception_ast},
         {"switch syntax", switch_cases_and_default_preserve_statement_groups},
         {"match syntax", match_parses_multiple_conditions_default_and_trailing_comma},
-        {"closure syntax", closures_and_arrow_functions_parse_capture_modes}
+        {"closure syntax", closures_and_arrow_functions_parse_capture_modes},
+        {"declared types", nullable_and_union_types_are_preserved}
     };
     return run_tests(tests, sizeof(tests) / sizeof(tests[0]));
 }

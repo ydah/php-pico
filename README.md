@@ -72,8 +72,15 @@ See [`docs/TUTORIAL.md`](docs/TUTORIAL.md) for the end-to-end hardware guide,
 ## Compatibility and releases
 
 php-pico 1.0.0 reads and writes PPBC format version 2. A PBC is rejected when
-its integer-width or floating-point-width flags differ from the running build;
-recompile source for that target rather than copying an incompatible image.
+its integer-width, floating-point-width, line-info, or runtime-typecheck flags
+differ from the running build; recompile source for that target rather than
+copying an incompatible image.
+
+Declared parameter, return, and property types are parsed in every build.
+Set `PPHP_TYPECHECK=1` (or `-DPPHP_TYPECHECK=ON` for the RP2040 CMake build) to
+enforce them with catchable `TypeError` exceptions. The default is `0`, which
+keeps declarations as compatibility syntax without adding runtime type
+metadata. Type checking is exact and is unaffected by `strict_types`.
 
 littlefs is pinned as a submodule at v2.11.3. The runtime itself does not call
 the system allocator: host and device allocations go through the configured

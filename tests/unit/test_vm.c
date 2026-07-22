@@ -76,7 +76,8 @@ static void test_put_u32(uint8_t *bytes, size_t offset, uint32_t value) {
 static void minimal_pbc(uint8_t *bytes, size_t length) {
     uint16_t flags = (uint16_t)((PPHP_INT64 ? 1U : 0U) |
                                 (PPHP_USE_DOUBLE ? 2U : 0U) |
-                                (PPHP_LINE_INFO ? 4U : 0U));
+                                (PPHP_LINE_INFO ? 4U : 0U) |
+                                (PPHP_TYPECHECK ? 8U : 0U));
     memset(bytes, 0, 128U);
     memcpy(bytes, "PPBC", 4U);
     test_put_u16(bytes, 4U, (uint16_t)PPHP_PBC_FORMAT_VERSION);
@@ -88,6 +89,9 @@ static void minimal_pbc(uint8_t *bytes, size_t length) {
     test_put_u32(bytes, 20U, 28U);
     test_put_u16(bytes, 24U, 0U);
     test_put_u16(bytes, 42U, 0U);
+#if PPHP_TYPECHECK
+    if (length >= 48U) bytes[44U] = 0U;
+#endif
 }
 
 static int load_test_pbc(uint8_t *bytes, size_t length) {
@@ -283,7 +287,8 @@ TEST(pbc_serialization_round_trips_through_loader) {
         FILE *file = fopen(path, "r+b");
         int flags = (PPHP_INT64 ? 1 : 0) |
                     (PPHP_USE_DOUBLE ? 2 : 0) |
-                    (PPHP_LINE_INFO ? 4 : 0);
+                    (PPHP_LINE_INFO ? 4 : 0) |
+                    (PPHP_TYPECHECK ? 8 : 0);
         ASSERT_TRUE(file != NULL);
         ASSERT_EQ(0, fseek(file, 6L, SEEK_SET));
         ASSERT_EQ(flags ^ 1, fputc(flags ^ 1, file));
@@ -361,14 +366,23 @@ TEST(pbc_string_constants_are_zero_copy_image_views) {
 TEST(pbc_string_records_are_binary_safe_and_nul_terminated) {
     uint8_t bytes[128];
     pmodule module;
+#if PPHP_TYPECHECK
+    minimal_pbc(bytes, 52U);
+#else
     minimal_pbc(bytes, 48U);
+#endif
     test_put_u32(bytes, 20U, 32U);
     test_put_u16(bytes, 24U, 3U);
     bytes[26U] = 'a';
     bytes[27U] = 0U;
     bytes[28U] = 'b';
     bytes[29U] = 0U;
+#if PPHP_TYPECHECK
+    bytes[48U] = 0U;
+    ASSERT_EQ(PPHP_OK, pphp_pbc_load(bytes, 52U, &module));
+#else
     ASSERT_EQ(PPHP_OK, pphp_pbc_load(bytes, 48U, &module));
+#endif
     ASSERT_EQ(1, module.ro_string_count);
     ASSERT_EQ(3, module.ro_strings[0].base.length);
     ASSERT_EQ(0, module.ro_strings[0].data[1]);
@@ -376,7 +390,11 @@ TEST(pbc_string_records_are_binary_safe_and_nul_terminated) {
     pmodule_destroy(&module);
 
     bytes[29U] = 1U;
+#if PPHP_TYPECHECK
+    ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(bytes, 52U));
+#else
     ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(bytes, 48U));
+#endif
 }
 
 TEST(pbc_strings_work_across_runtime_consumers) {
@@ -927,8 +945,13 @@ TEST(class_reachability_sweeps_dead_graphs_beside_live_graphs) {
 TEST(pbc_loader_rejects_truncated_and_wrapping_sections) {
     uint8_t bytes[128];
 
+#if PPHP_TYPECHECK
+    minimal_pbc(bytes, 48U);
+    ASSERT_EQ(PPHP_OK, load_test_pbc(bytes, 48U));
+#else
     minimal_pbc(bytes, 44U);
     ASSERT_EQ(PPHP_OK, load_test_pbc(bytes, 44U));
+#endif
 
     minimal_pbc(bytes, 20U);
     ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(bytes, 20U));

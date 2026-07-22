@@ -548,13 +548,6 @@ pobject *pobject_new(pphp_state *state, pclass *class_entry) {
     }
     memset((uint8_t *)(object->slots + class_entry->property_count), 0,
            class_entry->property_count);
-#if PPHP_TYPECHECK
-    for (i = 0U; i < class_entry->property_count; i++) {
-        if (class_entry->properties[i].initialized) {
-            pobject_mark_property_written(object, (uint8_t)i);
-        }
-    }
-#endif
     return object;
 }
 

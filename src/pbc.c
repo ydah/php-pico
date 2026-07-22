@@ -142,47 +142,6 @@ int pproto_add_catch(pproto *proto, pcatch entry) {
     return 1;
 }
 
-#if PPHP_TYPECHECK
-int ptype_spec_add(ptype_spec *spec, uint8_t kind,
-                   const char *name, size_t length) {
-    pstring *type_name = NULL;
-    if (kind == PTYPE_NAMED) {
-        type_name = ps_new(name, length);
-        if (type_name == NULL) return 0;
-    }
-    if (!ptype_spec_add_string(spec, kind, type_name)) {
-        ps_destroy(type_name);
-        return 0;
-    }
-    return 1;
-}
-
-int ptype_spec_add_string(ptype_spec *spec, uint8_t kind, pstring *name) {
-    ptype_member *resized;
-    if (spec == NULL || spec->count == UINT8_MAX ||
-        kind < PTYPE_INT || kind > PTYPE_NAMED ||
-        (kind == PTYPE_NAMED && name == NULL) ||
-        (kind != PTYPE_NAMED && name != NULL)) return 0;
-    resized = pphp_realloc(spec->members,
-                           ((size_t)spec->count + 1U) * sizeof(*spec->members));
-    if (resized == NULL) return 0;
-    spec->members = resized;
-    spec->members[spec->count].kind = kind;
-    spec->members[spec->count].name = name;
-    spec->count++;
-    return 1;
-}
-
-void ptype_spec_destroy(ptype_spec *spec) {
-    size_t i;
-    if (spec == NULL) return;
-    for (i = 0U; i < spec->count; i++) ps_destroy(spec->members[i].name);
-    pphp_free(spec->members);
-    spec->members = NULL;
-    spec->count = 0U;
-}
-#endif
-
 int pmodule_add(pmodule *module, pproto *proto) {
     if (module->count == module->capacity &&
         !grow_array((void **)&module->protos, sizeof(*module->protos),

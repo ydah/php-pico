@@ -82,6 +82,19 @@ WARNINGS_CONFIG_ON_OBJECT := build/host/test_warnings_config_on.o
 WARNINGS_CONFIG_OFF_OBJECT := build/host/test_warnings_config_off.o
 WARNINGS_CONFIG_INVALID_OBJECT := build/host/test_warnings_config_invalid.o
 WARNINGS_CONFIG_INVALID_LOG := build/host/test_warnings_config_invalid.log
+TYPECHECK_ON_HOST_BINARY := build/host/php-pico-typecheck-on
+TYPECHECK_OFF_HOST_BINARY := build/host/php-pico-typecheck-off
+TYPECHECK_ON_PBC_BINARY := build/host/php-pico-typecheck-pbc-on
+TYPECHECK_OFF_PBC_BINARY := build/host/php-pico-typecheck-pbc-off
+TYPECHECK_NO_FLOAT_BINARY := build/host/php-pico-typecheck-no-float
+TYPECHECK_INT64_BINARY := build/host/php-pico-typecheck-int64
+TYPECHECK_RP_BINARY := build/host/php-pico-typecheck-rp
+TYPECHECK_UBSAN_BINARY := build/host/php-pico-typecheck-ubsan
+TYPECHECK_ASAN_BINARY := build/host/php-pico-typecheck-asan
+TYPECHECK_CONFIG_ON_OBJECT := build/host/test_typecheck_config_on.o
+TYPECHECK_CONFIG_OFF_OBJECT := build/host/test_typecheck_config_off.o
+TYPECHECK_CONFIG_INVALID_OBJECT := build/host/test_typecheck_config_invalid.o
+TYPECHECK_CONFIG_INVALID_LOG := build/host/test_typecheck_config_invalid.log
 TEST_BINARY := build/host/test_core
 LEXER_TEST_BINARY := build/host/test_lexer
 PARSER_TEST_BINARY := build/host/test_parser
@@ -92,7 +105,7 @@ ASAN_PARSER_BINARY := build/host/test_parser_asan
 ASAN_VM_BINARY := build/host/test_vm_asan
 ASAN_LEAKS := $(if $(filter Darwin,$(shell uname -s)),0,1)
 
-.PHONY: all FORCE host host-pbc host-rp2040 rp2040 test test-unit test-compiler-off test-no-float test-no-float-ubsan test-float-format test-rp-integer-boundary test-warnings test-warnings-config test-phpt test-target test-asan test-diff bench size clean
+.PHONY: all FORCE host host-pbc host-rp2040 rp2040 test test-unit test-compiler-off test-no-float test-no-float-ubsan test-float-format test-rp-integer-boundary test-warnings test-warnings-config test-typecheck test-typecheck-config test-phpt test-target test-asan test-diff bench size clean
 
 FORCE:
 
@@ -248,6 +261,65 @@ $(WARNINGS_UBSAN_BINARY): FORCE $(COMPILER_HOST_SOURCES)
 		-fsanitize=undefined $(COMPILER_HOST_SOURCES) \
 		-fsanitize=undefined $(LDLIBS) -o $@
 
+$(TYPECHECK_ON_HOST_BINARY): FORCE $(COMPILER_HOST_SOURCES)
+	@mkdir -p $(@D)
+	$(CC) $(filter-out -DPPHP_TYPECHECK=%,$(COMPILER_CPPFLAGS)) \
+		-DPPHP_TYPECHECK=1 $(CFLAGS) $(COMPILER_HOST_SOURCES) \
+		$(LDFLAGS) $(LDLIBS) -o $@
+
+$(TYPECHECK_OFF_HOST_BINARY): FORCE $(COMPILER_HOST_SOURCES)
+	@mkdir -p $(@D)
+	$(CC) $(filter-out -DPPHP_TYPECHECK=%,$(COMPILER_CPPFLAGS)) \
+		-DPPHP_TYPECHECK=0 $(CFLAGS) $(COMPILER_HOST_SOURCES) \
+		$(LDFLAGS) $(LDLIBS) -o $@
+
+$(TYPECHECK_ON_PBC_BINARY): FORCE $(PBC_HOST_SOURCES)
+	@mkdir -p $(@D)
+	$(CC) $(filter-out -DPPHP_TYPECHECK=%,$(PBC_CPPFLAGS)) \
+		-DPPHP_TYPECHECK=1 $(CFLAGS) $(PBC_HOST_SOURCES) \
+		$(LDFLAGS) $(LDLIBS) -o $@
+
+$(TYPECHECK_OFF_PBC_BINARY): FORCE $(PBC_HOST_SOURCES)
+	@mkdir -p $(@D)
+	$(CC) $(filter-out -DPPHP_TYPECHECK=%,$(PBC_CPPFLAGS)) \
+		-DPPHP_TYPECHECK=0 $(CFLAGS) $(PBC_HOST_SOURCES) \
+		$(LDFLAGS) $(LDLIBS) -o $@
+
+$(TYPECHECK_NO_FLOAT_BINARY): FORCE $(RUNTIME_COMMON_SOURCES) $(COMPILER_SOURCES) compiler/codegen.c tools/disasm.c shell/p2sh.c shell/p2sh_device.c ports/host/main.c
+	@mkdir -p $(@D)
+	$(CC) $(filter-out -DPPHP_TYPECHECK=% -DPPHP_ENABLE_FLOAT=%,$(COMPILER_CPPFLAGS)) \
+		-DPPHP_TYPECHECK=1 -DPPHP_ENABLE_FLOAT=0 $(CFLAGS) \
+		$(RUNTIME_COMMON_SOURCES) $(COMPILER_SOURCES) compiler/codegen.c \
+		tools/disasm.c shell/p2sh.c shell/p2sh_device.c ports/host/main.c \
+		$(LDFLAGS) -o $@
+
+$(TYPECHECK_INT64_BINARY): FORCE $(COMPILER_HOST_SOURCES)
+	@mkdir -p $(@D)
+	$(CC) $(filter-out -DPPHP_TYPECHECK=%,$(COMPILER_CPPFLAGS)) \
+		-DPPHP_TYPECHECK=1 -DPPHP_INT64=1 $(CFLAGS) \
+		$(COMPILER_HOST_SOURCES) $(LDFLAGS) $(LDLIBS) -o $@
+
+$(TYPECHECK_RP_BINARY): FORCE $(COMPILER_HOST_SOURCES)
+	@mkdir -p $(@D)
+	$(CC) $(filter-out -DPPHP_TYPECHECK=%,$(COMPILER_CPPFLAGS)) \
+		-DPPHP_TYPECHECK=1 -DPPHP_INT64=0 -DPPHP_USE_DOUBLE=0 \
+		-DPPHP_DEVICE_FLOAT_FORMAT=1 $(CFLAGS) $(COMPILER_HOST_SOURCES) \
+		$(LDFLAGS) $(LDLIBS) -o $@
+
+$(TYPECHECK_UBSAN_BINARY): FORCE $(COMPILER_HOST_SOURCES)
+	@mkdir -p $(@D)
+	$(CC) $(filter-out -DPPHP_TYPECHECK=%,$(COMPILER_CPPFLAGS)) \
+		-DPPHP_TYPECHECK=1 $(CFLAGS) -O1 -g -fno-omit-frame-pointer \
+		-fsanitize=undefined $(COMPILER_HOST_SOURCES) \
+		-fsanitize=undefined $(LDLIBS) -o $@
+
+$(TYPECHECK_ASAN_BINARY): FORCE $(COMPILER_HOST_SOURCES)
+	@mkdir -p $(@D)
+	$(CC) $(filter-out -DPPHP_TYPECHECK=%,$(COMPILER_CPPFLAGS)) \
+		-DPPHP_TYPECHECK=1 $(CFLAGS) -O1 -g -fno-omit-frame-pointer \
+		-fsanitize=address,undefined $(COMPILER_HOST_SOURCES) \
+		-fsanitize=address,undefined $(LDLIBS) -o $@
+
 $(TEST_BINARY): FORCE $(TEST_SOURCES)
 	@mkdir -p $(@D)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(TEST_SOURCES) $(LDFLAGS) -o $@
@@ -266,10 +338,10 @@ $(VM_TEST_BINARY): FORCE $(VM_TEST_SOURCES)
 
 ifeq ($(PPHP_ENABLE_FLOAT),1)
 TEST_UNIT_DEPENDENCIES := $(TEST_BINARY) $(LEXER_TEST_BINARY) $(PARSER_TEST_BINARY) $(VM_TEST_BINARY) $(FLOAT_FORMAT_TEST_BINARY) $(HOST_BINARY)
-TEST_DEPENDENCIES := test-unit test-compiler-off test-no-float test-float-format test-warnings test-phpt
+TEST_DEPENDENCIES := test-unit test-compiler-off test-no-float test-float-format test-warnings test-typecheck test-phpt
 else
 TEST_UNIT_DEPENDENCIES := $(TEST_BINARY) $(LEXER_TEST_BINARY) $(PARSER_TEST_BINARY) $(HOST_BINARY)
-TEST_DEPENDENCIES := test-unit test-compiler-off test-no-float test-warnings
+TEST_DEPENDENCIES := test-unit test-compiler-off test-no-float test-warnings test-typecheck
 endif
 
 test-unit: $(TEST_UNIT_DEPENDENCIES)
@@ -324,6 +396,29 @@ test-warnings: test-warnings-config $(WARNINGS_ON_HOST_BINARY) $(WARNINGS_OFF_HO
 		$(WARNINGS_OFF_HOST_BINARY) $(WARNINGS_ON_PBC_BINARY) \
 		$(WARNINGS_OFF_PBC_BINARY) $(WARNINGS_NO_FLOAT_BINARY) \
 		$(WARNINGS_RP_BINARY) $(WARNINGS_UBSAN_BINARY)
+
+test-typecheck-config: FORCE tests/unit/test_typecheck_config.c
+	@mkdir -p build/host
+	$(CC) -Iinclude -DPPHP_TYPECHECK=1 $(CFLAGS) -c \
+		tests/unit/test_typecheck_config.c -o $(TYPECHECK_CONFIG_ON_OBJECT)
+	$(CC) -Iinclude -DPPHP_TYPECHECK=0 $(CFLAGS) -c \
+		tests/unit/test_typecheck_config.c -o $(TYPECHECK_CONFIG_OFF_OBJECT)
+	@if $(CC) -Iinclude -DPPHP_TYPECHECK=2 $(CFLAGS) -c \
+		tests/unit/test_typecheck_config.c \
+		-o $(TYPECHECK_CONFIG_INVALID_OBJECT) \
+		>$(TYPECHECK_CONFIG_INVALID_LOG) 2>&1; then \
+		echo 'PPHP_TYPECHECK=2 unexpectedly compiled' >&2; \
+		exit 1; \
+	fi
+	@grep -q 'PPHP_TYPECHECK must be 0 or 1' \
+		$(TYPECHECK_CONFIG_INVALID_LOG)
+
+test-typecheck: test-typecheck-config $(TYPECHECK_ON_HOST_BINARY) $(TYPECHECK_OFF_HOST_BINARY) $(TYPECHECK_ON_PBC_BINARY) $(TYPECHECK_OFF_PBC_BINARY) $(TYPECHECK_NO_FLOAT_BINARY) $(TYPECHECK_INT64_BINARY) $(TYPECHECK_RP_BINARY) $(TYPECHECK_UBSAN_BINARY) $(TYPECHECK_ASAN_BINARY)
+	sh tests/cli/typecheck.sh $(TYPECHECK_ON_HOST_BINARY) \
+		$(TYPECHECK_OFF_HOST_BINARY) $(TYPECHECK_ON_PBC_BINARY) \
+		$(TYPECHECK_OFF_PBC_BINARY) $(TYPECHECK_NO_FLOAT_BINARY) \
+		$(TYPECHECK_INT64_BINARY) $(TYPECHECK_RP_BINARY) \
+		$(TYPECHECK_UBSAN_BINARY) $(TYPECHECK_ASAN_BINARY)
 
 test-phpt: $(HOST_BINARY)
 	sh tools/phpt_run.sh --binary $(HOST_BINARY) tests/phpt

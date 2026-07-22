@@ -2483,6 +2483,11 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                     pphp_runtime_error(state, frame->line,
                                        "cannot define property");
                 }
+                if (state->error[0] != '\0' &&
+                    state->building_class != NULL) {
+                    pclass_destroy(state->building_class);
+                    state->building_class = NULL;
+                }
 #else
                 if (state->building_class == NULL || name == NULL ||
                     ((flags & PC_STATIC) != 0U
@@ -2725,6 +2730,7 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                                            (int)name->length, ps_data(name));
 #if PPHP_TYPECHECK
                     } else if (property->type.count != 0U &&
+                               !property->initialized &&
                                !pobject_property_written(object,
                                                          property->slot)) {
                         pphp_runtime_error(
@@ -2781,6 +2787,7 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                                            (int)name->length, ps_data(name));
 #if PPHP_TYPECHECK
                     } else if (property->type.count != 0U &&
+                               !property->initialized &&
                                !pobject_property_written(object,
                                                          property->slot)) {
                         pphp_runtime_error(
