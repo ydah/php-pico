@@ -70,6 +70,10 @@ WARNINGS_OFF_PBC_BINARY := build/host/php-pico-warnings-pbc-off
 WARNINGS_NO_FLOAT_BINARY := build/host/php-pico-warnings-no-float
 WARNINGS_RP_BINARY := build/host/php-pico-warnings-rp
 WARNINGS_UBSAN_BINARY := build/host/php-pico-warnings-ubsan
+WARNINGS_CONFIG_ON_OBJECT := build/host/test_warnings_config_on.o
+WARNINGS_CONFIG_OFF_OBJECT := build/host/test_warnings_config_off.o
+WARNINGS_CONFIG_INVALID_OBJECT := build/host/test_warnings_config_invalid.o
+WARNINGS_CONFIG_INVALID_LOG := build/host/test_warnings_config_invalid.log
 TEST_BINARY := build/host/test_core
 LEXER_TEST_BINARY := build/host/test_lexer
 PARSER_TEST_BINARY := build/host/test_parser
@@ -80,7 +84,7 @@ ASAN_PARSER_BINARY := build/host/test_parser_asan
 ASAN_VM_BINARY := build/host/test_vm_asan
 ASAN_LEAKS := $(if $(filter Darwin,$(shell uname -s)),0,1)
 
-.PHONY: all FORCE host host-pbc host-rp2040 rp2040 test test-unit test-compiler-off test-no-float test-no-float-ubsan test-float-format test-rp-integer-boundary test-warnings test-phpt test-target test-asan test-diff bench size clean
+.PHONY: all FORCE host host-pbc host-rp2040 rp2040 test test-unit test-compiler-off test-no-float test-no-float-ubsan test-float-format test-rp-integer-boundary test-warnings test-warnings-config test-phpt test-target test-asan test-diff bench size clean
 
 FORCE:
 
@@ -282,7 +286,23 @@ test-float-format: $(RP2040_HOST_BINARY) $(FLOAT_FORMAT_TEST_BINARY) test-rp-int
 test-rp-integer-boundary: $(RP2040_UBSAN_BINARY)
 	sh tests/cli/integer_float_boundary.sh $(RP2040_UBSAN_BINARY)
 
-test-warnings: $(WARNINGS_ON_HOST_BINARY) $(WARNINGS_OFF_HOST_BINARY) $(WARNINGS_ON_PBC_BINARY) $(WARNINGS_OFF_PBC_BINARY) $(WARNINGS_NO_FLOAT_BINARY) $(WARNINGS_RP_BINARY) $(WARNINGS_UBSAN_BINARY)
+test-warnings-config: FORCE tests/unit/test_warnings_config.c
+	@mkdir -p build/host
+	$(CC) -Iinclude -DPPHP_WARNINGS=1 $(CFLAGS) -c \
+		tests/unit/test_warnings_config.c -o $(WARNINGS_CONFIG_ON_OBJECT)
+	$(CC) -Iinclude -DPPHP_WARNINGS=0 $(CFLAGS) -c \
+		tests/unit/test_warnings_config.c -o $(WARNINGS_CONFIG_OFF_OBJECT)
+	@if $(CC) -Iinclude -DPPHP_WARNINGS=2 $(CFLAGS) -c \
+		tests/unit/test_warnings_config.c \
+		-o $(WARNINGS_CONFIG_INVALID_OBJECT) \
+		>$(WARNINGS_CONFIG_INVALID_LOG) 2>&1; then \
+		echo 'PPHP_WARNINGS=2 unexpectedly compiled' >&2; \
+		exit 1; \
+	fi
+	@grep -q 'PPHP_WARNINGS must be 0 or 1' \
+		$(WARNINGS_CONFIG_INVALID_LOG)
+
+test-warnings: test-warnings-config $(WARNINGS_ON_HOST_BINARY) $(WARNINGS_OFF_HOST_BINARY) $(WARNINGS_ON_PBC_BINARY) $(WARNINGS_OFF_PBC_BINARY) $(WARNINGS_NO_FLOAT_BINARY) $(WARNINGS_RP_BINARY) $(WARNINGS_UBSAN_BINARY)
 	sh tests/cli/warnings.sh $(WARNINGS_ON_HOST_BINARY) \
 		$(WARNINGS_OFF_HOST_BINARY) $(WARNINGS_ON_PBC_BINARY) \
 		$(WARNINGS_OFF_PBC_BINARY) $(WARNINGS_NO_FLOAT_BINARY) \

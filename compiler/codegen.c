@@ -1605,7 +1605,11 @@ static void compile_quiet_expression(generator *gen, const pc_ast *node) {
     if (node->kind == AST_MEMBER &&
         (node->as.member.op == T_ARROW ||
          node->as.member.op == T_NULLSAFE_ARROW)) {
+        size_t nullsafe_end = 0U;
         compile_quiet_expression(gen, node->as.member.base);
+        if (node->as.member.op == T_NULLSAFE_ARROW) {
+            nullsafe_end = emit_jump(gen, OP_JMP_IFNULL_KEEP, node->line);
+        }
         if (node->as.member.dynamic_name != NULL) {
             compile_expression(gen, node->as.member.dynamic_name);
             emit_byte(gen, OP_PROP_GET_DYNAMIC_QUIET, node->line);
@@ -1613,6 +1617,10 @@ static void compile_quiet_expression(generator *gen, const pc_ast *node) {
             uint16_t name = name_constant(gen, node->as.member.name);
             emit_byte(gen, OP_PROP_GET_QUIET, node->line);
             emit_u16(gen, name, node->line);
+        }
+        if (node->as.member.op == T_NULLSAFE_ARROW) {
+            patch_jump(gen, nullsafe_end, gen->proto->code_length,
+                       node->line);
         }
         return;
     }

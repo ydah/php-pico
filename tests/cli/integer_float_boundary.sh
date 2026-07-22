@@ -38,7 +38,8 @@ fi
 
 expected_exact='int(16777217)
 int(16777217)
-16777217:int(2147483647)
+16777217:Warning: A non-numeric value encountered on line 1
+int(2147483647)
 int(-16777217)
 int(16777217)
 int(16777217)

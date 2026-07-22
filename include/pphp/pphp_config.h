@@ -55,6 +55,10 @@
 #define PPHP_WARNINGS 1
 #endif
 
+#if PPHP_WARNINGS != 0 && PPHP_WARNINGS != 1
+#error "PPHP_WARNINGS must be 0 or 1"
+#endif
+
 #ifndef PPHP_STACK_SLOTS
 #define PPHP_STACK_SLOTS 384
 #endif

@@ -90,9 +90,22 @@ defaults();
 defaults(null);
 function static_null() { static $value; echo (isset($value) ? 1 : 0), ":", ($value ?? 3), "\n"; }
 static_null();
-static_null();'
+static_null();
+class QuietProbe { public $value = 5; public $child; }
+$quietEffects = 0;
+function quiet_name() { global $quietEffects; $quietEffects++; return "value"; }
+$nullBase = null;
+echo (isset($nullBase?->{quiet_name()}) ? 1 : 0), ":", (empty($nullBase?->{quiet_name()}) ? 1 : 0), ":", ($nullBase?->{quiet_name()} ?? 7), ":", ($nullBase?->value ?? 11), ":", $quietEffects, ":";
+$box = new QuietProbe();
+echo (isset($box?->{quiet_name()}) ? 1 : 0), ":", (empty($box?->{quiet_name()}) ? 1 : 0), ":", ($box?->{quiet_name()} ?? 0), ":", ($box?->value ?? 0), ":", $quietEffects, ":";
+$outer = new QuietProbe();
+$outer->child = $box;
+echo ($outer?->child?->{quiet_name()} ?? 0), ":", $quietEffects, ":";
+$outer->child = null;
+echo ($outer?->child?->{quiet_name()} ?? 9), ":", $quietEffects, "\n";'
 quiet_expected='0:1:7:8:0:6:0:5:0:5:0:3
-0:3'
+0:3
+0:1:7:11:0:1:0:5:5:3:5:4:9:4'
 assert_output "$warnings_on" "$quiet_source" "$quiet_expected"
 assert_output "$warnings_off" "$quiet_source" "$quiet_expected"
 
@@ -133,6 +146,13 @@ $pbcMissing = null;
 unset($pbcMissing);
 echo $pbcMissing, "again\n";
 echo "7tail" + 2, "\n";
+class PbcQuietProbe { public $value = 6; }
+$pbcEffects = 0;
+function pbc_quiet_name() { global $pbcEffects; $pbcEffects++; return "value"; }
+$pbcNull = null;
+echo (isset($pbcNull?->{pbc_quiet_name()}) ? 1 : 0), ':', (empty($pbcNull?->{pbc_quiet_name()}) ? 1 : 0), ':', ($pbcNull?->{pbc_quiet_name()} ?? 7), ':', $pbcEffects, "\n";
+$pbcBox = new PbcQuietProbe();
+echo (isset($pbcBox?->{pbc_quiet_name()}) ? 1 : 0), ':', (empty($pbcBox?->{pbc_quiet_name()}) ? 1 : 0), ':', ($pbcBox?->{pbc_quiet_name()} ?? 0), ':', $pbcEffects, "\n";
 PHP
 "$warnings_on" -c "$temporary/warnings.php" -o "$temporary/warnings.pbc"
 pbc_expected='0:4
@@ -141,11 +161,15 @@ missing
 Warning: Undefined variable $pbcMissing on line 6
 again
 Warning: A non-numeric value encountered on line 7
-9'
+9
+0:1:7:0
+1:0:6:3'
 pbc_without='0:4
 missing
 again
-9'
+9
+0:1:7:0
+1:0:6:3'
 pbc_actual=$($pbc_on "$temporary/warnings.pbc")
 test "$pbc_actual" = "$pbc_expected" ||
     fail 'compiler-off PBC runtime did not preserve warning behavior'
