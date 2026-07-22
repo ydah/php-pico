@@ -30,10 +30,10 @@ enum {
 
 #if PPHP_ENABLE_COMPILER
 typedef char pphp_include_modes_match_pbc_v2[
-    T_INCLUDE == PPHP_PBC_INCLUDE &&
-    T_INCLUDE_ONCE == PPHP_PBC_INCLUDE_ONCE &&
-    T_REQUIRE == PPHP_PBC_REQUIRE &&
-    T_REQUIRE_ONCE == PPHP_PBC_REQUIRE_ONCE ? 1 : -1];
+    (int)T_INCLUDE == (int)PPHP_PBC_INCLUDE &&
+    (int)T_INCLUDE_ONCE == (int)PPHP_PBC_INCLUDE_ONCE &&
+    (int)T_REQUIRE == (int)PPHP_PBC_REQUIRE &&
+    (int)T_REQUIRE_ONCE == (int)PPHP_PBC_REQUIRE_ONCE ? 1 : -1];
 #endif
 
 static void discard_output(void *context, const char *bytes, size_t length) {

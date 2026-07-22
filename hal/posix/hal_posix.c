@@ -62,7 +62,7 @@ int hal_gpio_init(uint8_t pin, uint8_t mode, uint8_t pull) {
 }
 int hal_gpio_write(uint8_t pin, uint8_t level) {
     if (!gpio_pins[pin].initialized) return PPHP_HAL_INVALID;
-    gpio_pins[pin].level = level == 0U ? 0U : 1U;
+    gpio_pins[pin].level = (uint8_t)(level != 0U);
     return PPHP_HAL_OK;
 }
 int hal_gpio_read(uint8_t pin) {
