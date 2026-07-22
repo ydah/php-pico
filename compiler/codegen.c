@@ -1615,6 +1615,15 @@ static int access_chain_contains_nullsafe(const pc_ast *node) {
     return 0;
 }
 
+static int access_base_can_inherit_quiet(const pc_ast *base,
+                                         pc_token_type op) {
+    if (access_chain_contains_nullsafe(base)) return 1;
+    /* Coalesce quiets a directly-nullsafe variable, but not a normal prefix
+     * that must be evaluated before reaching the nullsafe boundary. */
+    return op == T_NULLSAFE_ARROW && base != NULL &&
+           base->kind == AST_VARIABLE;
+}
+
 static int add_access_chain_jump(generator *gen, access_chain_jumps *jumps,
                                  uint32_t line) {
     if (jumps->count >= PPHP_PARSE_DEPTH_MAX) {
@@ -1652,8 +1661,9 @@ static void compile_access_chain_part(generator *gen, const pc_ast *node,
             fail(gen, node->line, "a call may have at most 31 arguments");
             return;
         }
-        if (member->as.member.op == T_ARROW &&
-            !access_chain_contains_nullsafe(member->as.member.base)) {
+        if (jumps->quiet &&
+            !access_base_can_inherit_quiet(member->as.member.base,
+                                           member->as.member.op)) {
             jumps->quiet = 0;
         }
         compile_access_chain_part(gen, member->as.member.base, jumps);
@@ -1707,7 +1717,14 @@ static void compile_access_chain_part(generator *gen, const pc_ast *node,
     if (node->kind == AST_MEMBER &&
         (node->as.member.op == T_ARROW ||
          node->as.member.op == T_NULLSAFE_ARROW)) {
+        int saved_quiet = jumps->quiet;
+        if (node->as.member.op == T_NULLSAFE_ARROW && jumps->quiet &&
+            !access_base_can_inherit_quiet(node->as.member.base,
+                                           node->as.member.op)) {
+            jumps->quiet = 0;
+        }
         compile_access_chain_part(gen, node->as.member.base, jumps);
+        jumps->quiet = saved_quiet;
         if (node->as.member.op == T_NULLSAFE_ARROW) {
             if (!add_access_chain_jump(gen, jumps, node->line)) return;
         }

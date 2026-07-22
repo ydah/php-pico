@@ -31,19 +31,20 @@ assert_output() {
     }
 }
 
-assert_method_failure() {
+assert_runtime_failure() {
     binary=$1
     source=$2
     expected_stdout=$3
-    label=$4
+    expected_error=$4
+    label=$5
     if "$binary" -r "$source" >"$temporary/$label.out" \
             2>"$temporary/$label.err"; then
         fail "$label unexpectedly succeeded"
     fi
     test "$(cat "$temporary/$label.out")" = "$expected_stdout" ||
         fail "$label produced unexpected standard output"
-    grep -q 'method call on non-object' "$temporary/$label.err" ||
-        fail "$label changed the existing method-call error"
+    grep -q "$expected_error" "$temporary/$label.err" ||
+        fail "$label changed the existing runtime error"
 }
 
 undefined_source='echo "begin\n";
@@ -166,14 +167,20 @@ call_expected='3:2:12:5:7:5:8:5'
 assert_output "$warnings_on" "$call_source" "$call_expected"
 assert_output "$warnings_off" "$call_source" "$call_expected"
 
-assert_method_failure "$warnings_on" '$undefinedCall->foo() ?? 7;' \
+assert_runtime_failure "$warnings_on" '$undefinedCall->foo() ?? 7;' \
     'Warning: Undefined variable $undefinedCall on line 1' \
+    'method call on non-object' \
     'undefined-call-on'
-assert_method_failure "$warnings_off" '$undefinedCall->foo() ?? 7;' '' \
+assert_runtime_failure "$warnings_off" '$undefinedCall->foo() ?? 7;' '' \
+    'method call on non-object' \
     'undefined-call-off'
-assert_method_failure "$warnings_on" '$definedNullCall = null; $definedNullCall->foo();' '' \
+assert_runtime_failure "$warnings_on" \
+    '$definedNullCall = null; $definedNullCall->foo();' '' \
+    'method call on non-object' \
     'defined-null-call-on'
-assert_method_failure "$warnings_off" '$definedNullCall = null; $definedNullCall->foo();' '' \
+assert_runtime_failure "$warnings_off" \
+    '$definedNullCall = null; $definedNullCall->foo();' '' \
+    'method call on non-object' \
     'defined-null-call-off'
 assert_output "$warnings_on" 'echo $undefinedNullsafe?->foo() ?? 7, "\n";' '7'
 assert_output "$warnings_off" 'echo $undefinedNullsafe?->foo() ?? 7, "\n";' '7'
@@ -181,6 +188,33 @@ assert_output "$warnings_on" \
     'echo $undefinedNested?->child->foo() ?? 9, "\n";' '9'
 assert_output "$warnings_off" \
     'echo $undefinedNested?->child->foo() ?? 9, "\n";' '9'
+
+assert_runtime_failure "$warnings_on" \
+    '$undefinedPrefix->child?->foo() ?? 7;' \
+    'Warning: Undefined variable $undefinedPrefix on line 1' \
+    'property access on non-object' 'undefined-prefix-property-on'
+assert_runtime_failure "$warnings_off" \
+    '$undefinedPrefix->child?->foo() ?? 7;' '' \
+    'property access on non-object' 'undefined-prefix-property-off'
+prefix_index_source='echo $undefinedPrefixIndex["key"]?->foo() ?? 7, "\n";'
+prefix_index_on='Warning: Undefined variable $undefinedPrefixIndex on line 1
+7'
+assert_output "$warnings_on" "$prefix_index_source" "$prefix_index_on"
+assert_output "$warnings_off" "$prefix_index_source" '7'
+
+prefix_named_source='function prefix_named_effect($value) { echo "effect"; return $value; }
+$undefinedNamedPrefix->child?->foo(prefix_named_effect(1)) ?? 7;'
+assert_runtime_failure "$warnings_on" "$prefix_named_source" \
+    'Warning: Undefined variable $undefinedNamedPrefix on line 2' \
+    'property access on non-object' 'undefined-prefix-named-on'
+assert_runtime_failure "$warnings_off" "$prefix_named_source" '' \
+    'property access on non-object' 'undefined-prefix-named-off'
+prefix_dynamic_source='function prefix_dynamic_effect($value) { echo "effect"; return $value; }
+echo $undefinedDynamicPrefix["key"]?->{prefix_dynamic_effect("foo")}(...[prefix_dynamic_effect(1)]) ?? 8, "\n";'
+prefix_dynamic_on='Warning: Undefined variable $undefinedDynamicPrefix on line 2
+8'
+assert_output "$warnings_on" "$prefix_dynamic_source" "$prefix_dynamic_on"
+assert_output "$warnings_off" "$prefix_dynamic_source" '8'
 
 numeric_source='echo "12tail" + 3, ":", -"2x", ":", +"4y", ":", "1a" + "2b", "\n";'
 numeric_on='Warning: A non-numeric value encountered on line 1
@@ -277,17 +311,63 @@ test "$pbc_off_actual" = "$pbc_without" ||
 
 cat >"$temporary/pbc-call-quiet.php" <<'PHP'
 <?php
+function pbc_quiet_call_effect($value) { echo "effect"; return $value; }
 echo $pbcUndefinedNullsafe?->foo() ?? 7, ':';
 $pbcDefinedNullsafe = null;
 echo $pbcDefinedNullsafe?->foo() ?? 8, ':';
-echo $pbcUndefinedNested?->child->foo() ?? 9, "\n";
+echo $pbcUndefinedNested?->child->foo() ?? 9, ':';
+echo $pbcUndefinedDynamicNested?->child->{pbc_quiet_call_effect("foo")}(...[pbc_quiet_call_effect(1)]) ?? 10, "\n";
 PHP
 "$warnings_on" -c "$temporary/pbc-call-quiet.php" \
     -o "$temporary/pbc-call-quiet.pbc"
-test "$($pbc_on "$temporary/pbc-call-quiet.pbc")" = '7:8:9' ||
+test "$($pbc_on "$temporary/pbc-call-quiet.pbc")" = '7:8:9:10' ||
     fail 'warnings-on PBC runtime did not preserve quiet nullsafe calls'
-test "$($pbc_off "$temporary/pbc-call-quiet.pbc")" = '7:8:9' ||
+test "$($pbc_off "$temporary/pbc-call-quiet.pbc")" = '7:8:9:10' ||
     fail 'warnings-off PBC runtime did not preserve quiet nullsafe calls'
+
+cat >"$temporary/pbc-call-property-prefix.php" <<'PHP'
+<?php
+function pbc_property_prefix_effect($value) { echo "effect"; return $value; }
+$pbcUndefinedPropertyPrefix->child?->foo(pbc_property_prefix_effect(1)) ?? 7;
+PHP
+"$warnings_on" -c "$temporary/pbc-call-property-prefix.php" \
+    -o "$temporary/pbc-call-property-prefix.pbc"
+if "$pbc_on" "$temporary/pbc-call-property-prefix.pbc" \
+        >"$temporary/pbc-call-property-prefix-on.out" \
+        2>"$temporary/pbc-call-property-prefix-on.err"; then
+    fail 'warnings-on property-prefix PBC call unexpectedly succeeded'
+fi
+test "$(cat "$temporary/pbc-call-property-prefix-on.out")" = \
+    'Warning: Undefined variable $pbcUndefinedPropertyPrefix on line 3' ||
+    fail 'warnings-on property-prefix PBC call lost its warning'
+grep -q 'property access on non-object' \
+    "$temporary/pbc-call-property-prefix-on.err" ||
+    fail 'warnings-on property-prefix PBC call changed its error'
+if "$pbc_off" "$temporary/pbc-call-property-prefix.pbc" \
+        >"$temporary/pbc-call-property-prefix-off.out" \
+        2>"$temporary/pbc-call-property-prefix-off.err"; then
+    fail 'warnings-off property-prefix PBC call unexpectedly succeeded'
+fi
+test ! -s "$temporary/pbc-call-property-prefix-off.out" ||
+    fail 'warnings-off property-prefix PBC call emitted output'
+grep -q 'property access on non-object' \
+    "$temporary/pbc-call-property-prefix-off.err" ||
+    fail 'warnings-off property-prefix PBC call changed its error'
+
+cat >"$temporary/pbc-call-index-prefix.php" <<'PHP'
+<?php
+function pbc_index_prefix_effect($value) { echo "effect"; return $value; }
+echo $pbcUndefinedIndexPrefix["key"]?->{pbc_index_prefix_effect("foo")}(...[pbc_index_prefix_effect(1)]) ?? 11, "\n";
+PHP
+"$warnings_on" -c "$temporary/pbc-call-index-prefix.php" \
+    -o "$temporary/pbc-call-index-prefix.pbc"
+pbc_index_prefix_on='Warning: Undefined variable $pbcUndefinedIndexPrefix on line 3
+11'
+test "$($pbc_on "$temporary/pbc-call-index-prefix.pbc")" = \
+    "$pbc_index_prefix_on" ||
+    fail 'warnings-on index-prefix PBC call lost normal prefix behavior'
+test "$($pbc_off "$temporary/pbc-call-index-prefix.pbc")" = '11' ||
+    fail 'warnings-off index-prefix PBC call changed existing behavior'
 
 cat >"$temporary/pbc-call-undefined.php" <<'PHP'
 <?php
