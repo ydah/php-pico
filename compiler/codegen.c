@@ -1593,6 +1593,28 @@ typedef struct access_chain_jumps {
     int quiet;
 } access_chain_jumps;
 
+static int access_chain_contains_nullsafe(const pc_ast *node) {
+    if (node == NULL) return 0;
+    if (node->kind == AST_MEMBER &&
+        (node->as.member.op == T_ARROW ||
+         node->as.member.op == T_NULLSAFE_ARROW)) {
+        return node->as.member.op == T_NULLSAFE_ARROW ||
+               access_chain_contains_nullsafe(node->as.member.base);
+    }
+    if (node->kind == AST_INDEX) {
+        return access_chain_contains_nullsafe(node->as.index.base);
+    }
+    if (node->kind == AST_CALL && node->as.call.callee != NULL &&
+        node->as.call.callee->kind == AST_MEMBER &&
+        (node->as.call.callee->as.member.op == T_ARROW ||
+         node->as.call.callee->as.member.op == T_NULLSAFE_ARROW)) {
+        return node->as.call.callee->as.member.op == T_NULLSAFE_ARROW ||
+               access_chain_contains_nullsafe(
+                   node->as.call.callee->as.member.base);
+    }
+    return 0;
+}
+
 static int add_access_chain_jump(generator *gen, access_chain_jumps *jumps,
                                  uint32_t line) {
     if (jumps->count >= PPHP_PARSE_DEPTH_MAX) {
@@ -1625,11 +1647,17 @@ static void compile_access_chain_part(generator *gen, const pc_ast *node,
         const pc_ast *argument = node->as.call.arguments;
         uint16_t method_name;
         int has_spread = argument_list_has_spread(argument);
+        int saved_quiet = jumps->quiet;
         if (node->as.call.count > 31U) {
             fail(gen, node->line, "a call may have at most 31 arguments");
             return;
         }
+        if (member->as.member.op == T_ARROW &&
+            !access_chain_contains_nullsafe(member->as.member.base)) {
+            jumps->quiet = 0;
+        }
         compile_access_chain_part(gen, member->as.member.base, jumps);
+        jumps->quiet = saved_quiet;
         if (member->as.member.op == T_NULLSAFE_ARROW &&
             !add_access_chain_jump(gen, jumps, node->line)) {
             return;

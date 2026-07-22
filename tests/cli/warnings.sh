@@ -31,6 +31,21 @@ assert_output() {
     }
 }
 
+assert_method_failure() {
+    binary=$1
+    source=$2
+    expected_stdout=$3
+    label=$4
+    if "$binary" -r "$source" >"$temporary/$label.out" \
+            2>"$temporary/$label.err"; then
+        fail "$label unexpectedly succeeded"
+    fi
+    test "$(cat "$temporary/$label.out")" = "$expected_stdout" ||
+        fail "$label produced unexpected standard output"
+    grep -q 'method call on non-object' "$temporary/$label.err" ||
+        fail "$label changed the existing method-call error"
+}
+
 undefined_source='echo "begin\n";
 echo $missing;
 $missing = null;
@@ -135,6 +150,38 @@ chain_expected='0:1:7:0:1:7:0:1:0:1:0:1:3:0:6:5:9:5:12:5:15:8:16'
 assert_output "$warnings_on" "$chain_source" "$chain_expected"
 assert_output "$warnings_off" "$chain_source" "$chain_expected"
 
+call_source='class WarningCallProbe {
+public function named($first, $second) { return $first + $second; }
+public function dynamic($first, $second) { return $first * $second; }
+}
+$callEffects = 0;
+function call_effect($value) { global $callEffects; $callEffects++; return $value; }
+$callProbe = new WarningCallProbe();
+echo ($callProbe->named(call_effect(1), call_effect(2)) ?? 7), ":", $callEffects, ":";
+echo ($callProbe->{call_effect("dynamic")}(...[call_effect(3), call_effect(4)]) ?? 7), ":", $callEffects, ":";
+$nullCallProbe = null;
+echo ($nullCallProbe?->named(call_effect(9), call_effect(10)) ?? 7), ":", $callEffects, ":";
+echo ($nullCallProbe?->{call_effect("dynamic")}(...[call_effect(11), call_effect(12)]) ?? 8), ":", $callEffects, "\n";'
+call_expected='3:2:12:5:7:5:8:5'
+assert_output "$warnings_on" "$call_source" "$call_expected"
+assert_output "$warnings_off" "$call_source" "$call_expected"
+
+assert_method_failure "$warnings_on" '$undefinedCall->foo() ?? 7;' \
+    'Warning: Undefined variable $undefinedCall on line 1' \
+    'undefined-call-on'
+assert_method_failure "$warnings_off" '$undefinedCall->foo() ?? 7;' '' \
+    'undefined-call-off'
+assert_method_failure "$warnings_on" '$definedNullCall = null; $definedNullCall->foo();' '' \
+    'defined-null-call-on'
+assert_method_failure "$warnings_off" '$definedNullCall = null; $definedNullCall->foo();' '' \
+    'defined-null-call-off'
+assert_output "$warnings_on" 'echo $undefinedNullsafe?->foo() ?? 7, "\n";' '7'
+assert_output "$warnings_off" 'echo $undefinedNullsafe?->foo() ?? 7, "\n";' '7'
+assert_output "$warnings_on" \
+    'echo $undefinedNested?->child->foo() ?? 9, "\n";' '9'
+assert_output "$warnings_off" \
+    'echo $undefinedNested?->child->foo() ?? 9, "\n";' '9'
+
 numeric_source='echo "12tail" + 3, ":", -"2x", ":", +"4y", ":", "1a" + "2b", "\n";'
 numeric_on='Warning: A non-numeric value encountered on line 1
 Warning: A non-numeric value encountered on line 1
@@ -227,6 +274,68 @@ grep -q 'UNSET_LOCAL' "$temporary/warnings.disasm" ||
 pbc_off_actual=$($pbc_off "$temporary/warnings.pbc")
 test "$pbc_off_actual" = "$pbc_without" ||
     fail 'warnings-off compiler-off PBC runtime changed semantics'
+
+cat >"$temporary/pbc-call-quiet.php" <<'PHP'
+<?php
+echo $pbcUndefinedNullsafe?->foo() ?? 7, ':';
+$pbcDefinedNullsafe = null;
+echo $pbcDefinedNullsafe?->foo() ?? 8, ':';
+echo $pbcUndefinedNested?->child->foo() ?? 9, "\n";
+PHP
+"$warnings_on" -c "$temporary/pbc-call-quiet.php" \
+    -o "$temporary/pbc-call-quiet.pbc"
+test "$($pbc_on "$temporary/pbc-call-quiet.pbc")" = '7:8:9' ||
+    fail 'warnings-on PBC runtime did not preserve quiet nullsafe calls'
+test "$($pbc_off "$temporary/pbc-call-quiet.pbc")" = '7:8:9' ||
+    fail 'warnings-off PBC runtime did not preserve quiet nullsafe calls'
+
+cat >"$temporary/pbc-call-undefined.php" <<'PHP'
+<?php
+$pbcUndefinedCall->foo() ?? 7;
+PHP
+"$warnings_on" -c "$temporary/pbc-call-undefined.php" \
+    -o "$temporary/pbc-call-undefined.pbc"
+if "$pbc_on" "$temporary/pbc-call-undefined.pbc" \
+        >"$temporary/pbc-call-undefined-on.out" \
+        2>"$temporary/pbc-call-undefined-on.err"; then
+    fail 'warnings-on undefined PBC method call unexpectedly succeeded'
+fi
+test "$(cat "$temporary/pbc-call-undefined-on.out")" = \
+    'Warning: Undefined variable $pbcUndefinedCall on line 2' ||
+    fail 'warnings-on undefined PBC method call lost its warning'
+grep -q 'method call on non-object' \
+    "$temporary/pbc-call-undefined-on.err" ||
+    fail 'warnings-on undefined PBC method call changed its error'
+if "$pbc_off" "$temporary/pbc-call-undefined.pbc" \
+        >"$temporary/pbc-call-undefined-off.out" \
+        2>"$temporary/pbc-call-undefined-off.err"; then
+    fail 'warnings-off undefined PBC method call unexpectedly succeeded'
+fi
+test ! -s "$temporary/pbc-call-undefined-off.out" ||
+    fail 'warnings-off undefined PBC method call emitted a warning'
+grep -q 'method call on non-object' \
+    "$temporary/pbc-call-undefined-off.err" ||
+    fail 'warnings-off undefined PBC method call changed its error'
+
+cat >"$temporary/pbc-call-defined-null.php" <<'PHP'
+<?php
+$pbcDefinedNullCall = null;
+$pbcDefinedNullCall->foo();
+PHP
+"$warnings_on" -c "$temporary/pbc-call-defined-null.php" \
+    -o "$temporary/pbc-call-defined-null.pbc"
+for binary in "$pbc_on" "$pbc_off"; do
+    if "$binary" "$temporary/pbc-call-defined-null.pbc" \
+            >"$temporary/pbc-call-defined-null.out" \
+            2>"$temporary/pbc-call-defined-null.err"; then
+        fail 'defined-null PBC method call unexpectedly succeeded'
+    fi
+    test ! -s "$temporary/pbc-call-defined-null.out" ||
+        fail 'defined-null PBC method call emitted a warning'
+    grep -q 'method call on non-object' \
+        "$temporary/pbc-call-defined-null.err" ||
+        fail 'defined-null PBC method call changed its error'
+done
 
 matrix_source='echo $matrixMissing, "m:"; echo "8tail" + 1, "\n";'
 matrix_expected='Warning: Undefined variable $matrixMissing on line 1
