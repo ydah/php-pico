@@ -33,6 +33,7 @@ set(PPHP_SOURCES
   ${PPHP_ROOT}/src/api.c
   ${PPHP_ROOT}/src/exception.c
   ${PPHP_ROOT}/src/gc.c
+  ${PPHP_ROOT}/src/float_format.c
   ${PPHP_ROOT}/src/value_ops.c
   ${PPHP_ROOT}/src/pbc.c
   ${PPHP_ROOT}/src/state.c
@@ -112,7 +113,7 @@ target_link_libraries(php-pico
 )
 pico_minimize_runtime(php-pico INCLUDE
   DEFAULT_ALARM_POOL
-  PRINTF PRINTF_MINIMAL PRINTF_FLOAT PRINTF_EXPONENTIAL PRINTF_LONG_LONG
+  PRINTF PRINTF_MINIMAL PRINTF_LONG_LONG
   FLOAT DOUBLE
 )
 pico_enable_stdio_usb(php-pico 1)

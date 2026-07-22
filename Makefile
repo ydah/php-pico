@@ -16,7 +16,7 @@ LDLIBS := -lm
 
 CORE_SOURCES := src/alloc.c src/value.c src/pstring.c src/symbol.c src/parray.c src/resource.c src/pclass.c src/closure.c
 COMPILER_SOURCES := compiler/lexer.c compiler/ast.c compiler/parser.c
-RUNTIME_SOURCES := $(CORE_SOURCES) src/api.c src/exception.c src/gc.c src/value_ops.c src/pbc.c src/state.c src/vm.c stdlib/builtins.c stdlib/strings.c stdlib/arrays.c stdlib/formatting.c stdlib/json.c stdlib/system.c stdlib/files.c pgems/pgems.c fs/fs_posix.c hal/posix/hal_posix.c
+RUNTIME_SOURCES := $(CORE_SOURCES) src/api.c src/exception.c src/gc.c src/float_format.c src/value_ops.c src/pbc.c src/state.c src/vm.c stdlib/builtins.c stdlib/strings.c stdlib/arrays.c stdlib/formatting.c stdlib/json.c stdlib/system.c stdlib/files.c pgems/pgems.c fs/fs_posix.c hal/posix/hal_posix.c
 COMPILER_HOST_SOURCES := $(RUNTIME_SOURCES) $(COMPILER_SOURCES) compiler/codegen.c tools/disasm.c shell/p2sh.c shell/p2sh_device.c ports/host/main.c
 PBC_HOST_SOURCES := $(RUNTIME_SOURCES) tools/disasm.c ports/host/main.c
 ifeq ($(PPHP_ENABLE_COMPILER),1)
@@ -35,6 +35,7 @@ CONFIGURED_PBC_HOST_BINARY := build/host/php-pico-config-off
 COMPILER_OFF_TEST_BINARY := build/host/test_compiler_off
 COMPILER_OFF_DEVICE_OBJECT := build/host/p2sh_device_compiler_off.o
 RP2040_HOST_BINARY := build/host/php-pico-rp2040
+FLOAT_FORMAT_TEST_BINARY := build/host/test_float_format
 TEST_BINARY := build/host/test_core
 LEXER_TEST_BINARY := build/host/test_lexer
 PARSER_TEST_BINARY := build/host/test_parser
@@ -45,7 +46,7 @@ ASAN_PARSER_BINARY := build/host/test_parser_asan
 ASAN_VM_BINARY := build/host/test_vm_asan
 ASAN_LEAKS := $(if $(filter Darwin,$(shell uname -s)),0,1)
 
-.PHONY: all FORCE host host-pbc host-rp2040 rp2040 test test-unit test-compiler-off test-phpt test-target test-asan test-diff bench size clean
+.PHONY: all FORCE host host-pbc host-rp2040 rp2040 test test-unit test-compiler-off test-float-format test-phpt test-target test-asan test-diff bench size clean
 
 FORCE:
 
@@ -86,8 +87,14 @@ $(COMPILER_OFF_DEVICE_OBJECT): shell/p2sh_device.c
 
 $(RP2040_HOST_BINARY): $(HOST_SOURCES)
 	@mkdir -p $(@D)
-	$(CC) $(CPPFLAGS) -DPPHP_INT64=0 -DPPHP_USE_DOUBLE=0 $(CFLAGS) \
+	$(CC) $(CPPFLAGS) -DPPHP_INT64=0 -DPPHP_USE_DOUBLE=0 \
+		-DPPHP_DEVICE_FLOAT_FORMAT=1 $(CFLAGS) \
 		$(HOST_SOURCES) $(LDFLAGS) $(LDLIBS) -o $@
+
+$(FLOAT_FORMAT_TEST_BINARY): src/float_format.c tests/unit/test_float_format.c
+	@mkdir -p $(@D)
+	$(CC) $(BASE_CPPFLAGS) -DPPHP_INT64=0 -DPPHP_USE_DOUBLE=0 \
+		-DPPHP_DEVICE_FLOAT_FORMAT=1 $(CFLAGS) $^ $(LDFLAGS) $(LDLIBS) -o $@
 
 $(TEST_BINARY): $(TEST_SOURCES)
 	@mkdir -p $(@D)
@@ -105,17 +112,22 @@ $(VM_TEST_BINARY): $(VM_TEST_SOURCES)
 	@mkdir -p $(@D)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(VM_TEST_SOURCES) $(LDFLAGS) $(LDLIBS) -o $@
 
-test-unit: $(TEST_BINARY) $(LEXER_TEST_BINARY) $(PARSER_TEST_BINARY) $(VM_TEST_BINARY) $(HOST_BINARY)
+test-unit: $(TEST_BINARY) $(LEXER_TEST_BINARY) $(PARSER_TEST_BINARY) $(VM_TEST_BINARY) $(FLOAT_FORMAT_TEST_BINARY) $(HOST_BINARY)
 	$(TEST_BINARY)
 	$(LEXER_TEST_BINARY)
 	$(PARSER_TEST_BINARY)
 	$(VM_TEST_BINARY)
+	$(FLOAT_FORMAT_TEST_BINARY)
 	$(HOST_BINARY) --version
 	sh tests/cli/smoke.sh $(HOST_BINARY)
 
 test-compiler-off: $(HOST_BINARY) $(CONFIGURED_PBC_HOST_BINARY) $(COMPILER_OFF_TEST_BINARY) $(COMPILER_OFF_DEVICE_OBJECT)
 	$(COMPILER_OFF_TEST_BINARY)
 	sh tests/cli/compiler_off.sh $(HOST_BINARY) $(CONFIGURED_PBC_HOST_BINARY)
+
+test-float-format: $(RP2040_HOST_BINARY) $(FLOAT_FORMAT_TEST_BINARY)
+	$(FLOAT_FORMAT_TEST_BINARY)
+	sh tests/cli/float_format_device.sh $(RP2040_HOST_BINARY)
 
 test-phpt: $(HOST_BINARY)
 	sh tools/phpt_run.sh --binary $(HOST_BINARY) tests/phpt
@@ -124,7 +136,7 @@ test-target:
 	@test -n "$(PORT)" || { echo "usage: make test-target PORT=/dev/ttyACM0"; exit 2; }
 	sh tools/phpt_run.sh --target=serial --port "$(PORT)" tests/phpt
 
-test: test-unit test-compiler-off test-phpt
+test: test-unit test-compiler-off test-float-format test-phpt
 
 test-asan:
 	@mkdir -p $(dir $(ASAN_BINARY))

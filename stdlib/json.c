@@ -1,5 +1,6 @@
 #include "json.h"
 
+#include "float_format.h"
 #include "parray.h"
 #include "pclass.h"
 #include "value_ops.h"
@@ -202,9 +203,8 @@ static int encode_value(json_buffer *buffer, pvalue value, int pretty,
             return length >= 0 && append(buffer, number, (size_t)length);
         case PT_FLOAT:
             if (!isfinite((double)value.as.f)) return append(buffer, "null", 4U);
-            length = snprintf(number, sizeof(number),
-                              PPHP_USE_DOUBLE ? "%.17g" : "%.9g",
-                              (double)value.as.f);
+            length = pphp_format_float(number, sizeof(number), value.as.f,
+                                       'g', PPHP_USE_DOUBLE ? 17 : 9);
             return length >= 0 && append(buffer, number, (size_t)length);
         case PT_STRING: {
             const pstring *string = (const pstring *)value.as.gc;

@@ -1,5 +1,6 @@
 #include "value_ops.h"
 
+#include "float_format.h"
 #include "pstring.h"
 #include "parray.h"
 #include "pclass.h"
@@ -137,7 +138,8 @@ pstring *pv_to_string(pvalue value) {
             length = snprintf(buffer, sizeof(buffer), "%lld", (long long)value.as.i);
             return length < 0 ? NULL : ps_new(buffer, (size_t)length);
         case PT_FLOAT:
-            length = snprintf(buffer, sizeof(buffer), "%.14g", (double)value.as.f);
+            length = pphp_format_float(buffer, sizeof(buffer), value.as.f,
+                                       'g', 14);
             return length < 0 ? NULL : ps_new(buffer, (size_t)length);
         case PT_STRING:
             return ps_new(((const pstring *)value.as.gc)->data,

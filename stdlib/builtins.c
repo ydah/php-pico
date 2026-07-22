@@ -1,5 +1,6 @@
 #include "builtins.h"
 
+#include "float_format.h"
 #include "value_ops.h"
 #include "parray.h"
 #include "pclass.h"
@@ -186,10 +187,12 @@ static void dump_value_depth(pphp_state *state, pvalue value, unsigned depth) {
             break;
         case PT_FLOAT: {
             char buffer[64];
-            int length = snprintf(buffer, sizeof(buffer), "float(%.14g)\n",
-                                  (double)value.as.f);
-            if (length > 0) {
+            int length = pphp_format_float(buffer, sizeof(buffer), value.as.f,
+                                           'g', 14);
+            if (length >= 0) {
+                pphp_output(state, "float(", 6U);
                 pphp_output(state, buffer, (size_t)length);
+                pphp_output(state, ")\n", 2U);
             }
             break;
         }

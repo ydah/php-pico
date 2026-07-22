@@ -1,5 +1,6 @@
 #include "formatting.h"
 
+#include "float_format.h"
 #include "parray.h"
 #include "value_ops.h"
 
@@ -73,36 +74,6 @@ static int buffer_printf_unsigned(format_buffer *buffer, const char *format,
     return 1;
 }
 
-static int buffer_printf_float(format_buffer *buffer, const char *format,
-                               double value) {
-    int length = snprintf(NULL, 0U, format, value);
-    if (length < 0 || !buffer_reserve(buffer, (size_t)length)) return 0;
-    (void)snprintf(buffer->data + buffer->length,
-                   buffer->capacity - buffer->length, format, value);
-    buffer->length += (size_t)length;
-    return 1;
-}
-
-static void normalize_exponent(format_buffer *buffer, size_t start) {
-    size_t position;
-    for (position = start; position + 3U < buffer->length; position++) {
-        if ((buffer->data[position] == 'e' || buffer->data[position] == 'E') &&
-            (buffer->data[position + 1U] == '+' ||
-             buffer->data[position + 1U] == '-')) {
-            size_t zero = position + 2U;
-            while (zero + 1U < buffer->length &&
-                   buffer->data[zero] == '0' &&
-                   buffer->data[zero + 1U] >= '0' &&
-                   buffer->data[zero + 1U] <= '9') {
-                memmove(buffer->data + zero, buffer->data + zero + 1U,
-                        buffer->length - zero);
-                buffer->length--;
-            }
-            return;
-        }
-    }
-}
-
 static int buffer_printf_character(format_buffer *buffer, const char *format,
                                    int value) {
     int length = snprintf(NULL, 0U, format, value);
@@ -131,6 +102,57 @@ static int append_binary(format_buffer *buffer, uint32_t value, unsigned width,
     while (length != 0U) {
         if (!buffer_character(buffer, digits[--length])) return 0;
     }
+    if (left_align) {
+        while (padding-- != 0U) {
+            if (!buffer_character(buffer, ' ')) return 0;
+        }
+    }
+    return 1;
+}
+
+static size_t normalized_float_length(char *bytes, size_t length) {
+    size_t position;
+    for (position = 0U; position + 3U < length; position++) {
+        if (bytes[position] == 'e' &&
+            (bytes[position + 1U] == '+' || bytes[position + 1U] == '-')) {
+            size_t zero = position + 2U;
+            while (zero + 1U < length && bytes[zero] == '0' &&
+                   bytes[zero + 1U] >= '0' && bytes[zero + 1U] <= '9') {
+                memmove(bytes + zero, bytes + zero + 1U, length - zero);
+                length--;
+            }
+            bytes[length] = '\0';
+            break;
+        }
+    }
+    return length;
+}
+
+static int append_formatted_float(format_buffer *buffer, pphp_float value,
+                                  char conversion, int precision,
+                                  unsigned width, int zero_pad,
+                                  int left_align) {
+    char number[PPHP_FLOAT_FORMAT_BUFFER_SIZE];
+    int formatted = pphp_format_float(number, sizeof(number), value,
+                                      conversion, precision);
+    size_t length;
+    size_t padding;
+    size_t start = 0U;
+    if (formatted < 0) return 0;
+    length = normalized_float_length(number, (size_t)formatted);
+    padding = width > length ? (size_t)width - length : 0U;
+    if (!left_align && zero_pad && length != 0U && number[0] == '-') {
+        if (!buffer_character(buffer, '-')) return 0;
+        start = 1U;
+        while (padding-- != 0U) {
+            if (!buffer_character(buffer, '0')) return 0;
+        }
+    } else if (!left_align) {
+        while (padding-- != 0U) {
+            if (!buffer_character(buffer, zero_pad ? '0' : ' ')) return 0;
+        }
+    }
+    if (!buffer_append(buffer, number + start, length - start)) return 0;
     if (left_align) {
         while (padding-- != 0U) {
             if (!buffer_character(buffer, ' ')) return 0;
@@ -278,11 +300,8 @@ static int append_formatted(pphp_state *state, const pstring *format,
                 return 0;
             }
         } else if (conversion == 'f' || conversion == 'e' || conversion == 'g') {
-            size_t output_start = buffer->length;
-            native[native_length++] = conversion;
-            native[native_length] = '\0';
-            if (!buffer_printf_float(buffer, native, (double)number)) return 0;
-            normalize_exponent(buffer, output_start);
+            if (!append_formatted_float(buffer, number, conversion, precision,
+                                        width, zero_pad, left_align)) return 0;
         } else {
             return 0;
         }
@@ -306,7 +325,8 @@ static int append_print_value(format_buffer *buffer, pvalue value,
             length = snprintf(number, sizeof(number), "%lld", (long long)value.as.i);
             return length >= 0 && buffer_append(buffer, number, (size_t)length);
         case PT_FLOAT:
-            length = snprintf(number, sizeof(number), "%.14g", (double)value.as.f);
+            length = pphp_format_float(number, sizeof(number), value.as.f,
+                                       'g', 14);
             return length >= 0 && buffer_append(buffer, number, (size_t)length);
         case PT_STRING: {
             const pstring *string = (const pstring *)value.as.gc;
