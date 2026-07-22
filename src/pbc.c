@@ -142,6 +142,47 @@ int pproto_add_catch(pproto *proto, pcatch entry) {
     return 1;
 }
 
+#if PPHP_TYPECHECK
+int ptype_spec_add(ptype_spec *spec, uint8_t kind,
+                   const char *name, size_t length) {
+    pstring *type_name = NULL;
+    if (kind == PTYPE_NAMED) {
+        type_name = ps_new(name, length);
+        if (type_name == NULL) return 0;
+    }
+    if (!ptype_spec_add_string(spec, kind, type_name)) {
+        ps_destroy(type_name);
+        return 0;
+    }
+    return 1;
+}
+
+int ptype_spec_add_string(ptype_spec *spec, uint8_t kind, pstring *name) {
+    ptype_member *resized;
+    if (spec == NULL || spec->count == UINT8_MAX ||
+        kind < PTYPE_INT || kind > PTYPE_NAMED ||
+        (kind == PTYPE_NAMED && name == NULL) ||
+        (kind != PTYPE_NAMED && name != NULL)) return 0;
+    resized = pphp_realloc(spec->members,
+                           ((size_t)spec->count + 1U) * sizeof(*spec->members));
+    if (resized == NULL) return 0;
+    spec->members = resized;
+    spec->members[spec->count].kind = kind;
+    spec->members[spec->count].name = name;
+    spec->count++;
+    return 1;
+}
+
+void ptype_spec_destroy(ptype_spec *spec) {
+    size_t i;
+    if (spec == NULL) return;
+    for (i = 0U; i < spec->count; i++) ps_destroy(spec->members[i].name);
+    pphp_free(spec->members);
+    spec->members = NULL;
+    spec->count = 0U;
+}
+#endif
+
 int pmodule_add(pmodule *module, pproto *proto) {
     if (module->count == module->capacity &&
         !grow_array((void **)&module->protos, sizeof(*module->protos),
@@ -276,6 +317,23 @@ static int collect_strings(const pmodule *module, string_list *strings) {
                 return 0;
             }
         }
+#if PPHP_TYPECHECK
+        for (j = 0U; j < module->protos[i]->n_params + 1U; j++) {
+            const ptype_spec *spec;
+            size_t k;
+            if (j < module->protos[i]->n_params &&
+                module->protos[i]->parameter_types == NULL) continue;
+            spec = j < module->protos[i]->n_params
+                       ? &module->protos[i]->parameter_types[j]
+                       : &module->protos[i]->return_type;
+            for (k = 0U; k < spec->count; k++) {
+                if (spec->members[k].kind == PTYPE_NAMED &&
+                    !strings_add(strings, spec->members[k].name, &ignored)) {
+                    return 0;
+                }
+            }
+        }
+#endif
     }
     return 1;
 }
@@ -351,7 +409,25 @@ int pphp_pbc_write_file(const pmodule *module, const char *path) {
         }
         if (!size_add(&total, (size_t)proto->n_locals * 2U) ||
             !size_add(&total, proto->catch_count * 10U) ||
-            !size_align4(&total)) goto done;
+#if PPHP_TYPECHECK
+            !size_add(&total, (size_t)proto->n_params + 1U)) goto done;
+        {
+            size_t type_index;
+            for (type_index = 0U; type_index < (size_t)proto->n_params + 1U;
+                 type_index++) {
+                const ptype_spec *spec = type_index < proto->n_params &&
+                                                 proto->parameter_types != NULL
+                                             ? &proto->parameter_types[type_index]
+                                             : type_index == proto->n_params
+                                                   ? &proto->return_type : NULL;
+                if (spec != NULL && !size_add(
+                        &total, (size_t)spec->count * 3U)) goto done;
+            }
+        }
+#else
+            0) goto done;
+#endif
+        if (!size_align4(&total)) goto done;
     }
     if (total > UINT32_MAX) goto done;
     bytes = pphp_alloc(total);
@@ -361,7 +437,8 @@ int pphp_pbc_write_file(const pmodule *module, const char *path) {
     put_u16(bytes, 4U, (uint16_t)PPHP_PBC_FORMAT_VERSION);
     put_u16(bytes, 6U, (uint16_t)((PPHP_INT64 ? 1U : 0U) |
                                   (PPHP_USE_DOUBLE ? 2U : 0U) |
-                                  (PPHP_LINE_INFO ? 4U : 0U)));
+                                  (PPHP_LINE_INFO ? 4U : 0U) |
+                                  (PPHP_TYPECHECK ? 8U : 0U)));
     put_u32(bytes, 8U, (uint32_t)total);
     put_u16(bytes, 12U, (uint16_t)module->count);
     put_u16(bytes, 14U, (uint16_t)strings.count);
@@ -471,6 +548,27 @@ int pphp_pbc_write_file(const pmodule *module, const char *path) {
             bytes[offset + 9U] = 0U;
             offset += 10U;
         }
+#if PPHP_TYPECHECK
+        for (j = 0U; j < (size_t)proto->n_params + 1U; j++) {
+            const ptype_spec *spec = j < proto->n_params &&
+                                             proto->parameter_types != NULL
+                                         ? &proto->parameter_types[j]
+                                         : j == proto->n_params
+                                               ? &proto->return_type : NULL;
+            size_t k;
+            bytes[offset++] = spec == NULL ? 0U : spec->count;
+            for (k = 0U; spec != NULL && k < spec->count; k++) {
+                uint16_t sid = UINT16_MAX;
+                bytes[offset] = spec->members[k].kind;
+                if (spec->members[k].kind == PTYPE_NAMED &&
+                    !string_index(&strings, spec->members[k].name, &sid)) {
+                    goto done;
+                }
+                put_u16(bytes, offset + 1U, sid);
+                offset += 3U;
+            }
+        }
+#endif
     }
     file = pphp_fs_open(path, "wb");
     if (file == NULL) {
@@ -529,7 +627,8 @@ int pphp_pbc_load(const void *data, size_t length, pmodule *module) {
     const uint16_t expected_flags =
         (uint16_t)((PPHP_INT64 ? 1U : 0U) |
                    (PPHP_USE_DOUBLE ? 2U : 0U) |
-                   (PPHP_LINE_INFO ? 4U : 0U));
+                   (PPHP_LINE_INFO ? 4U : 0U) |
+                   (PPHP_TYPECHECK ? 8U : 0U));
     uint16_t n_protos;
     uint16_t n_strings;
     size_t table_entries;
@@ -756,6 +855,46 @@ int pphp_pbc_load(const void *data, size_t length, pmodule *module) {
             if (!pproto_add_catch(proto, entry)) goto failed_module;
             if (!pbc_advance(&offset, 10U, limit)) goto failed_module;
         }
+#if PPHP_TYPECHECK
+        if (proto->n_params != 0U) {
+            proto->parameter_types = pphp_alloc(
+                (size_t)proto->n_params * sizeof(*proto->parameter_types));
+            if (proto->parameter_types == NULL) {
+                result = PPHP_E_NOMEM;
+                goto failed_module;
+            }
+            memset(proto->parameter_types, 0,
+                   (size_t)proto->n_params * sizeof(*proto->parameter_types));
+        }
+        for (j = 0U; j < (size_t)proto->n_params + 1U; j++) {
+            ptype_spec *spec = j < proto->n_params
+                                   ? &proto->parameter_types[j]
+                                   : &proto->return_type;
+            uint8_t member_count;
+            size_t k;
+            if (!pbc_range_available(offset, 1U, limit)) goto failed_module;
+            member_count = bytes[offset++];
+            if (member_count > 16U ||
+                !pbc_range_available(offset, (size_t)member_count * 3U,
+                                     limit)) goto failed_module;
+            for (k = 0U; k < member_count; k++) {
+                uint8_t kind = bytes[offset];
+                uint16_t sid = get_u16(bytes, offset + 1U);
+                pstring *type_name = NULL;
+                if (kind < PTYPE_INT || kind > PTYPE_NAMED ||
+                    (kind == PTYPE_NAMED && sid >= n_strings) ||
+                    (kind != PTYPE_NAMED && sid != UINT16_MAX)) {
+                    goto failed_module;
+                }
+                if (kind == PTYPE_NAMED) type_name = &strings[sid].base;
+                if (!ptype_spec_add_string(spec, kind, type_name)) {
+                    result = PPHP_E_NOMEM;
+                    goto failed_module;
+                }
+                offset += 3U;
+            }
+        }
+#endif
         if (!size_align4(&offset) || offset != limit) goto failed_module;
     }
     for (i = 0U; i < n_strings; i++) strings[i].owner = module;
@@ -829,6 +968,7 @@ const char *pphp_opcode_name(uint8_t opcode) {
         case OP_CALL_ARRAY: return "CALL_ARRAY";
         case OP_CALL_VALUE_ARRAY: return "CALL_VALUE_ARRAY";
         case OP_INCLUDE: return "INCLUDE";
+        case OP_TYPECHECK_ARGS: return "TYPECHECK_ARGS";
         case OP_NEW_ARRAY: return "NEW_ARRAY";
         case OP_ARR_PUSH: return "ARR_PUSH";
         case OP_ARR_SET: return "ARR_SET";

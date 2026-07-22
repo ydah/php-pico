@@ -47,6 +47,10 @@
 #define PPHP_TYPECHECK 0
 #endif
 
+#if PPHP_TYPECHECK != 0 && PPHP_TYPECHECK != 1
+#error "PPHP_TYPECHECK must be 0 or 1"
+#endif
+
 #ifndef PPHP_VIS_CHECK
 #define PPHP_VIS_CHECK 1
 #endif

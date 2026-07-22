@@ -95,7 +95,7 @@ const char *pc_ast_kind_name(pc_ast_kind kind) {
         "ECHO", "IF", "WHILE", "DO_WHILE", "FOR", "FOREACH", "SWITCH",
         "CASE", "BREAK", "CONTINUE", "RETURN", "THROW", "GLOBAL", "STATIC",
         "CONST", "FUNCTION", "CLOSURE", "PARAM", "INCLUDE", "UNSET", "ISSET", "EMPTY",
-        "CLASS", "PROPERTY", "NEW", "TRY", "CATCH"
+        "CLASS", "PROPERTY", "NEW", "TRY", "CATCH", "TYPE"
     };
     if ((size_t)kind >= sizeof(names) / sizeof(names[0])) {
         return "UNKNOWN";
@@ -163,6 +163,9 @@ static void dump_node(FILE *stream, const pc_ast *node, unsigned depth) {
             break;
         case AST_PARAM:
             dump_token(stream, node->as.parameter.name);
+            break;
+        case AST_TYPE:
+            dump_token(stream, node->as.type_decl.name);
             break;
         case AST_CLASS:
             dump_token(stream, node->as.class_decl.name);
@@ -266,15 +269,18 @@ static void dump_node(FILE *stream, const pc_ast *node, unsigned depth) {
             dump_node(stream, node->as.binding.value, depth + 1U);
             break;
         case AST_FUNCTION:
+            dump_list(stream, node->as.function.return_type, depth + 1U);
             dump_list(stream, node->as.function.parameters, depth + 1U);
             dump_node(stream, node->as.function.body, depth + 1U);
             break;
         case AST_CLOSURE:
+            dump_list(stream, node->as.closure.return_type, depth + 1U);
             dump_list(stream, node->as.closure.parameters, depth + 1U);
             dump_list(stream, node->as.closure.captures, depth + 1U);
             dump_node(stream, node->as.closure.body, depth + 1U);
             break;
         case AST_PARAM:
+            dump_list(stream, node->as.parameter.type, depth + 1U);
             dump_node(stream, node->as.parameter.default_value, depth + 1U);
             break;
         case AST_INCLUDE:
@@ -285,6 +291,7 @@ static void dump_node(FILE *stream, const pc_ast *node, unsigned depth) {
             dump_list(stream, node->as.class_decl.members, depth + 1U);
             break;
         case AST_PROPERTY:
+            dump_list(stream, node->as.property.type, depth + 1U);
             dump_node(stream, node->as.property.default_value, depth + 1U);
             break;
         case AST_NEW:

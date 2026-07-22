@@ -183,7 +183,13 @@ static pc_ast *parse_expression_precedence(pc_parser *parser, int minimum);
 static pc_ast *parse_expression(pc_parser *parser);
 static pc_ast *parse_call(pc_parser *parser, pc_ast *callee, uint32_t line);
 static pc_ast *parse_block(pc_parser *parser, uint32_t line);
-static void parse_optional_type(pc_parser *parser);
+enum {
+    TYPE_CONTEXT_PARAMETER = 0,
+    TYPE_CONTEXT_RETURN,
+    TYPE_CONTEXT_PROPERTY
+};
+
+static pc_ast *parse_optional_type(pc_parser *parser, int context);
 static pc_ast *literal_node(pc_parser *parser, pc_ast_kind kind,
                             pc_token token);
 
@@ -245,9 +251,11 @@ static pc_ast *parse_closure(pc_parser *parser, pc_token keyword,
     (void)consume(parser, T_LPAREN, "expected '(' after closure keyword");
     while (!check(parser, T_RPAREN) && !check(parser, T_EOF) && !parser->failed) {
         pc_ast *parameter;
+        pc_ast *parameter_type = NULL;
         int variadic;
         if (!check(parser, T_VARIABLE) && !check(parser, T_ELLIPSIS)) {
-            parse_optional_type(parser);
+            parameter_type = parse_optional_type(
+                parser, TYPE_CONTEXT_PARAMETER);
         }
         variadic = match(parser, T_ELLIPSIS);
         parameter = new_node(parser, AST_PARAM, parser->current.line);
@@ -255,6 +263,7 @@ static pc_ast *parse_closure(pc_parser *parser, pc_token keyword,
             parameter->as.parameter.name = consume(
                 parser, T_VARIABLE, "expected closure parameter variable");
             parameter->as.parameter.variadic = variadic;
+            parameter->as.parameter.type = parameter_type;
             if (match(parser, T_EQUAL)) {
                 parameter->as.parameter.default_value = parse_expression_precedence(
                     parser, PREC_ASSIGN + 1);
@@ -286,7 +295,10 @@ static pc_ast *parse_closure(pc_parser *parser, pc_token keyword,
         }
         (void)consume(parser, T_RPAREN, "expected ')' after closure captures");
     }
-    if (match(parser, T_COLON)) parse_optional_type(parser);
+    if (match(parser, T_COLON) && closure != NULL) {
+        closure->as.closure.return_type = parse_optional_type(
+            parser, TYPE_CONTEXT_RETURN);
+    }
     if (closure != NULL) {
         closure->as.closure.parameters = parameters;
         closure->as.closure.captures = captures;
@@ -1112,22 +1124,107 @@ static int is_type_token(pc_token_type type) {
     return type == T_INT_TYPE || type == T_FLOAT_TYPE || type == T_STRING_TYPE ||
            type == T_BOOL_TYPE || type == T_ARRAY || type == T_CALLABLE ||
            type == T_MIXED || type == T_VOID || type == T_NULL ||
-           type == T_SELF || type == T_STATIC || type == T_IDENTIFIER;
+           type == T_SELF || type == T_STATIC || type == T_PARENT ||
+           type == T_IDENTIFIER;
 }
 
-static void parse_optional_type(pc_parser *parser) {
-    (void)match(parser, T_QUESTION);
-    if (!is_type_token(parser->current.type)) {
-        return;
+static int type_tokens_equal(pc_token left, pc_token right) {
+    size_t i;
+    if (left.type != right.type || left.length != right.length) return 0;
+    for (i = 0U; i < left.length; i++) {
+        unsigned char a = (unsigned char)left.start[i];
+        unsigned char b = (unsigned char)right.start[i];
+        if (a >= 'A' && a <= 'Z') a = (unsigned char)(a - 'A' + 'a');
+        if (b >= 'A' && b <= 'Z') b = (unsigned char)(b - 'A' + 'a');
+        if (a != b) return 0;
     }
-    advance_token(parser);
-    while (match(parser, T_PIPE)) {
-        if (!is_type_token(parser->current.type)) {
-            fail_at(parser, parser->current, "expected type after '|'");
-            return;
+    return 1;
+}
+
+static pc_ast *type_node(pc_parser *parser, pc_token token) {
+    pc_ast *node = new_node(parser, AST_TYPE, token.line);
+    if (node != NULL) node->as.type_decl.name = token;
+    return node;
+}
+
+static pc_ast *parse_optional_type(pc_parser *parser, int context) {
+    pc_ast *head = NULL;
+    pc_ast *tail = NULL;
+    pc_ast *cursor;
+    int nullable = match(parser, T_QUESTION);
+    size_t count = 0U;
+    if (!is_type_token(parser->current.type)) {
+        if (nullable) fail_at(parser, parser->current, "expected type after '?'");
+        return NULL;
+    }
+    do {
+        pc_token token = parser->current;
+        if (count >= 16U) {
+            fail_at(parser, token, "a type union may have at most 16 members");
+            return head;
+        }
+        if ((context != TYPE_CONTEXT_RETURN && token.type == T_VOID) ||
+            (context != TYPE_CONTEXT_RETURN && token.type == T_STATIC) ||
+            (context == TYPE_CONTEXT_PROPERTY && token.type == T_CALLABLE)) {
+            fail_at(parser, token,
+                    token.type == T_CALLABLE
+                        ? "callable is not valid as a property type"
+                        : token.type == T_VOID
+                        ? "void is only valid as a return type"
+                        : "static is only valid as a return type");
+            return head;
+        }
+        cursor = head;
+        while (cursor != NULL) {
+            if (type_tokens_equal(cursor->as.type_decl.name, token)) {
+                fail_at(parser, token, "duplicate type in union");
+                return head;
+            }
+            cursor = cursor->next;
         }
         advance_token(parser);
+        pc_ast_append(&head, &tail, type_node(parser, token));
+        count++;
+        if (!match(parser, T_PIPE)) break;
+        if (nullable) {
+            fail_at(parser, parser->previous,
+                    "nullable shorthand cannot be combined with a union");
+            return head;
+        }
+        if (!is_type_token(parser->current.type)) {
+            fail_at(parser, parser->current, "expected type after '|'");
+            return head;
+        }
+    } while (!parser->failed);
+    cursor = head;
+    while (cursor != NULL) {
+        pc_token_type token_type = cursor->as.type_decl.name.type;
+        if (count > 1U && (token_type == T_VOID || token_type == T_MIXED)) {
+            fail_at(parser, cursor->as.type_decl.name,
+                    token_type == T_VOID
+                        ? "void cannot be part of a union"
+                        : "mixed cannot be part of a union");
+            return head;
+        }
+        cursor = cursor->next;
     }
+    if (nullable) {
+        pc_token first = head->as.type_decl.name;
+        pc_token null_token = first;
+        if (first.type == T_NULL || first.type == T_MIXED || first.type == T_VOID) {
+            fail_at(parser, first, "this type cannot use nullable shorthand");
+            return head;
+        }
+        null_token.type = T_NULL;
+        null_token.start = "null";
+        null_token.length = 4U;
+        cursor = type_node(parser, null_token);
+        if (cursor != NULL) {
+            cursor->next = head;
+            head = cursor;
+        }
+    }
+    return head;
 }
 
 static pc_ast *parse_function(pc_parser *parser, pc_token keyword) {
@@ -1154,9 +1251,12 @@ static pc_ast *parse_function(pc_parser *parser, pc_token keyword) {
                                 PC_MOD_PRIVATE)) == 0U) {
             parameter_flags |= PC_MOD_PUBLIC;
         }
-        if (!check(parser, T_VARIABLE) && !check(parser, T_ELLIPSIS)) {
-            parse_optional_type(parser);
-        }
+        {
+            pc_ast *parameter_type = NULL;
+            if (!check(parser, T_VARIABLE) && !check(parser, T_ELLIPSIS)) {
+                parameter_type = parse_optional_type(
+                    parser, TYPE_CONTEXT_PARAMETER);
+            }
         variadic = match(parser, T_ELLIPSIS);
         parameter = new_node(parser, AST_PARAM, parser->current.line);
         if (parameter != NULL) {
@@ -1164,10 +1264,12 @@ static pc_ast *parse_function(pc_parser *parser, pc_token keyword) {
                                                     "expected parameter variable");
             parameter->as.parameter.variadic = variadic;
             parameter->as.parameter.flags = parameter_flags;
+            parameter->as.parameter.type = parameter_type;
             if (match(parser, T_EQUAL)) {
                 parameter->as.parameter.default_value = parse_expression_precedence(
                     parser, PREC_ASSIGN + 1);
             }
+        }
         }
         pc_ast_append(&head, &tail, parameter);
         count++;
@@ -1176,8 +1278,9 @@ static pc_ast *parse_function(pc_parser *parser, pc_token keyword) {
         }
     }
     (void)consume(parser, T_RPAREN, "expected ')' after parameters");
-    if (match(parser, T_COLON)) {
-        parse_optional_type(parser);
+    if (match(parser, T_COLON) && function != NULL) {
+        function->as.function.return_type = parse_optional_type(
+            parser, TYPE_CONTEXT_RETURN);
     }
     if (match(parser, T_SEMICOLON)) {
         if (function != NULL) {
@@ -1283,8 +1386,10 @@ static pc_ast *parse_class(pc_parser *parser, pc_token keyword, uint8_t flags) {
             }
             continue;
         }
+        {
+        pc_ast *property_type = NULL;
         if (!check(parser, T_VARIABLE)) {
-            parse_optional_type(parser);
+            property_type = parse_optional_type(parser, TYPE_CONTEXT_PROPERTY);
         }
         do {
             pc_ast *property = new_node(parser, AST_PROPERTY, parser->current.line);
@@ -1292,6 +1397,7 @@ static pc_ast *parse_class(pc_parser *parser, pc_token keyword, uint8_t flags) {
                 property->as.property.name = consume(parser, T_VARIABLE,
                                                       "expected property name");
                 property->as.property.flags = member_flags;
+                property->as.property.type = property_type;
                 if (match(parser, T_EQUAL)) {
                     property->as.property.default_value =
                         parse_expression_precedence(parser, PREC_ASSIGN + 1);
@@ -1299,6 +1405,7 @@ static pc_ast *parse_class(pc_parser *parser, pc_token keyword, uint8_t flags) {
                 pc_ast_append(&head, &tail, property);
             }
         } while (match(parser, T_COMMA));
+        }
         consume_statement_end(parser);
     }
     (void)consume(parser, T_RBRACE, "expected '}' after class body");

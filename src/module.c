@@ -20,6 +20,15 @@ void pproto_destroy(pproto *proto) {
     pphp_free(proto->constants);
     if (proto->owns_code) pphp_free(proto->code);
     pphp_free(proto->catches);
+#if PPHP_TYPECHECK
+    if (proto->parameter_types != NULL) {
+        for (i = 0U; i < proto->n_params; i++) {
+            ptype_spec_destroy(&proto->parameter_types[i]);
+        }
+    }
+    pphp_free(proto->parameter_types);
+    ptype_spec_destroy(&proto->return_type);
+#endif
     pphp_free(proto);
 }
 

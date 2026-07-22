@@ -66,7 +66,8 @@ typedef enum pc_ast_kind {
     AST_PROPERTY,
     AST_NEW,
     AST_TRY,
-    AST_CATCH
+    AST_CATCH,
+    AST_TYPE
 } pc_ast_kind;
 
 typedef struct pc_ast pc_ast;
@@ -175,6 +176,7 @@ struct pc_ast {
             size_t parameter_count;
             uint8_t flags;
             int declaration_only;
+            pc_ast *return_type;
         } function;
         struct {
             pc_ast *parameters;
@@ -183,12 +185,14 @@ struct pc_ast {
             size_t parameter_count;
             int is_arrow;
             int is_static;
+            pc_ast *return_type;
         } closure;
         struct {
             pc_token name;
             pc_ast *default_value;
             int variadic;
             uint8_t flags;
+            pc_ast *type;
         } parameter;
         struct {
             pc_token_type mode;
@@ -205,6 +209,7 @@ struct pc_ast {
             pc_token name;
             pc_ast *default_value;
             uint8_t flags;
+            pc_ast *type;
         } property;
         struct {
             pc_ast *class_name;
@@ -221,6 +226,9 @@ struct pc_ast {
             pc_token variable;
             pc_ast *body;
         } catch_stmt;
+        struct {
+            pc_token name;
+        } type_decl;
     } as;
 };
 

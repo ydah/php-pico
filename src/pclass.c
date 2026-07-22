@@ -29,6 +29,24 @@ static int name_equal_ci(const pstring *name, const char *other, size_t length) 
     return 1;
 }
 
+#if PPHP_TYPECHECK
+static int clone_type_spec(ptype_spec *target, const ptype_spec *source) {
+    size_t i;
+    memset(target, 0, sizeof(*target));
+    if (source == NULL) return 1;
+    for (i = 0U; i < source->count; i++) {
+        const ptype_member *member = &source->members[i];
+        if (!ptype_spec_add(target, member->kind,
+                            member->name == NULL ? NULL : ps_data(member->name),
+                            member->name == NULL ? 0U : member->name->length)) {
+            ptype_spec_destroy(target);
+            return 0;
+        }
+    }
+    return 1;
+}
+#endif
+
 pclass *pclass_new(const char *name, size_t length, pclass *parent, uint8_t flags) {
     pclass *class_entry = pphp_alloc(sizeof(*class_entry));
     size_t i;
@@ -46,9 +64,17 @@ pclass *pclass_new(const char *name, size_t length, pclass *parent, uint8_t flag
     if (parent != NULL) {
         for (i = 0U; i < parent->property_count; i++) {
             const pproperty *property = &parent->properties[i];
+#if PPHP_TYPECHECK
+            if (!pclass_add_typed_property(
+                    class_entry, ps_data(property->name),
+                    property->name->length, property->flags,
+                    property->default_value, &property->type,
+                    property->has_default)) {
+#else
             if (!pclass_add_property(class_entry, ps_data(property->name),
                                      property->name->length, property->flags,
                                      property->default_value)) {
+#endif
                 pclass_destroy(class_entry);
                 return NULL;
             }
@@ -97,6 +123,9 @@ void pclass_release(pclass *class_entry) {
     if (class_entry->refcnt != 0U) return;
     pclass_release_values(class_entry);
     for (i = 0U; i < class_entry->property_count; i++) {
+#if PPHP_TYPECHECK
+        ptype_spec_destroy(&class_entry->properties[i].type);
+#endif
         ps_destroy(class_entry->properties[i].name);
     }
     for (i = 0U; i < class_entry->method_count; i++) {
@@ -107,6 +136,9 @@ void pclass_release(pclass *class_entry) {
     pphp_free(class_entry->properties);
     pphp_free(class_entry->methods);
     for (i = 0U; i < class_entry->static_property_count; i++) {
+#if PPHP_TYPECHECK
+        ptype_spec_destroy(&class_entry->static_property_defs[i].type);
+#endif
         ps_destroy(class_entry->static_property_defs[i].name);
     }
     pphp_free(class_entry->static_property_defs);
@@ -172,6 +204,17 @@ static int class_table_get(const pclass *class_entry, int constants,
 int pclass_add_static_property(pclass *class_entry, const char *name,
                                size_t length, uint8_t flags,
                                pvalue default_value) {
+#if PPHP_TYPECHECK
+    return pclass_add_typed_static_property(class_entry, name, length, flags,
+                                            default_value, NULL, 1);
+}
+
+int pclass_add_typed_static_property(pclass *class_entry, const char *name,
+                                     size_t length, uint8_t flags,
+                                     pvalue default_value,
+                                     const ptype_spec *type,
+                                     int has_default) {
+#endif
     pproperty *property;
     size_t i;
     if (class_entry == NULL) return 0;
@@ -191,8 +234,21 @@ int pclass_add_static_property(pclass *class_entry, const char *name,
     if (property->name == NULL) return 0;
     property->flags = flags;
     property->owner = class_entry;
+#if PPHP_TYPECHECK
+    property->has_default = (uint8_t)(has_default != 0);
+    property->initialized = (uint8_t)(has_default != 0 || type == NULL ||
+                                      type->count == 0U);
+    if (!clone_type_spec(&property->type, type)) {
+        ps_destroy(property->name);
+        property->name = NULL;
+        return 0;
+    }
+#endif
     if (!class_table_add(&class_entry->static_properties, name, length,
                          default_value)) {
+#if PPHP_TYPECHECK
+        ptype_spec_destroy(&property->type);
+#endif
         ps_destroy(property->name);
         property->name = NULL;
         return 0;
@@ -240,6 +296,18 @@ int pclass_set_static_property(pclass *class_entry, const char *name,
             pv_release(existing);
             set = pa_set(cursor->static_properties,
                          pv_heap(PT_STRING, &key->header), value);
+#if PPHP_TYPECHECK
+            if (set) {
+                size_t i;
+                for (i = 0U; i < cursor->static_property_count; i++) {
+                    if (ps_equal_bytes(cursor->static_property_defs[i].name,
+                                       name, length)) {
+                        cursor->static_property_defs[i].initialized = 1U;
+                        break;
+                    }
+                }
+            }
+#endif
             ps_destroy(key);
             return set;
         }
@@ -337,6 +405,16 @@ int pclass_is_complete(const pclass *class_entry, const pmethod **missing) {
 
 int pclass_add_property(pclass *class_entry, const char *name, size_t length,
                         uint8_t flags, pvalue default_value) {
+#if PPHP_TYPECHECK
+    return pclass_add_typed_property(class_entry, name, length, flags,
+                                     default_value, NULL, 1);
+}
+
+int pclass_add_typed_property(pclass *class_entry, const char *name,
+                              size_t length, uint8_t flags,
+                              pvalue default_value, const ptype_spec *type,
+                              int has_default) {
+#endif
     pproperty *property;
     if (class_entry == NULL || class_entry->property_count >= UINT8_MAX ||
         pclass_find_property(class_entry, name, length) != NULL) return 0;
@@ -344,12 +422,23 @@ int pclass_add_property(pclass *class_entry, const char *name, size_t length,
         !grow((void **)&class_entry->properties, sizeof(*class_entry->properties),
               &class_entry->property_capacity)) return 0;
     property = &class_entry->properties[class_entry->property_count];
+    memset(property, 0, sizeof(*property));
     property->name = ps_new(name, length);
     if (property->name == NULL) return 0;
     property->slot = (uint8_t)class_entry->property_count;
     property->flags = flags;
     property->default_value = default_value;
     property->owner = class_entry;
+#if PPHP_TYPECHECK
+    property->has_default = (uint8_t)(has_default != 0);
+    property->initialized = (uint8_t)(has_default != 0 || type == NULL ||
+                                      type->count == 0U);
+    if (!clone_type_spec(&property->type, type)) {
+        ps_destroy(property->name);
+        property->name = NULL;
+        return 0;
+    }
+#endif
     pv_retain(default_value);
     class_entry->property_count++;
     return 1;
@@ -459,6 +548,13 @@ pobject *pobject_new(pphp_state *state, pclass *class_entry) {
     }
     memset((uint8_t *)(object->slots + class_entry->property_count), 0,
            class_entry->property_count);
+#if PPHP_TYPECHECK
+    for (i = 0U; i < class_entry->property_count; i++) {
+        if (class_entry->properties[i].initialized) {
+            pobject_mark_property_written(object, (uint8_t)i);
+        }
+    }
+#endif
     return object;
 }
 

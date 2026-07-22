@@ -796,6 +796,284 @@ static int expand_argument_array(pphp_state *state, uint32_t line,
     return 1;
 }
 
+#if PPHP_TYPECHECK
+static pclass *type_scope_class(pphp_state *state, const pframe *frame,
+                                const ptype_member *member) {
+    if (member->kind == PTYPE_SELF) return frame->called_scope;
+    if (member->kind == PTYPE_PARENT) {
+        return frame->called_scope == NULL ? NULL : frame->called_scope->parent;
+    }
+    if (member->kind == PTYPE_STATIC) {
+        return frame->called_class == NULL ? frame->called_scope
+                                           : frame->called_class;
+    }
+    if (member->kind != PTYPE_NAMED || member->name == NULL) return NULL;
+    return pphp_find_class(state, ps_data(member->name), member->name->length);
+}
+
+static int value_is_callable(pphp_state *state, const pframe *frame,
+                             pvalue value) {
+    if (value.type == PT_CLOSURE || value.type == PT_CFUNC) return 1;
+    if (value.type == PT_STRING) {
+        const pstring *name = (const pstring *)value.as.gc;
+        return pphp_builtin_exists(name) ||
+               pphp_native_function_exists(state, name) ||
+               pphp_find_function(state, name, NULL) != NULL;
+    }
+    if (value.type == PT_OBJECT) {
+        const pmethod *method = pclass_find_method(
+            ((const pobject *)value.as.gc)->class_entry, "__invoke", 8U);
+        return method != NULL && pclass_member_visible(
+            method->flags, method->owner, frame->called_scope);
+    }
+    if (value.type == PT_ARRAY) {
+        pvalue target = pv_null();
+        pvalue method_name = pv_null();
+        const pmethod *method = NULL;
+        int valid = pa_get((const parray *)value.as.gc, pv_int(0), &target) &&
+                    pa_get((const parray *)value.as.gc, pv_int(1), &method_name) &&
+                    pa_count((const parray *)value.as.gc) == 2U &&
+                    target.type == PT_OBJECT && method_name.type == PT_STRING;
+        if (valid) {
+            const pstring *name = (const pstring *)method_name.as.gc;
+            method = pclass_find_method(
+                ((const pobject *)target.as.gc)->class_entry,
+                ps_data(name), name->length);
+            valid = method != NULL && pclass_member_visible(
+                method->flags, method->owner, frame->called_scope);
+        }
+        pv_release(target);
+        pv_release(method_name);
+        return valid;
+    }
+    return 0;
+}
+
+static int type_member_accepts(pphp_state *state, const pframe *frame,
+                               const ptype_member *member, pvalue value) {
+    pclass *expected;
+    switch (member->kind) {
+        case PTYPE_INT: return value.type == PT_INT;
+#if PPHP_ENABLE_FLOAT
+        case PTYPE_FLOAT: return value.type == PT_FLOAT;
+#endif
+        case PTYPE_STRING: return value.type == PT_STRING;
+        case PTYPE_BOOL: return value.type == PT_FALSE || value.type == PT_TRUE;
+        case PTYPE_ARRAY: return value.type == PT_ARRAY;
+        case PTYPE_CALLABLE: return value_is_callable(state, frame, value);
+        case PTYPE_MIXED: return 1;
+        case PTYPE_VOID:
+        case PTYPE_NULL: return value.type == PT_NULL;
+        case PTYPE_SELF:
+        case PTYPE_STATIC:
+        case PTYPE_PARENT:
+        case PTYPE_NAMED:
+            expected = type_scope_class(state, frame, member);
+            return expected != NULL && value.type == PT_OBJECT &&
+                   pclass_is_a(((const pobject *)value.as.gc)->class_entry,
+                               expected);
+        default: return 0;
+    }
+}
+
+static int type_spec_accepts(pphp_state *state, const pframe *frame,
+                             const ptype_spec *spec, pvalue value) {
+    size_t i;
+    if (spec == NULL || spec->count == 0U) return 1;
+    for (i = 0U; i < spec->count; i++) {
+        if (type_member_accepts(state, frame, &spec->members[i], value)) return 1;
+    }
+    return 0;
+}
+
+static const char *type_kind_name(const ptype_member *member) {
+    switch (member->kind) {
+        case PTYPE_INT: return "int";
+        case PTYPE_FLOAT: return "float";
+        case PTYPE_STRING: return "string";
+        case PTYPE_BOOL: return "bool";
+        case PTYPE_ARRAY: return "array";
+        case PTYPE_CALLABLE: return "callable";
+        case PTYPE_MIXED: return "mixed";
+        case PTYPE_VOID: return "void";
+        case PTYPE_NULL: return "null";
+        case PTYPE_SELF: return "self";
+        case PTYPE_STATIC: return "static";
+        case PTYPE_PARENT: return "parent";
+        case PTYPE_NAMED:
+            return member->name == NULL ? "object" : ps_data(member->name);
+        default: return "unknown";
+    }
+}
+
+static void type_spec_name(const ptype_spec *spec, char *output,
+                           size_t capacity) {
+    size_t used = 0U;
+    size_t i;
+    if (capacity == 0U) return;
+    output[0] = '\0';
+    for (i = 0U; spec != NULL && i < spec->count; i++) {
+        const char *name = type_kind_name(&spec->members[i]);
+        size_t length = spec->members[i].kind == PTYPE_NAMED &&
+                                spec->members[i].name != NULL
+                            ? spec->members[i].name->length : strlen(name);
+        if (i != 0U && used + 1U < capacity) output[used++] = '|';
+        if (length >= capacity - used) length = capacity - used - 1U;
+        memcpy(output + used, name, length);
+        used += length;
+        output[used] = '\0';
+    }
+}
+
+static void raise_declared_type_error(pphp_state *state, uint32_t line,
+                                      const char *format, ...) {
+    va_list arguments;
+    if (state == NULL || state->error[0] != '\0') return;
+    va_start(arguments, format);
+    (void)vsnprintf(state->error, sizeof(state->error), format, arguments);
+    va_end(arguments);
+    state->error_line = line;
+    (void)snprintf(state->raised_class, sizeof(state->raised_class),
+                   "%s", "TypeError");
+}
+
+static int type_name_equal(const char *bytes, size_t length,
+                           const char *expected) {
+    size_t i;
+    size_t expected_length = strlen(expected);
+    if (length != expected_length) return 0;
+    for (i = 0U; i < length; i++) {
+        unsigned char left = (unsigned char)bytes[i];
+        unsigned char right = (unsigned char)expected[i];
+        if (left >= 'A' && left <= 'Z') left = (unsigned char)(left - 'A' + 'a');
+        if (right >= 'A' && right <= 'Z') right = (unsigned char)(right - 'A' + 'a');
+        if (left != right) return 0;
+    }
+    return 1;
+}
+
+static uint8_t encoded_type_kind(const char *bytes, size_t length) {
+    if (type_name_equal(bytes, length, "int")) return PTYPE_INT;
+    if (type_name_equal(bytes, length, "float")) return PTYPE_FLOAT;
+    if (type_name_equal(bytes, length, "string")) return PTYPE_STRING;
+    if (type_name_equal(bytes, length, "bool")) return PTYPE_BOOL;
+    if (type_name_equal(bytes, length, "array")) return PTYPE_ARRAY;
+    if (type_name_equal(bytes, length, "callable")) return PTYPE_CALLABLE;
+    if (type_name_equal(bytes, length, "mixed")) return PTYPE_MIXED;
+    if (type_name_equal(bytes, length, "void")) return PTYPE_VOID;
+    if (type_name_equal(bytes, length, "null")) return PTYPE_NULL;
+    if (type_name_equal(bytes, length, "self")) return PTYPE_SELF;
+    if (type_name_equal(bytes, length, "static")) return PTYPE_STATIC;
+    if (type_name_equal(bytes, length, "parent")) return PTYPE_PARENT;
+    return PTYPE_NAMED;
+}
+
+static int parse_property_type(const pstring *encoded, ptype_spec *spec) {
+    const char *bytes;
+    size_t start = 0U;
+    size_t i;
+    memset(spec, 0, sizeof(*spec));
+    if (encoded == NULL) return 1;
+    bytes = ps_data(encoded);
+    for (i = 0U; i <= encoded->length; i++) {
+        if (i == encoded->length || bytes[i] == '|') {
+            size_t length = i - start;
+            uint8_t kind;
+            if (length == 0U || spec->count >= 16U) goto failed;
+            kind = encoded_type_kind(bytes + start, length);
+#if !PPHP_ENABLE_FLOAT
+            if (kind == PTYPE_FLOAT) goto failed;
+#endif
+            if (!ptype_spec_add(spec, kind,
+                                kind == PTYPE_NAMED ? bytes + start : NULL,
+                                kind == PTYPE_NAMED ? length : 0U)) goto failed;
+            start = i + 1U;
+        }
+    }
+    return 1;
+failed:
+    ptype_spec_destroy(spec);
+    return 0;
+}
+
+static int check_property_type(pphp_state *state, const pclass *actual_class,
+                               const pproperty *property, pvalue value,
+                               uint32_t line) {
+    pframe scope;
+    char expected[128];
+    if (property == NULL || property->type.count == 0U) return 1;
+    memset(&scope, 0, sizeof(scope));
+    scope.called_scope = property->owner;
+    scope.called_class = (pclass *)actual_class;
+    if (type_spec_accepts(state, &scope, &property->type, value)) return 1;
+    type_spec_name(&property->type, expected, sizeof(expected));
+    raise_declared_type_error(
+        state, line, "Cannot assign %s to property %.*s::$%.*s of type %s",
+        pv_type_name((pvalue_type)value.type),
+        property->owner == NULL ? 0 : (int)property->owner->name->length,
+        property->owner == NULL ? "" : ps_data(property->owner->name),
+        (int)property->name->length, ps_data(property->name), expected);
+    return 0;
+}
+
+static int check_argument_types(pphp_state *state, pframe *frame) {
+    const pproto *proto = frame->proto;
+    size_t local_offset = proto->is_method ? 1U : 0U;
+    size_t fixed_count = proto->variadic && proto->n_params != 0U
+                             ? (size_t)proto->n_params - 1U
+                             : proto->n_params;
+    size_t i;
+    char expected[128];
+    if (proto->parameter_types == NULL) return 1;
+    for (i = 0U; i < fixed_count; i++) {
+        pvalue value = state->stack[frame->base + local_offset + i];
+        const ptype_spec *spec = &proto->parameter_types[i];
+        if (type_spec_accepts(state, frame, spec, value)) continue;
+        type_spec_name(spec, expected, sizeof(expected));
+        raise_declared_type_error(
+            state, frame->line,
+            "%.*s(): Argument #%zu ($%.*s) must be of type %s, %s given",
+            (int)proto->name->length, ps_data(proto->name), i + 1U,
+            (int)proto->locals[local_offset + i]->length,
+            ps_data(proto->locals[local_offset + i]), expected,
+            pv_type_name((pvalue_type)value.type));
+        return 0;
+    }
+    if (proto->variadic && proto->n_params != 0U) {
+        const ptype_spec *spec = &proto->parameter_types[fixed_count];
+        pvalue rest_value = state->stack[frame->base + local_offset + fixed_count];
+        size_t position = 0U;
+        size_t extra = 0U;
+        if (rest_value.type != PT_ARRAY) return 1;
+        while (position < ((const parray *)rest_value.as.gc)->used) {
+            pvalue key;
+            pvalue value;
+            size_t next;
+            if (!pa_entry_at((const parray *)rest_value.as.gc, position,
+                             &key, &value, &next)) break;
+            pv_release(key);
+            if (!type_spec_accepts(state, frame, spec, value)) {
+                type_spec_name(spec, expected, sizeof(expected));
+                raise_declared_type_error(
+                    state, frame->line,
+                    "%.*s(): Argument #%zu ($%.*s) must be of type %s, %s given",
+                    (int)proto->name->length, ps_data(proto->name),
+                    fixed_count + extra + 1U,
+                    (int)proto->locals[local_offset + fixed_count]->length,
+                    ps_data(proto->locals[local_offset + fixed_count]), expected,
+                    pv_type_name((pvalue_type)value.type));
+                pv_release(value);
+                return 0;
+            }
+            pv_release(value);
+            position = next;
+            extra++;
+        }
+    }
+    return 1;
+}
+#endif
+
 static int bind_arguments(pphp_state *state, const pproto *callee,
                           size_t target_base, size_t argument_base,
                           uint8_t argument_count, size_t local_offset,
@@ -1458,6 +1736,19 @@ static int return_from_function(pphp_state *state, pvalue result) {
         frame->return_override = pv_null();
         frame->has_return_override = 0;
     }
+#if PPHP_TYPECHECK
+    if (!type_spec_accepts(state, frame, &frame->proto->return_type, result)) {
+        char expected[128];
+        type_spec_name(&frame->proto->return_type, expected, sizeof(expected));
+        raise_declared_type_error(
+            state, frame->line,
+            "%.*s(): Return value must be of type %s, %s returned",
+            (int)frame->proto->name->length, ps_data(frame->proto->name),
+            expected, pv_type_name((pvalue_type)result.type));
+        pv_release(result);
+        return 0;
+    }
+#endif
     release_range(state, base, state->stack_count);
     state->stack_count = base;
     release_frame_owners(frame);
@@ -1856,6 +2147,11 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                 }
                 break;
             }
+#if PPHP_TYPECHECK
+            case OP_TYPECHECK_ARGS:
+                (void)check_argument_types(state, frame);
+                break;
+#endif
             case OP_RET: {
                 pvalue result = pop(state);
                 (void)return_from_function(state, result);
@@ -2141,8 +2437,53 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
             case OP_DEF_PROP: {
                 uint16_t name_index = read_u16(state, frame);
                 uint8_t flags = read_u8(state, frame);
+#if PPHP_TYPECHECK
+                uint16_t type_index = read_u16(state, frame);
+                uint8_t has_default = read_u8(state, frame);
+                const pstring *encoded_type = type_index == UINT16_MAX
+                                                  ? NULL
+                                                  : constant_string(
+                                                        state, frame,
+                                                        type_index);
+                ptype_spec type;
+#endif
                 const pstring *name = constant_string(state, frame, name_index);
                 pvalue default_value = pop(state);
+#if PPHP_TYPECHECK
+                int added = 0;
+                memset(&type, 0, sizeof(type));
+                if (state->error[0] == '\0' &&
+                    !parse_property_type(encoded_type, &type)) {
+                    pphp_runtime_error(state, frame->line,
+                                       "cannot decode property type");
+                } else if (state->error[0] == '\0' &&
+                           state->building_class != NULL && name != NULL) {
+                    pproperty temporary;
+                    memset(&temporary, 0, sizeof(temporary));
+                    temporary.name = (pstring *)name;
+                    temporary.owner = state->building_class;
+                    temporary.type = type;
+                    if (has_default != 0U &&
+                        !check_property_type(state, state->building_class,
+                                             &temporary, default_value,
+                                             frame->line)) {
+                        added = 0;
+                    } else if ((flags & PC_STATIC) != 0U) {
+                        added = pclass_add_typed_static_property(
+                            state->building_class, ps_data(name), name->length,
+                            flags, default_value, &type, has_default);
+                    } else {
+                        added = pclass_add_typed_property(
+                            state->building_class, ps_data(name), name->length,
+                            flags, default_value, &type, has_default);
+                    }
+                }
+                ptype_spec_destroy(&type);
+                if (state->error[0] == '\0' && !added) {
+                    pphp_runtime_error(state, frame->line,
+                                       "cannot define property");
+                }
+#else
                 if (state->building_class == NULL || name == NULL ||
                     ((flags & PC_STATIC) != 0U
                          ? !pclass_add_static_property(state->building_class,
@@ -2154,6 +2495,7 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                                                 flags, default_value))) {
                     pphp_runtime_error(state, frame->line, "cannot define property");
                 }
+#endif
                 pv_release(default_value);
                 break;
             }
@@ -2381,6 +2723,20 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                         pphp_runtime_error(state, frame->line,
                                            "cannot access non-public property %.*s",
                                            (int)name->length, ps_data(name));
+#if PPHP_TYPECHECK
+                    } else if (property->type.count != 0U &&
+                               !pobject_property_written(object,
+                                                         property->slot)) {
+                        pphp_runtime_error(
+                            state, frame->line,
+                            "Typed property %.*s::$%.*s must not be accessed before initialization",
+                            property->owner == NULL
+                                ? 0 : (int)property->owner->name->length,
+                            property->owner == NULL
+                                ? "" : ps_data(property->owner->name),
+                            (int)property->name->length,
+                            ps_data(property->name));
+#endif
                     } else {
                         pvalue value = object->slots[property->slot];
                         pv_retain(value);
@@ -2423,6 +2779,20 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                         pphp_runtime_error(state, frame->line,
                                            "cannot access non-public property %.*s",
                                            (int)name->length, ps_data(name));
+#if PPHP_TYPECHECK
+                    } else if (property->type.count != 0U &&
+                               !pobject_property_written(object,
+                                                         property->slot)) {
+                        pphp_runtime_error(
+                            state, frame->line,
+                            "Typed property %.*s::$%.*s must not be accessed before initialization",
+                            property->owner == NULL
+                                ? 0 : (int)property->owner->name->length,
+                            property->owner == NULL
+                                ? "" : ps_data(property->owner->name),
+                            (int)property->name->length,
+                            ps_data(property->name));
+#endif
                     } else {
                         pvalue value = object->slots[property->slot];
                         pv_retain(value);
@@ -2477,6 +2847,11 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                         pphp_runtime_error(state, frame->line,
                                            "cannot modify readonly property %.*s",
                                            (int)name->length, ps_data(name));
+#if PPHP_TYPECHECK
+                    } else if (!check_property_type(
+                                   state, object->class_entry, property, value,
+                                   frame->line)) {
+#endif
                     } else {
                         pv_retain(value);
                         pv_release(object->slots[property->slot]);
@@ -2536,6 +2911,11 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                         pphp_runtime_error(state, frame->line,
                                            "cannot modify readonly property %.*s",
                                            (int)name->length, ps_data(name));
+#if PPHP_TYPECHECK
+                    } else if (!check_property_type(
+                                   state, object->class_entry, property, value,
+                                   frame->line)) {
+#endif
                     } else {
                         pv_retain(value);
                         pv_release(object->slots[property->slot]);
@@ -2653,6 +3033,19 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                                            "property %.*s",
                                            (int)member_name->length,
                                            ps_data(member_name));
+#if PPHP_TYPECHECK
+                    } else if (property->type.count != 0U &&
+                               !property->initialized) {
+                        pphp_runtime_error(
+                            state, frame->line,
+                            "Typed static property %.*s::$%.*s must not be accessed before initialization",
+                            property->owner == NULL
+                                ? 0 : (int)property->owner->name->length,
+                            property->owner == NULL
+                                ? "" : ps_data(property->owner->name),
+                            (int)property->name->length,
+                            ps_data(property->name));
+#endif
                     } else if (!pclass_get_static_property(
                                    class_entry, ps_data(member_name),
                                    member_name->length, &value)) {
@@ -2682,6 +3075,12 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                                            "property %.*s",
                                            (int)member_name->length,
                                            ps_data(member_name));
+#if PPHP_TYPECHECK
+                    } else if (!check_property_type(
+                                   state, class_entry, property, value,
+                                   frame->line)) {
+                        pv_release(value);
+#endif
                     } else if (!pclass_set_static_property(
                                    class_entry, ps_data(member_name),
                                    member_name->length, value)) {

@@ -54,10 +54,16 @@ static size_t operand_size(uint8_t opcode) {
         case OP_CALL:
         case OP_NEW_OBJ:
         case OP_MCALL:
-        case OP_DEF_PROP:
         case OP_FE_NEXT:
         case OP_STATIC_INIT:
             return 3U;
+#if PPHP_TYPECHECK
+        case OP_DEF_PROP:
+            return 6U;
+#else
+        case OP_DEF_PROP:
+            return 3U;
+#endif
         case OP_SPROP_GET:
         case OP_SPROP_SET:
         case OP_CLSCONST:
@@ -239,6 +245,11 @@ static int disassemble_proto(FILE *stream, const pproto *proto, size_t index) {
                 fprintf(stream, " name=%u flags=0x%02x", constant,
                         proto->code[pc + 2U]);
                 print_constant(stream, proto, constant);
+#if PPHP_TYPECHECK
+                fprintf(stream, " type=%u default=%u",
+                        code_u16(proto->code, pc + 3U),
+                        proto->code[pc + 5U]);
+#endif
                 break;
             }
             case OP_LINE:

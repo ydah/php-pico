@@ -16,6 +16,34 @@ typedef struct pcatch {
     uint8_t reserved;
 } pcatch;
 
+#if PPHP_TYPECHECK
+typedef enum ptype_kind {
+    PTYPE_INT = 1,
+    PTYPE_FLOAT,
+    PTYPE_STRING,
+    PTYPE_BOOL,
+    PTYPE_ARRAY,
+    PTYPE_CALLABLE,
+    PTYPE_MIXED,
+    PTYPE_VOID,
+    PTYPE_NULL,
+    PTYPE_SELF,
+    PTYPE_STATIC,
+    PTYPE_PARENT,
+    PTYPE_NAMED
+} ptype_kind;
+
+typedef struct ptype_member {
+    pstring *name;
+    uint8_t kind;
+} ptype_member;
+
+typedef struct ptype_spec {
+    ptype_member *members;
+    uint8_t count;
+} ptype_spec;
+#endif
+
 typedef struct pproto {
     pstring *name;
     const void *declaration;
@@ -37,6 +65,10 @@ typedef struct pproto {
     pcatch *catches;
     size_t catch_count;
     size_t catch_capacity;
+#if PPHP_TYPECHECK
+    ptype_spec *parameter_types;
+    ptype_spec return_type;
+#endif
 } pproto;
 
 typedef struct pmodule {
@@ -64,6 +96,12 @@ int pproto_add_local(pproto *proto, const char *name, size_t length, uint8_t *sl
 int pproto_find_local(const pproto *proto, const char *name, size_t length,
                       uint8_t *slot);
 int pproto_add_catch(pproto *proto, pcatch entry);
+#if PPHP_TYPECHECK
+int ptype_spec_add(ptype_spec *spec, uint8_t kind,
+                   const char *name, size_t length);
+int ptype_spec_add_string(ptype_spec *spec, uint8_t kind, pstring *name);
+void ptype_spec_destroy(ptype_spec *spec);
+#endif
 
 int pmodule_init(pmodule *module);
 void pmodule_destroy(pmodule *module);

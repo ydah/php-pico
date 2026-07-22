@@ -49,6 +49,124 @@ static void fail(generator *gen, uint32_t line, const char *format, ...) {
     va_end(arguments);
 }
 
+#if PPHP_TYPECHECK
+static uint8_t declared_type_kind(pc_token_type token) {
+    switch (token) {
+        case T_INT_TYPE: return PTYPE_INT;
+        case T_FLOAT_TYPE: return PTYPE_FLOAT;
+        case T_STRING_TYPE: return PTYPE_STRING;
+        case T_BOOL_TYPE: return PTYPE_BOOL;
+        case T_ARRAY: return PTYPE_ARRAY;
+        case T_CALLABLE: return PTYPE_CALLABLE;
+        case T_MIXED: return PTYPE_MIXED;
+        case T_VOID: return PTYPE_VOID;
+        case T_NULL: return PTYPE_NULL;
+        case T_SELF: return PTYPE_SELF;
+        case T_STATIC: return PTYPE_STATIC;
+        case T_PARENT: return PTYPE_PARENT;
+        case T_IDENTIFIER: return PTYPE_NAMED;
+        default: return 0U;
+    }
+}
+
+static int compile_type_spec(generator *gen, const pc_ast *type,
+                             ptype_spec *spec) {
+    while (type != NULL && !gen->failed) {
+        pc_token token = type->as.type_decl.name;
+        uint8_t kind = declared_type_kind(token.type);
+        if (kind == 0U) {
+            fail(gen, type->line, "unsupported declared type");
+            return 0;
+        }
+#if !PPHP_ENABLE_FLOAT
+        if (kind == PTYPE_FLOAT) {
+            fail(gen, type->line,
+                 "float type declarations require PPHP_ENABLE_FLOAT=1");
+            return 0;
+        }
+#endif
+        if (!ptype_spec_add(spec, kind,
+                            kind == PTYPE_NAMED ? token.start : NULL,
+                            kind == PTYPE_NAMED ? token.length : 0U)) {
+            fail(gen, type->line, "out of memory storing declared type");
+            return 0;
+        }
+        type = type->next;
+    }
+    return !gen->failed;
+}
+
+static int compile_callable_types(generator *gen, pproto *proto,
+                                  const pc_ast *parameters,
+                                  const pc_ast *return_type) {
+    size_t index = 0U;
+    if (proto->n_params != 0U) {
+        proto->parameter_types = pphp_alloc(
+            (size_t)proto->n_params * sizeof(*proto->parameter_types));
+        if (proto->parameter_types == NULL) {
+            fail(gen, parameters == NULL ? 0U : parameters->line,
+                 "out of memory storing parameter types");
+            return 0;
+        }
+        memset(proto->parameter_types, 0,
+               (size_t)proto->n_params * sizeof(*proto->parameter_types));
+    }
+    while (parameters != NULL && index < proto->n_params) {
+        if (!compile_type_spec(gen, parameters->as.parameter.type,
+                               &proto->parameter_types[index])) return 0;
+        index++;
+        parameters = parameters->next;
+    }
+    return compile_type_spec(gen, return_type, &proto->return_type);
+}
+
+static uint16_t declared_type_constant(generator *gen, const pc_ast *type) {
+    const pc_ast *cursor = type;
+    size_t length = 0U;
+    size_t offset = 0U;
+    char *bytes;
+    pstring *string;
+    pvalue value;
+    uint16_t index = UINT16_MAX;
+    while (cursor != NULL) {
+        if (cursor->as.type_decl.name.length > SIZE_MAX - length ||
+            (cursor->next != NULL && length == SIZE_MAX)) {
+            fail(gen, cursor->line, "declared property type is too long");
+            return UINT16_MAX;
+        }
+        length += cursor->as.type_decl.name.length;
+        if (cursor->next != NULL) length++;
+        cursor = cursor->next;
+    }
+    if (type == NULL) return UINT16_MAX;
+    bytes = pphp_alloc(length);
+    if (bytes == NULL) {
+        fail(gen, type->line, "out of memory storing property type");
+        return UINT16_MAX;
+    }
+    cursor = type;
+    while (cursor != NULL) {
+        memcpy(bytes + offset, cursor->as.type_decl.name.start,
+               cursor->as.type_decl.name.length);
+        offset += cursor->as.type_decl.name.length;
+        if (cursor->next != NULL) bytes[offset++] = '|';
+        cursor = cursor->next;
+    }
+    string = ps_new(bytes, length);
+    pphp_free(bytes);
+    if (string == NULL) {
+        fail(gen, type->line, "out of memory storing property type");
+        return UINT16_MAX;
+    }
+    value = pv_heap(PT_STRING, &string->header);
+    if (!pproto_add_constant(gen->proto, value, &index)) {
+        fail(gen, type->line, "constant pool limit exceeded");
+    }
+    pv_release(value);
+    return index;
+}
+#endif
+
 static void emit_byte(generator *gen, uint8_t byte, uint32_t line) {
     if (!gen->failed && !pproto_emit_u8(gen->proto, byte)) {
         fail(gen, line, "out of memory while emitting bytecode");
@@ -782,7 +900,14 @@ static void compile_closure_expression(generator *gen, const pc_ast *node) {
     child.module = gen->module;
     child.proto = proto;
     child.error = gen->error;
+#if PPHP_TYPECHECK
+    if (!compile_callable_types(gen, proto, node->as.closure.parameters,
+                                node->as.closure.return_type)) return;
+#endif
     compile_parameter_defaults(&child, node->as.closure.parameters);
+#if PPHP_TYPECHECK
+    emit_byte(&child, OP_TYPECHECK_ARGS, node->line);
+#endif
     if (node->as.closure.is_arrow) {
         compile_expression(&child, node->as.closure.body);
         emit_byte(&child, OP_RET, node->line);
@@ -2958,7 +3083,15 @@ static int compile_function(generator *gen, const pc_ast *function,
     child.module = gen->module;
     child.proto = proto;
     child.error = gen->error;
+#if PPHP_TYPECHECK
+    if (!compile_callable_types(gen, proto,
+                                function->as.function.parameters,
+                                function->as.function.return_type)) return 0;
+#endif
     compile_parameter_defaults(&child, function->as.function.parameters);
+#if PPHP_TYPECHECK
+    emit_byte(&child, OP_TYPECHECK_ARGS, function->line);
+#endif
     compile_statement(&child, function->as.function.body);
     if (!child.failed) {
         emit_byte(&child, OP_RET_NULL, function->line);
@@ -3059,7 +3192,21 @@ static int compile_method(generator *gen, pc_token class_name,
     child.module = gen->module;
     child.proto = proto;
     child.error = gen->error;
+#if PPHP_TYPECHECK
+    if (method->as.function.name.length == 11U &&
+        memcmp(method->as.function.name.start, "__construct", 11U) == 0 &&
+        method->as.function.return_type != NULL) {
+        fail(gen, method->line, "a constructor cannot declare a return type");
+        return 0;
+    }
+    if (!compile_callable_types(gen, proto,
+                                method->as.function.parameters,
+                                method->as.function.return_type)) return 0;
+#endif
     compile_parameter_defaults(&child, method->as.function.parameters);
+#if PPHP_TYPECHECK
+    emit_byte(&child, OP_TYPECHECK_ARGS, method->line);
+#endif
     if (method->as.function.name.length == 11U &&
         memcmp(method->as.function.name.start, "__construct", 11U) == 0) {
         parameter = method->as.function.parameters;
@@ -3156,6 +3303,14 @@ static void compile_class_definition(generator *gen, const pc_ast *class_node) {
                         emit_u16(gen, property_name, parameter->line);
                         emit_byte(gen, parameter->as.parameter.flags,
                                   parameter->line);
+#if PPHP_TYPECHECK
+                        emit_u16(gen, declared_type_constant(
+                                          gen, parameter->as.parameter.type),
+                                 parameter->line);
+                        emit_byte(gen,
+                                  parameter->as.parameter.default_value != NULL,
+                                  parameter->line);
+#endif
                     }
                     parameter = parameter->next;
                 }
@@ -3181,6 +3336,12 @@ static void compile_class_definition(generator *gen, const pc_ast *class_node) {
             emit_byte(gen, OP_DEF_PROP, member->line);
             emit_u16(gen, name, member->line);
             emit_byte(gen, member->as.property.flags, member->line);
+#if PPHP_TYPECHECK
+            emit_u16(gen, declared_type_constant(gen, member->as.property.type),
+                     member->line);
+            emit_byte(gen, member->as.property.default_value != NULL,
+                      member->line);
+#endif
         } else if (member->kind == AST_FUNCTION) {
             uint16_t name = name_constant(gen, member->as.function.name);
             uint16_t proto_index;

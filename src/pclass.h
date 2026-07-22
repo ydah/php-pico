@@ -26,6 +26,11 @@ typedef struct pproperty {
     uint8_t flags;
     pvalue default_value;
     pclass *owner;
+#if PPHP_TYPECHECK
+    ptype_spec type;
+    uint8_t has_default;
+    uint8_t initialized;
+#endif
 } pproperty;
 
 typedef struct pmethod {
@@ -81,6 +86,12 @@ void pclass_release_runtime(pclass *class_entry);
 void pclass_release_values(pclass *class_entry);
 int pclass_add_property(pclass *class_entry, const char *name, size_t length,
                         uint8_t flags, pvalue default_value);
+#if PPHP_TYPECHECK
+int pclass_add_typed_property(pclass *class_entry, const char *name,
+                              size_t length, uint8_t flags,
+                              pvalue default_value, const ptype_spec *type,
+                              int has_default);
+#endif
 int pclass_add_method(pclass *class_entry, const char *name, size_t length,
                       uint8_t flags, const pproto *proto,
                       const pmodule *module);
@@ -90,6 +101,13 @@ int pclass_add_native_method(pclass *class_entry, const char *name,
 int pclass_add_static_property(pclass *class_entry, const char *name,
                                size_t length, uint8_t flags,
                                pvalue default_value);
+#if PPHP_TYPECHECK
+int pclass_add_typed_static_property(pclass *class_entry, const char *name,
+                                     size_t length, uint8_t flags,
+                                     pvalue default_value,
+                                     const ptype_spec *type,
+                                     int has_default);
+#endif
 const pproperty *pclass_find_static_property(const pclass *class_entry,
                                              const char *name, size_t length);
 int pclass_get_static_property(const pclass *class_entry, const char *name,
