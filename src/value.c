@@ -65,7 +65,7 @@ int pv_is_truthy(pvalue value) {
         case PT_ARRAY:
             return value.as.gc != NULL && ((const parray *)value.as.gc)->size != 0U;
         case PT_ROSTRING: {
-            const pro_string *string = (const pro_string *)value.as.ptr;
+            const pstring *string = (const pstring *)value.as.gc;
             return string != NULL && string->length != 0U &&
                    !(string->length == 1U && string->data[0] == '0');
         }
@@ -76,7 +76,8 @@ int pv_is_truthy(pvalue value) {
 
 void pv_retain(pvalue value) {
     pheader *header;
-    if (value.type < PT_STRING || value.type == PT_ROSTRING || value.as.gc == NULL) {
+    if (value.type < PT_STRING || value.type == PT_ROSTRING ||
+        value.as.gc == NULL || value.as.gc->type == PT_ROSTRING) {
         return;
     }
     header = value.as.gc;
@@ -87,7 +88,8 @@ void pv_retain(pvalue value) {
 
 void pv_release(pvalue value) {
     pheader *header;
-    if (value.type < PT_STRING || value.type == PT_ROSTRING || value.as.gc == NULL) {
+    if (value.type < PT_STRING || value.type == PT_ROSTRING ||
+        value.as.gc == NULL || value.as.gc->type == PT_ROSTRING) {
         return;
     }
     header = value.as.gc;

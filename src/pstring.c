@@ -16,6 +16,7 @@ uint32_t ps_hash_bytes(const char *bytes, size_t length) {
 
 pstring *ps_new(const char *bytes, size_t length) {
     pstring *string;
+    char *storage;
     if ((bytes == NULL && length != 0U) || length > PPHP_STR_MAX) {
         return NULL;
     }
@@ -29,10 +30,12 @@ pstring *ps_new(const char *bytes, size_t length) {
     string->length = (uint16_t)length;
     string->reserved = 0U;
     string->hash = ps_hash_bytes(bytes == NULL ? "" : bytes, length);
+    storage = (char *)(string + 1);
+    string->data = storage;
     if (length != 0U) {
-        memcpy(string->data, bytes, length);
+        memcpy(storage, bytes, length);
     }
-    string->data[length] = '\0';
+    storage[length] = '\0';
     return string;
 }
 
@@ -62,9 +65,9 @@ int ps_equal_bytes(const pstring *string, const char *bytes, size_t length) {
 }
 
 void ps_destroy(pstring *string) {
-    if (string == NULL || (string->header.flags & PSTRING_INTERNED) != 0U) {
+    if (string == NULL || string->header.type == PT_ROSTRING ||
+        (string->header.flags & PSTRING_INTERNED) != 0U) {
         return;
     }
     pphp_free(string);
 }
-

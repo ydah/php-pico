@@ -174,6 +174,7 @@ void pmodule_destroy(pmodule *module) {
         pproto_destroy(module->protos[i]);
     }
     pphp_free(module->protos);
+    pphp_free(module->ro_strings);
     if (module->owns_backing) pphp_free(module->backing);
     memset(module, 0, sizeof(*module));
 }
@@ -547,7 +548,8 @@ int pphp_pbc_load(const void *data, size_t length, pmodule *module) {
     size_t table_entries;
     size_t table_size;
     size_t proto_table;
-    pstring **strings = NULL;
+    size_t records_start;
+    pstring *strings = NULL;
     size_t i;
     int result = PPHP_E_PARSE;
     if (bytes == NULL || module == NULL ||
@@ -567,33 +569,61 @@ int pphp_pbc_load(const void *data, size_t length, pmodule *module) {
     table_size = table_entries * 4U;
     if (!pbc_range_available(16U, table_size, length)) return PPHP_E_PARSE;
     proto_table = 16U + (size_t)n_strings * 4U;
-    strings = pphp_alloc((size_t)n_strings * sizeof(*strings));
-    if (n_strings != 0U && strings == NULL) return PPHP_E_NOMEM;
-    if (n_strings != 0U) {
-        memset(strings, 0, (size_t)n_strings * sizeof(*strings));
+    records_start = align4(16U + table_size);
+    if (records_start > length) return PPHP_E_PARSE;
+    for (i = 0U; i < table_entries; i++) {
+        size_t record_offset = get_u32(bytes, 16U + i * 4U);
+        size_t previous = i == 0U
+                              ? records_start
+                              : get_u32(bytes, 16U + (i - 1U) * 4U);
+        if ((record_offset & 3U) != 0U || record_offset < records_start ||
+            record_offset < previous || (i != 0U && record_offset == previous) ||
+            record_offset > length) return PPHP_E_PARSE;
     }
     if (!pmodule_init(module)) {
-        result = PPHP_E_NOMEM;
-        goto done;
+        return PPHP_E_NOMEM;
     }
-    for (i = 0U; i < n_strings; i++) {
-        size_t offset = get_u32(bytes, 16U + i * 4U);
-        uint16_t string_length;
-        size_t record_size;
-        if (!pbc_range_available(offset, 2U, length)) goto failed_module;
-        string_length = get_u16(bytes, offset);
-        record_size = 2U + (size_t)string_length + 1U;
-        if (!pbc_range_available(offset, record_size, length)) {
-            goto failed_module;
-        }
-        strings[i] = ps_new((const char *)bytes + offset + 2U, string_length);
-        if (strings[i] == NULL) {
+    module->image = bytes;
+    module->image_length = length;
+    module->ro_string_count = n_strings;
+    if (n_strings != 0U) {
+        module->ro_strings = pphp_alloc((size_t)n_strings *
+                                         sizeof(*module->ro_strings));
+        if (module->ro_strings == NULL) {
             result = PPHP_E_NOMEM;
             goto failed_module;
         }
+        memset(module->ro_strings, 0,
+               (size_t)n_strings * sizeof(*module->ro_strings));
+    }
+    strings = module->ro_strings;
+    for (i = 0U; i < n_strings; i++) {
+        size_t offset = get_u32(bytes, 16U + i * 4U);
+        size_t limit = get_u32(bytes, 16U + (i + 1U) * 4U);
+        uint16_t string_length;
+        size_t record_size;
+        if ((offset & 3U) != 0U ||
+            !pbc_range_available(offset, 2U, length)) goto failed_module;
+        string_length = get_u16(bytes, offset);
+        record_size = 2U + (size_t)string_length + 1U;
+        if (!pbc_range_available(offset, record_size, limit) ||
+            align4(offset + record_size) != limit ||
+            bytes[offset + 2U + string_length] != 0U) {
+            goto failed_module;
+        }
+        strings[i].header.refcnt = UINT16_MAX;
+        strings[i].header.type = PT_ROSTRING;
+        strings[i].header.flags = 0U;
+        strings[i].length = string_length;
+        strings[i].reserved = 0U;
+        strings[i].data = (const char *)bytes + offset + 2U;
+        strings[i].hash = ps_hash_bytes(strings[i].data, string_length);
     }
     for (i = 0U; i < n_protos; i++) {
         size_t offset = get_u32(bytes, proto_table + i * 4U);
+        size_t limit = i + 1U < n_protos
+                           ? get_u32(bytes, proto_table + (i + 1U) * 4U)
+                           : length;
         uint16_t code_length;
         uint16_t constant_count;
         uint16_t catch_count;
@@ -601,16 +631,16 @@ int pphp_pbc_load(const void *data, size_t length, pmodule *module) {
         uint8_t local_count;
         pproto *proto;
         size_t j;
-        if (!pbc_range_available(offset, 16U, length)) goto failed_module;
+        if (!pbc_range_available(offset, 16U, limit)) goto failed_module;
         code_length = get_u16(bytes, offset + 8U);
         constant_count = get_u16(bytes, offset + 10U);
         catch_count = get_u16(bytes, offset + 12U);
         name_sid = get_u16(bytes, offset + 14U);
         if (name_sid >= n_strings ||
-            !pbc_range_available(offset, 16U + align4(code_length), length)) {
+            !pbc_range_available(offset, 16U + align4(code_length), limit)) {
             goto failed_module;
         }
-        proto = pproto_new(strings[name_sid]->data, strings[name_sid]->length);
+        proto = pproto_new(strings[name_sid].data, strings[name_sid].length);
         if (proto == NULL || !pmodule_add(module, proto)) {
             pproto_destroy(proto);
             result = PPHP_E_NOMEM;
@@ -627,7 +657,7 @@ int pphp_pbc_load(const void *data, size_t length, pmodule *module) {
         proto->owns_code = 0U;
         proto->code_length = code_length;
         proto->code_capacity = 0U;
-        if (!pbc_advance(&offset, 16U + align4(code_length), length)) {
+        if (!pbc_advance(&offset, 16U + align4(code_length), limit)) {
             goto failed_module;
         }
         for (j = 0U; j < constant_count; j++) {
@@ -635,10 +665,10 @@ int pphp_pbc_load(const void *data, size_t length, pmodule *module) {
             uint16_t ignored;
             uint8_t tag;
             size_t constant_size;
-            if (!pbc_range_available(offset, 8U, length)) goto failed_module;
+            if (!pbc_range_available(offset, 8U, limit)) goto failed_module;
             tag = bytes[offset];
             constant_size = tag == 3U || tag == 4U ? 16U : 8U;
-            if (!pbc_range_available(offset, constant_size, length)) {
+            if (!pbc_range_available(offset, constant_size, limit)) {
                 goto failed_module;
             }
             if (tag == 0U) {
@@ -656,7 +686,7 @@ int pphp_pbc_load(const void *data, size_t length, pmodule *module) {
             } else if (tag == 2U) {
                 uint32_t sid = get_u32(bytes, offset + 4U);
                 if (sid >= n_strings) goto failed_module;
-                value = pv_heap(PT_STRING, &strings[sid]->header);
+                value = pv_heap(PT_STRING, &strings[sid].header);
             } else if (tag == 3U) {
 #if PPHP_ENABLE_FLOAT
                 uint64_t bits;
@@ -687,27 +717,27 @@ int pphp_pbc_load(const void *data, size_t length, pmodule *module) {
                 result = PPHP_E_NOMEM;
                 goto failed_module;
             }
-            if (!pbc_advance(&offset, constant_size, length)) {
+            if (!pbc_advance(&offset, constant_size, limit)) {
                 goto failed_module;
             }
         }
         for (j = 0U; j < local_count; j++) {
             uint16_t local_sid;
             uint8_t slot;
-            if (!pbc_range_available(offset, 2U, length)) goto failed_module;
+            if (!pbc_range_available(offset, 2U, limit)) goto failed_module;
             local_sid = get_u16(bytes, offset);
             if (local_sid >= n_strings ||
-                !pproto_add_local(proto, strings[local_sid]->data,
-                                  strings[local_sid]->length, &slot) ||
+                !pproto_add_local(proto, strings[local_sid].data,
+                                  strings[local_sid].length, &slot) ||
                 slot != j) {
                 goto failed_module;
             }
-            if (!pbc_advance(&offset, 2U, length)) goto failed_module;
+            if (!pbc_advance(&offset, 2U, limit)) goto failed_module;
         }
         for (j = 0U; j < catch_count; j++) {
             pcatch entry;
             uint16_t class_sid;
-            if (!pbc_range_available(offset, 10U, length)) goto failed_module;
+            if (!pbc_range_available(offset, 10U, limit)) goto failed_module;
             entry.try_start = get_u16(bytes, offset);
             entry.try_end = get_u16(bytes, offset + 2U);
             entry.handler_pc = get_u16(bytes, offset + 4U);
@@ -723,7 +753,7 @@ int pphp_pbc_load(const void *data, size_t length, pmodule *module) {
                 pvalue class_name;
                 uint16_t class_constant;
                 if (class_sid >= n_strings) goto failed_module;
-                class_name = pv_heap(PT_STRING, &strings[class_sid]->header);
+                class_name = pv_heap(PT_STRING, &strings[class_sid].header);
                 if (!pproto_add_constant(proto, class_name, &class_constant)) {
                     result = PPHP_E_NOMEM;
                     goto failed_module;
@@ -731,20 +761,15 @@ int pphp_pbc_load(const void *data, size_t length, pmodule *module) {
                 entry.class_constant = class_constant;
             }
             if (!pproto_add_catch(proto, entry)) goto failed_module;
-            if (!pbc_advance(&offset, 10U, length)) goto failed_module;
+            if (!pbc_advance(&offset, 10U, limit)) goto failed_module;
         }
+        if (align4(offset) != limit) goto failed_module;
     }
     result = PPHP_OK;
     goto done;
 failed_module:
     pmodule_destroy(module);
 done:
-    for (i = 0U; i < n_strings; i++) {
-        if (strings[i] != NULL) {
-            pv_release(pv_heap(PT_STRING, &strings[i]->header));
-        }
-    }
-    pphp_free(strings);
     return result;
 }
 

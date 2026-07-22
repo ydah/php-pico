@@ -13,13 +13,8 @@ typedef struct pstring {
     uint16_t length;
     uint16_t reserved;
     uint32_t hash;
-    char data[];
-} pstring;
-
-typedef struct pro_string {
-    uint16_t length;
     const char *data;
-} pro_string;
+} pstring;
 
 uint32_t ps_hash_bytes(const char *bytes, size_t length);
 pstring *ps_new(const char *bytes, size_t length);
@@ -29,4 +24,3 @@ int ps_equal_bytes(const pstring *string, const char *bytes, size_t length);
 void ps_destroy(pstring *string);
 
 #endif
-

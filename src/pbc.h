@@ -43,6 +43,10 @@ typedef struct pmodule {
     pproto **protos;
     size_t count;
     size_t capacity;
+    pstring *ro_strings;
+    size_t ro_string_count;
+    const uint8_t *image;
+    size_t image_length;
     void *backing;
     uint8_t owns_backing;
 } pmodule;
