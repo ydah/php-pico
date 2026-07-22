@@ -289,20 +289,75 @@ static int retain_module(pphp_state *state, pmodule *module,
     return 1;
 }
 
-static void release_retained_module(pphp_state *state, pmodule *module) {
+typedef struct definition_checkpoint {
+    size_t class_count;
+    size_t runtime_function_count;
+    size_t repl_module_count;
+    const pmodule *module;
+} definition_checkpoint;
+
+static definition_checkpoint checkpoint_definitions(const pphp_state *state) {
+    definition_checkpoint checkpoint;
+    checkpoint.class_count = state->class_count;
+    checkpoint.runtime_function_count = state->runtime_function_count;
+    checkpoint.repl_module_count = state->repl_module_count;
+    checkpoint.module = state->module;
+    return checkpoint;
+}
+
+static int object_uses_new_class(const pphp_state *state,
+                                 const pobject *object,
+                                 definition_checkpoint checkpoint) {
     size_t i;
-    if (state == NULL || module == NULL) return;
-    for (i = 0U; i < state->repl_module_count; i++) {
-        if (state->repl_modules[i] != module) continue;
-        if (i + 1U < state->repl_module_count) {
-            memmove(state->repl_modules + i, state->repl_modules + i + 1U,
-                    (state->repl_module_count - i - 1U) *
-                        sizeof(*state->repl_modules));
-        }
-        state->repl_module_count--;
-        pmodule_release(module);
-        return;
+    for (i = checkpoint.class_count; i < state->class_count; i++) {
+        if (object->class_entry == state->classes[i]) return 1;
     }
+    return 0;
+}
+
+static void run_rolled_back_destructors(
+    pphp_state *state, definition_checkpoint checkpoint) {
+    int invoked;
+    do {
+        pobject *object = state->gc_objects;
+        invoked = 0;
+        if (object != NULL) pv_retain(pv_heap(PT_OBJECT, &object->header));
+        while (object != NULL) {
+            pobject *next = object->gc_next;
+            if (next != NULL) pv_retain(pv_heap(PT_OBJECT, &next->header));
+            if (object_uses_new_class(state, object, checkpoint)) {
+                invoked |= pobject_run_destructor(object);
+            }
+            pv_release(pv_heap(PT_OBJECT, &object->header));
+            object = next;
+        }
+    } while (invoked);
+}
+
+static void rollback_definitions(pphp_state *state,
+                                 definition_checkpoint checkpoint) {
+    size_t class_end = state->class_count;
+    size_t i;
+    run_rolled_back_destructors(state, checkpoint);
+    while (state->runtime_function_count >
+           checkpoint.runtime_function_count) {
+        pruntime_function *entry = &state->runtime_functions[
+            --state->runtime_function_count];
+        pmodule_release((pmodule *)entry->module);
+    }
+    for (i = checkpoint.class_count; i < class_end; i++) {
+        pclass_release_values(state->classes[i]);
+    }
+    (void)pphp_gc_collect(state);
+    for (i = class_end; i > checkpoint.class_count; i--) {
+        pclass_release(state->classes[i - 1U]);
+        state->classes[i - 1U] = NULL;
+    }
+    state->class_count = checkpoint.class_count;
+    while (state->repl_module_count > checkpoint.repl_module_count) {
+        pmodule_release(state->repl_modules[--state->repl_module_count]);
+    }
+    state->module = checkpoint.module;
 }
 
 static int module_has_persistent_functions(const pmodule *module) {
@@ -406,6 +461,7 @@ int pphp_exec_include(pphp_state *state, const char *path, uint8_t mode,
     size_t length = 0U;
     pmodule module;
     pmodule *execution_module = &module;
+    definition_checkpoint checkpoint;
 #if PPHP_ENABLE_COMPILER
     pc_arena arena;
     pc_parser parser;
@@ -503,6 +559,7 @@ int pphp_exec_include(pphp_state *state, const char *path, uint8_t mode,
         state->error_line = owner->error_line;
         return PPHP_E_RUNTIME;
     }
+    checkpoint = checkpoint_definitions(owner);
     if (!retain_module(owner, &module, &execution_module)) {
         pmodule_destroy(&module);
         pv_release(path_value);
@@ -511,11 +568,11 @@ int pphp_exec_include(pphp_state *state, const char *path, uint8_t mode,
         return PPHP_E_NOMEM;
     }
     if (once && !pa_set(owner->included_files, path_value, pv_bool(1))) {
+        rollback_definitions(owner, checkpoint);
         pv_release(path_value);
         pphp_runtime_error(state, 0U, "out of memory tracking included file");
         return PPHP_E_NOMEM;
     }
-    pv_release(path_value);
     child = *owner;
     child.stack_count = 0U;
     child.frame_count = 0U;
@@ -541,10 +598,14 @@ int pphp_exec_include(pphp_state *state, const char *path, uint8_t mode,
         state->exit_status = child.exit_status;
     }
     if (status != PPHP_OK) {
+        if (once) (void)pa_remove(owner->included_files, path_value);
+        rollback_definitions(owner, checkpoint);
+        pv_release(path_value);
         (void)snprintf(state->error, sizeof(state->error), "%s", child.error);
         state->error_line = child.error_line;
         return status;
     }
+    pv_release(path_value);
     *result = pv_bool(1);
     return PPHP_OK;
 }
@@ -940,6 +1001,7 @@ int pphp_exec_source_mode(pphp_state *state, const char *source, size_t length,
     pc_ast *program;
     pmodule module;
     pc_codegen_error codegen_error;
+    definition_checkpoint checkpoint;
     int result;
     int retained;
     pmodule *execution_module = &module;
@@ -976,6 +1038,8 @@ int pphp_exec_source_mode(pphp_state *state, const char *source, size_t length,
         pmodule_destroy(&module);
         return PPHP_E_RUNTIME;
     }
+    if (!repl) pphp_clear_user_classes(state);
+    checkpoint = checkpoint_definitions(state);
     if (retained && !retain_module(state, &module, &execution_module)) {
         pmodule_destroy(&module);
         pphp_runtime_error(state, 0U,
@@ -989,16 +1053,15 @@ int pphp_exec_source_mode(pphp_state *state, const char *source, size_t length,
         return PPHP_E_RUNTIME;
     }
     result = pphp_vm_execute(state, execution_module);
+    if (result != PPHP_OK) {
+        rollback_definitions(state, checkpoint);
+        if (!retained) pmodule_release(execution_module);
+        return result;
+    }
     if (!repl) {
         state->module = NULL;
-        if (result != PPHP_OK) {
-            pphp_remove_module_functions(state, execution_module);
-            if (retained) release_retained_module(state, execution_module);
-        } else if (!retained) {
-            pmodule_release(execution_module);
-        }
+        if (!retained) pmodule_release(execution_module);
         pphp_clear_user_classes(state);
-        if (result != PPHP_OK && !retained) pmodule_release(execution_module);
     }
     return result;
 #else
@@ -1028,6 +1091,7 @@ static int exec_pbc(pphp_state *state, const void *pbc, size_t length,
                     void *owned_backing) {
     pmodule module;
     pmodule *execution_module = &module;
+    definition_checkpoint checkpoint;
     int result;
     int retained;
     if (state == NULL) {
@@ -1057,6 +1121,8 @@ static int exec_pbc(pphp_state *state, const void *pbc, size_t length,
         pmodule_destroy(&module);
         return PPHP_E_RUNTIME;
     }
+    pphp_clear_user_classes(state);
+    checkpoint = checkpoint_definitions(state);
     if (retained && !retain_module(state, &module, &execution_module)) {
         pmodule_destroy(&module);
         pphp_runtime_error(state, 0U,
@@ -1069,15 +1135,14 @@ static int exec_pbc(pphp_state *state, const void *pbc, size_t length,
         return PPHP_E_RUNTIME;
     }
     result = pphp_vm_execute(state, execution_module);
-    state->module = NULL;
     if (result != PPHP_OK) {
-        pphp_remove_module_functions(state, execution_module);
-        if (retained) release_retained_module(state, execution_module);
-    } else if (!retained) {
-        pmodule_release(execution_module);
+        rollback_definitions(state, checkpoint);
+        if (!retained) pmodule_release(execution_module);
+        return result;
     }
+    state->module = NULL;
+    if (!retained) pmodule_release(execution_module);
     pphp_clear_user_classes(state);
-    if (result != PPHP_OK && !retained) pmodule_release(execution_module);
     return result;
 }
 

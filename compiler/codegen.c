@@ -3237,6 +3237,15 @@ static int compile_method(generator *gen, const pc_ast *class_node,
         fail(gen, method->line, "method cannot be both abstract and final");
         return 0;
     }
+    if ((is_constructor || is_destructor) &&
+        (method->as.function.flags & PC_MOD_STATIC) != 0U) {
+        fail(gen, method->line, "constructor and destructor must not be static");
+        return 0;
+    }
+    if (is_destructor && method->as.function.parameters != NULL) {
+        fail(gen, method->line, "__destruct() must not take arguments");
+        return 0;
+    }
     qualified = pphp_alloc(qualified_length);
     if (qualified == NULL) {
         fail(gen, method->line, "out of memory creating method name");

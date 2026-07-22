@@ -307,7 +307,16 @@ assert_failure "$typecheck_off" \
     'property promotion requires a concrete instance constructor' promotion-abstract
 assert_failure "$typecheck_off" \
     'class Bad { public static function __Construct(public int $value) {} }' \
-    'property promotion requires a concrete instance constructor' promotion-static
+    'constructor and destructor must not be static' promotion-static
+assert_failure "$typecheck_off" \
+    'class Bad { public static function __CONSTRUCT() {} }' \
+    'constructor and destructor must not be static' static-constructor
+assert_failure "$typecheck_off" \
+    'class Bad { public static function __DESTRUCT() {} }' \
+    'constructor and destructor must not be static' static-destructor
+assert_failure "$typecheck_off" \
+    'class Bad { public function __DeStRuCt($value) {} }' \
+    '__destruct() must not take arguments' destructor-arguments
 assert_failure "$typecheck_off" 'class Bad { public private int $value; }' \
     'multiple visibility modifiers' visibility-property
 assert_failure "$typecheck_off" \

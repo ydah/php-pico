@@ -45,6 +45,18 @@ bool(false)'
 
 printf '%s\n' '<?php echo 1.25;' > "$temporary/float.php"
 $float_compiler -c "$temporary/float.php" -o "$temporary/float.pbc"
+cp "$temporary/float.pbc" "$temporary/legacy-float.pbc"
+printf '\006' | dd of="$temporary/legacy-float.pbc" bs=1 seek=6 conv=notrunc \
+    2>/dev/null
+test "$($float_compiler "$temporary/legacy-float.pbc")" = '1.25'
+if $runtime "$temporary/legacy-float.pbc" > "$temporary/legacy.out" \
+        2> "$temporary/legacy.err"; then
+    echo 'integer-only runtime accepted a legacy floating-point PBC image' >&2
+    exit 1
+fi
+test ! -s "$temporary/legacy.out"
+grep -q 'PBC image requires float support' "$temporary/legacy.err"
+
 if $runtime "$temporary/float.pbc" > "$temporary/pbc.out" 2> "$temporary/pbc.err"; then
     echo 'integer-only runtime accepted a floating-point PBC constant' >&2
     exit 1

@@ -23,6 +23,15 @@ typedef enum pproto_role {
     PPROTO_CLOSURE
 } pproto_role;
 
+enum {
+    PPHP_PBC_FLAG_INT64 = 1U,
+    PPHP_PBC_FLAG_DOUBLE = 2U,
+    PPHP_PBC_FLAG_LINE_INFO = 4U,
+    PPHP_PBC_FLAG_TYPECHECK = 8U,
+    PPHP_PBC_FLAG_FLOAT = 16U,
+    PPHP_PBC_FLAG_FEATURES = 32U
+};
+
 #if PPHP_TYPECHECK
 typedef enum ptype_kind {
     PTYPE_INT = 1,

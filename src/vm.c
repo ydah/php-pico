@@ -1862,7 +1862,6 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
         pphp_runtime_error(state, 0U, "module has no entry point");
         return PPHP_E_RUNTIME;
     }
-    if (!state->repl_mode) pphp_clear_user_classes(state);
     if (pphp_find_class(state, "Throwable", 9U) == NULL &&
         !pphp_register_exception_classes(state)) {
         pphp_runtime_error(state, 0U, "cannot initialize exception classes");

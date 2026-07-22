@@ -18,6 +18,9 @@ typedef struct output_buffer {
 } output_buffer;
 
 static uint8_t vm_pool[256U * 1024U];
+#if PPHP_TYPECHECK
+static uint8_t pbc_oom_pool[64U * 1024U];
+#endif
 static pclass *native_test_class;
 static int native_finalized;
 
@@ -172,11 +175,13 @@ static size_t test_constant_offset(const uint8_t *bytes, size_t proto_offset,
 #endif
 
 static void minimal_pbc(uint8_t *bytes, size_t length) {
-    uint16_t flags = (uint16_t)((PPHP_INT64 ? 1U : 0U) |
-                                (PPHP_USE_DOUBLE ? 2U : 0U) |
-                                (PPHP_LINE_INFO ? 4U : 0U) |
-                                (PPHP_TYPECHECK ? 8U : 0U) |
-                                (PPHP_ENABLE_FLOAT ? 16U : 0U));
+    uint16_t flags = (uint16_t)(
+        (PPHP_INT64 ? PPHP_PBC_FLAG_INT64 : 0U) |
+        (PPHP_USE_DOUBLE ? PPHP_PBC_FLAG_DOUBLE : 0U) |
+        (PPHP_LINE_INFO ? PPHP_PBC_FLAG_LINE_INFO : 0U) |
+        (PPHP_TYPECHECK ? PPHP_PBC_FLAG_TYPECHECK : 0U) |
+        (PPHP_ENABLE_FLOAT ? PPHP_PBC_FLAG_FLOAT : 0U) |
+        PPHP_PBC_FLAG_FEATURES);
     memset(bytes, 0, 128U);
     memcpy(bytes, "PPBC", 4U);
     test_put_u16(bytes, 4U, (uint16_t)PPHP_PBC_FORMAT_VERSION);
@@ -1043,13 +1048,30 @@ TEST(class_reachability_sweeps_dead_graphs_beside_live_graphs) {
 
 TEST(pbc_loader_rejects_truncated_and_wrapping_sections) {
     uint8_t bytes[128];
+    size_t valid_length;
 
 #if PPHP_TYPECHECK
-    minimal_pbc(bytes, 48U);
-    ASSERT_EQ(PPHP_OK, load_test_pbc(bytes, 48U));
+    valid_length = 48U;
 #else
-    minimal_pbc(bytes, 44U);
-    ASSERT_EQ(PPHP_OK, load_test_pbc(bytes, 44U));
+    valid_length = 44U;
+#endif
+    minimal_pbc(bytes, valid_length);
+    ASSERT_EQ(PPHP_OK, load_test_pbc(bytes, valid_length));
+#if PPHP_ENABLE_FLOAT
+    {
+        uint16_t flags = (uint16_t)((uint16_t)bytes[6U] |
+                                    (uint16_t)((uint16_t)bytes[7U] << 8U));
+        test_put_u16(bytes, 6U,
+                     (uint16_t)(flags &
+                         (uint16_t)~(PPHP_PBC_FLAG_FEATURES |
+                                     PPHP_PBC_FLAG_FLOAT)));
+        ASSERT_EQ(PPHP_OK, load_test_pbc(bytes, valid_length));
+        minimal_pbc(bytes, valid_length);
+        test_put_u16(bytes, 6U,
+                     (uint16_t)(flags &
+                               (uint16_t)~PPHP_PBC_FLAG_FLOAT));
+        ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(bytes, valid_length));
+    }
 #endif
 
     minimal_pbc(bytes, 20U);
@@ -1124,6 +1146,8 @@ TEST(pbc_loader_rejects_corrupt_declared_type_metadata) {
         " public parent $parent; public int $value = 1;"
         " public function __construct(): void {}"
         " public function method(int $value): int { return $value; }"
+        " public function __destruct() {}"
+        " public function destroyTen(int $value): int { return $value; }"
         "}"
         "readonly class ReadonlyBlob { public int $item; }"
         "function typed(TypeBlobClass|int $value = 1): string { return 'ok'; }"
@@ -1156,10 +1180,16 @@ TEST(pbc_loader_rejects_corrupt_declared_type_metadata) {
     size_t typecheck_opcode;
     size_t return_opcode;
     size_t method_opcode;
+    size_t constructor_opcode;
+    size_t destructor_opcode;
+    size_t argument_method_opcode;
     size_t constructor_proto;
     size_t constructor_type;
     size_t method_proto;
     size_t method_name_record;
+    size_t destructor_proto;
+    size_t argument_method_proto;
+    size_t argument_method_proto_name_record;
     size_t store_opcode;
     size_t string_record;
     pphp_pool_init(vm_pool, sizeof(vm_pool));
@@ -1185,6 +1215,10 @@ TEST(pbc_loader_rejects_corrupt_declared_type_metadata) {
     readonly_property = test_find_opcode(bytes, main_proto, OP_DEF_PROP, 2U);
     child_class = test_find_opcode(bytes, main_proto, OP_DEF_CLASS, 1U);
     method_opcode = test_find_opcode(bytes, main_proto, OP_DEF_METHOD, 1U);
+    constructor_opcode = test_find_opcode(bytes, main_proto, OP_DEF_METHOD, 0U);
+    destructor_opcode = test_find_opcode(bytes, main_proto, OP_DEF_METHOD, 2U);
+    argument_method_opcode = test_find_opcode(bytes, main_proto,
+                                              OP_DEF_METHOD, 3U);
     call_opcode = test_find_opcode(bytes, main_proto, OP_CALL, 0U);
     jump_opcode = test_find_opcode(bytes, main_proto, OP_JMP_UNLESS, 0U);
     closure_opcode = test_find_opcode(bytes, main_proto, OP_CLOSURE, 0U);
@@ -1200,6 +1234,9 @@ TEST(pbc_loader_rejects_corrupt_declared_type_metadata) {
     ASSERT_TRUE(readonly_property != SIZE_MAX);
     ASSERT_TRUE(child_class != SIZE_MAX);
     ASSERT_TRUE(method_opcode != SIZE_MAX);
+    ASSERT_TRUE(constructor_opcode != SIZE_MAX);
+    ASSERT_TRUE(destructor_opcode != SIZE_MAX);
+    ASSERT_TRUE(argument_method_opcode != SIZE_MAX);
     ASSERT_TRUE(call_opcode != SIZE_MAX);
     ASSERT_TRUE(jump_opcode != SIZE_MAX);
     ASSERT_TRUE(closure_opcode != SIZE_MAX);
@@ -1210,10 +1247,7 @@ TEST(pbc_loader_rejects_corrupt_declared_type_metadata) {
     ASSERT_TRUE(return_opcode != SIZE_MAX);
     ASSERT_TRUE(store_opcode != SIZE_MAX);
     {
-        size_t constructor_opcode = test_find_opcode(
-            bytes, main_proto, OP_DEF_METHOD, 0U);
         uint16_t constructor_index;
-        ASSERT_TRUE(constructor_opcode != SIZE_MAX);
         constructor_index = test_get_u16(bytes, constructor_opcode + 3U);
         ASSERT_TRUE(constructor_index < n_protos);
         constructor_proto = test_get_u32(
@@ -1221,6 +1255,24 @@ TEST(pbc_loader_rejects_corrupt_declared_type_metadata) {
         constructor_type = test_proto_type_offset(bytes, constructor_proto);
         ASSERT_EQ(1, bytes[constructor_type]);
         ASSERT_EQ(PTYPE_VOID, bytes[constructor_type + 1U]);
+    }
+    {
+        uint16_t destructor_index = test_get_u16(bytes,
+                                                 destructor_opcode + 3U);
+        uint16_t argument_method_index = test_get_u16(
+            bytes, argument_method_opcode + 3U);
+        uint16_t argument_method_name_sid;
+        ASSERT_TRUE(destructor_index < n_protos);
+        ASSERT_TRUE(argument_method_index < n_protos);
+        destructor_proto = test_get_u32(
+            bytes, proto_table + (size_t)destructor_index * 4U);
+        argument_method_proto = test_get_u32(
+            bytes, proto_table + (size_t)argument_method_index * 4U);
+        argument_method_name_sid = test_get_u16(
+            bytes, argument_method_proto + 14U);
+        ASSERT_TRUE(argument_method_name_sid < n_strings);
+        argument_method_proto_name_record = test_get_u32(
+            bytes, 16U + (size_t)argument_method_name_sid * 4U);
     }
     {
         uint16_t method_index = test_get_u16(bytes, method_opcode + 3U);
@@ -1357,6 +1409,24 @@ TEST(pbc_loader_rejects_corrupt_declared_type_metadata) {
     ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(mutated, length));
 
     memcpy(mutated, bytes, length);
+    mutated[constructor_opcode + 5U] |= PC_MOD_STATIC;
+    mutated[constructor_proto + 2U] &= (uint8_t)~2U;
+    ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(mutated, length));
+
+    memcpy(mutated, bytes, length);
+    mutated[destructor_opcode + 5U] |= PC_MOD_STATIC;
+    mutated[destructor_proto + 2U] &= (uint8_t)~2U;
+    ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(mutated, length));
+
+    memcpy(mutated, bytes, length);
+    test_put_u16(mutated, argument_method_opcode + 1U,
+                 test_get_u16(bytes, destructor_opcode + 1U));
+    memcpy(mutated + argument_method_proto_name_record + 2U +
+               strlen("TypeBlobClass::"),
+           "__destruct", 10U);
+    ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(mutated, length));
+
+    memcpy(mutated, bytes, length);
     mutated[method_name_record + 2U] = 'X';
     ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(mutated, length));
 
@@ -1427,6 +1497,181 @@ TEST(pbc_loader_rejects_corrupt_declared_type_metadata) {
     free(mutated);
     free(bytes);
     ASSERT_EQ(0, remove(path));
+}
+
+TEST(pbc_type_context_reports_allocation_failure) {
+    const char *path = "build/host/test_type_context_oom.pbc";
+    const char *source =
+        "function typed_oom(int $value): int { return $value; }";
+    uint8_t *bytes;
+    size_t length;
+    size_t pool_size;
+    int saw_nomem = 0;
+    int loaded = 0;
+    int last_failure = PPHP_OK;
+
+    pphp_pool_init(vm_pool, sizeof(vm_pool));
+    ASSERT_TRUE(write_source_pbc(source, path));
+    bytes = read_pbc_from_libc(path, &length);
+    ASSERT_TRUE(bytes != NULL);
+    for (pool_size = 256U; pool_size <= sizeof(pbc_oom_pool);
+         pool_size += 8U) {
+        pmodule module;
+        int status;
+        pphp_pool_init(pbc_oom_pool, pool_size);
+        status = pphp_pbc_load(bytes, length, &module);
+        if (status == PPHP_OK) {
+            pmodule_destroy(&module);
+            loaded = 1;
+            break;
+        }
+        if (status == PPHP_E_NOMEM) {
+            saw_nomem = 1;
+        }
+        last_failure = status;
+    }
+    pphp_pool_init(vm_pool, sizeof(vm_pool));
+    free(bytes);
+    ASSERT_EQ(0, remove(path));
+    ASSERT_EQ(PPHP_E_NOMEM, last_failure);
+    ASSERT_TRUE(saw_nomem);
+    ASSERT_TRUE(loaded);
+}
+
+TEST(failed_forward_variance_rolls_back_definitions) {
+    const char *pbc_path = "build/host/test_variance_rollback.pbc";
+    const char *include_path = "build/host/test_variance_rollback.php";
+    const char *stable =
+        "function RollbackStableFunction() { return 1; }"
+        "class RollbackStableClass {}"
+        "$rollbackStableObject = new RollbackStableClass();";
+    const char *bad_source =
+        "function RollbackFailedSourceFunction() { return 1; }"
+        "class RollbackSourceBase {"
+        " public function f(RollbackSourceA $v): RollbackSourceB {"
+        "  return new RollbackSourceB();"
+        " }"
+        "}"
+        "class RollbackSourceBad extends RollbackSourceBase {"
+        " public function f(RollbackSourceC $v): RollbackSourceD {"
+        "  return new RollbackSourceD();"
+        " }"
+        "}"
+        "class RollbackSourceA {} class RollbackSourceB {}"
+        "class RollbackSourceC {} class RollbackSourceD {}";
+    const char *bad_pbc =
+        "function RollbackFailedPbcFunction() { return 1; }"
+        "class RollbackPbcBase {"
+        " public function f(RollbackPbcA $v): RollbackPbcB {"
+        "  return new RollbackPbcB();"
+        " }"
+        "}"
+        "class RollbackPbcBad extends RollbackPbcBase {"
+        " public function f(RollbackPbcC $v): RollbackPbcD {"
+        "  return new RollbackPbcD();"
+        " }"
+        "}"
+        "class RollbackPbcA {} class RollbackPbcB {}"
+        "class RollbackPbcC {} class RollbackPbcD {}";
+    const char *bad_include =
+        "<?php function RollbackFailedIncludeFunction() { return 1; }"
+        "class RollbackIncludeBase {"
+        " public function f(RollbackIncludeA $v): RollbackIncludeB {"
+        "  return new RollbackIncludeB();"
+        " }"
+        "}"
+        "class RollbackIncludeBad extends RollbackIncludeBase {"
+        " public function f(RollbackIncludeC $v): RollbackIncludeD {"
+        "  return new RollbackIncludeD();"
+        " }"
+        "}"
+        "class RollbackIncludeA {} class RollbackIncludeB {}"
+        "class RollbackIncludeC {} class RollbackIncludeD {}";
+    const char *good_include =
+        "<?php class RollbackIncludeRecovered {} echo 'R';";
+    uint8_t *pbc;
+    size_t pbc_length;
+    pphp_state *state;
+    output_buffer output;
+    FILE *file;
+    size_t baseline_classes;
+    size_t baseline_functions;
+    size_t baseline_modules;
+    size_t baseline_used;
+    size_t i;
+
+    pphp_pool_init(vm_pool, sizeof(vm_pool));
+    ASSERT_TRUE(write_source_pbc(bad_pbc, pbc_path));
+    pbc = read_pbc_from_libc(pbc_path, &pbc_length);
+    ASSERT_TRUE(pbc != NULL);
+    state = pphp_open(vm_pool, sizeof(vm_pool));
+    ASSERT_TRUE(state != NULL);
+    memset(&output, 0, sizeof(output));
+    pphp_set_output(state, capture_output, &output);
+    ASSERT_EQ(PPHP_OK,
+              pphp_exec_source_mode(state, stable, strlen(stable),
+                                    "rollback-stable", 1));
+    baseline_classes = state->class_count;
+    baseline_functions = state->runtime_function_count;
+    baseline_modules = state->repl_module_count;
+    ASSERT_EQ(PPHP_E_RUNTIME,
+              pphp_exec_source_mode(state, bad_source, strlen(bad_source),
+                                    "rollback-source", 1));
+    ASSERT_TRUE(pphp_find_class(state, "RollbackStableClass", 19U) != NULL);
+    ASSERT_TRUE(pphp_find_class(state, "RollbackSourceBad", 17U) == NULL);
+    ASSERT_EQ(baseline_classes, state->class_count);
+    ASSERT_EQ(baseline_functions, state->runtime_function_count);
+    ASSERT_EQ(baseline_modules, state->repl_module_count);
+    baseline_used = pphp_pool_get_stats().used;
+    for (i = 0U; i < 8U; i++) {
+        ASSERT_EQ(PPHP_E_RUNTIME,
+                  pphp_exec_source_mode(state, bad_source,
+                                        strlen(bad_source),
+                                        "rollback-source-repeat", 1));
+        ASSERT_EQ(baseline_classes, state->class_count);
+        ASSERT_EQ(baseline_functions, state->runtime_function_count);
+        ASSERT_EQ(baseline_modules, state->repl_module_count);
+        ASSERT_EQ(baseline_used, pphp_pool_get_stats().used);
+    }
+
+    ASSERT_EQ(PPHP_E_RUNTIME, pphp_exec_pbc(state, pbc, pbc_length));
+    ASSERT_TRUE(pphp_find_class(state, "RollbackStableClass", 19U) != NULL);
+    ASSERT_TRUE(pphp_find_class(state, "RollbackPbcBad", 14U) == NULL);
+    ASSERT_EQ(baseline_functions, state->runtime_function_count);
+
+    file = fopen(include_path, "wb");
+    ASSERT_TRUE(file != NULL);
+    ASSERT_EQ((long)strlen(bad_include),
+              (long)fwrite(bad_include, 1U, strlen(bad_include), file));
+    ASSERT_EQ(0, fclose(file));
+    ASSERT_EQ(PPHP_E_RUNTIME,
+              pphp_exec_source_mode(
+                  state,
+                  "include_once 'build/host/test_variance_rollback.php';",
+                  strlen("include_once 'build/host/test_variance_rollback.php';"),
+                  "rollback-include", 1));
+    ASSERT_TRUE(pphp_find_class(state, "RollbackIncludeBad", 18U) == NULL);
+    ASSERT_EQ(baseline_functions, state->runtime_function_count);
+
+    file = fopen(include_path, "wb");
+    ASSERT_TRUE(file != NULL);
+    ASSERT_EQ((long)strlen(good_include),
+              (long)fwrite(good_include, 1U, strlen(good_include), file));
+    ASSERT_EQ(0, fclose(file));
+    memset(&output, 0, sizeof(output));
+    ASSERT_EQ(PPHP_OK,
+              pphp_exec_source_mode(
+                  state,
+                  "include_once 'build/host/test_variance_rollback.php';",
+                  strlen("include_once 'build/host/test_variance_rollback.php';"),
+                  "rollback-include-retry", 1));
+    ASSERT_STR("R", output.bytes);
+    ASSERT_TRUE(pphp_find_class(state, "RollbackIncludeRecovered", 24U) != NULL);
+
+    pphp_close(state);
+    free(pbc);
+    ASSERT_EQ(0, remove(pbc_path));
+    ASSERT_EQ(0, remove(include_path));
 }
 #endif
 
@@ -2382,6 +2627,8 @@ int main(void) {
         {"PBC malformed bounds", pbc_loader_rejects_truncated_and_wrapping_sections},
 #if PPHP_TYPECHECK
         {"PBC declared type corruption", pbc_loader_rejects_corrupt_declared_type_metadata},
+        {"PBC type context OOM", pbc_type_context_reports_allocation_failure},
+        {"failed definition rollback", failed_forward_variance_rolls_back_definitions},
 #endif
         {"array COW runtime", arrays_use_copy_on_write_and_normalized_keys},
         {"language conformance", language_conformance_covers_casts_lvalues_nullsafe_and_interpolation},

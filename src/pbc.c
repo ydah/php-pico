@@ -268,7 +268,6 @@ static int pbc_identifier_bytes(const char *bytes, size_t length) {
     return 1;
 }
 
-#if PPHP_TYPECHECK
 static int pbc_bytes_equal_ci(const char *left, size_t left_length,
                               const char *right, size_t right_length) {
     size_t i;
@@ -283,6 +282,7 @@ static int pbc_bytes_equal_ci(const char *left, size_t left_length,
     return 1;
 }
 
+#if PPHP_TYPECHECK
 static int pbc_reserved_type_name(const char *bytes, size_t length) {
     static const char *const names[] = {
         "int", "float", "string", "bool", "array", "callable", "mixed",
@@ -582,6 +582,12 @@ static int pbc_validate_code(const pmodule *module, size_t proto_index) {
                 uint8_t flags = proto->code[pc + 4U];
                 const pstring *method_name = pbc_string_constant(proto, first)
                     ? (const pstring *)proto->constants[first].as.gc : NULL;
+                int constructor = method_name != NULL && pbc_bytes_equal_ci(
+                    ps_data(method_name), method_name->length,
+                    "__construct", 11U);
+                int destructor = method_name != NULL && pbc_bytes_equal_ci(
+                    ps_data(method_name), method_name->length,
+                    "__destruct", 10U);
                 if (!building_class || !pbc_string_constant(proto, first) ||
                     target == 0U || target >= module->count ||
                     module->protos[target]->conditional ||
@@ -590,6 +596,8 @@ static int pbc_validate_code(const pmodule *module, size_t proto_index) {
                     !pbc_flag_visibility(flags) ||
                     (flags & (uint8_t)~(1U | 2U | 4U | 8U | 16U | 32U)) != 0U ||
                     (flags & (16U | 32U)) == (16U | 32U) ||
+                    ((constructor || destructor) && (flags & 8U) != 0U) ||
+                    (destructor && module->protos[target]->n_params != 0U) ||
                     (((flags & 8U) == 0U) !=
                      (module->protos[target]->is_method != 0U))) goto invalid;
                 break;
@@ -1046,11 +1054,13 @@ int pphp_pbc_write_file(const pmodule *module, const char *path) {
     memset(bytes, 0, total);
     memcpy(bytes, "PPBC", 4U);
     put_u16(bytes, 4U, (uint16_t)PPHP_PBC_FORMAT_VERSION);
-    put_u16(bytes, 6U, (uint16_t)((PPHP_INT64 ? 1U : 0U) |
-                                  (PPHP_USE_DOUBLE ? 2U : 0U) |
-                                  (PPHP_LINE_INFO ? 4U : 0U) |
-                                  (PPHP_TYPECHECK ? 8U : 0U) |
-                                  (PPHP_ENABLE_FLOAT ? 16U : 0U)));
+    put_u16(bytes, 6U, (uint16_t)(
+        (PPHP_INT64 ? PPHP_PBC_FLAG_INT64 : 0U) |
+        (PPHP_USE_DOUBLE ? PPHP_PBC_FLAG_DOUBLE : 0U) |
+        (PPHP_LINE_INFO ? PPHP_PBC_FLAG_LINE_INFO : 0U) |
+        (PPHP_TYPECHECK ? PPHP_PBC_FLAG_TYPECHECK : 0U) |
+        (PPHP_ENABLE_FLOAT ? PPHP_PBC_FLAG_FLOAT : 0U) |
+        PPHP_PBC_FLAG_FEATURES));
     put_u32(bytes, 8U, (uint32_t)total);
     put_u16(bytes, 12U, (uint16_t)module->count);
     put_u16(bytes, 14U, (uint16_t)strings.count);
@@ -1236,13 +1246,13 @@ int pphp_pbc_read_file(const char *path, pmodule *module) {
 
 int pphp_pbc_load(const void *data, size_t length, pmodule *module) {
     const uint8_t *bytes = data;
-    const uint16_t float_flag = 16U;
-    const uint16_t expected_flags =
-        (uint16_t)((PPHP_INT64 ? 1U : 0U) |
-                   (PPHP_USE_DOUBLE ? 2U : 0U) |
-                   (PPHP_LINE_INFO ? 4U : 0U) |
-                   (PPHP_TYPECHECK ? 8U : 0U) |
-                   (PPHP_ENABLE_FLOAT ? 16U : 0U));
+    const uint16_t expected_flags = (uint16_t)(
+        (PPHP_INT64 ? PPHP_PBC_FLAG_INT64 : 0U) |
+        (PPHP_USE_DOUBLE ? PPHP_PBC_FLAG_DOUBLE : 0U) |
+        (PPHP_LINE_INFO ? PPHP_PBC_FLAG_LINE_INFO : 0U) |
+        (PPHP_TYPECHECK ? PPHP_PBC_FLAG_TYPECHECK : 0U) |
+        (PPHP_ENABLE_FLOAT ? PPHP_PBC_FLAG_FLOAT : 0U) |
+        PPHP_PBC_FLAG_FEATURES);
     uint16_t n_protos;
     uint16_t n_strings;
     size_t table_entries;
@@ -1261,12 +1271,21 @@ int pphp_pbc_load(const void *data, size_t length, pmodule *module) {
         return PPHP_E_PARSE;
     }
     image_flags = get_u16(bytes, 6U);
-    if ((image_flags & (uint16_t)~float_flag) !=
-        (expected_flags & (uint16_t)~float_flag)) {
+    if ((image_flags & PPHP_PBC_FLAG_FEATURES) == 0U) {
+#if !PPHP_ENABLE_FLOAT
+        return PPHP_E_UNSUPPORTED;
+#else
+        image_flags |= PPHP_PBC_FLAG_FLOAT | PPHP_PBC_FLAG_FEATURES;
+#endif
+    }
+    if ((image_flags & (uint16_t)~PPHP_PBC_FLAG_FLOAT) !=
+        (expected_flags & (uint16_t)~PPHP_PBC_FLAG_FLOAT)) {
         return PPHP_E_PARSE;
     }
 #if !PPHP_ENABLE_FLOAT
-    if ((image_flags & float_flag) != 0U) return PPHP_E_UNSUPPORTED;
+    if ((image_flags & PPHP_PBC_FLAG_FLOAT) != 0U) {
+        return PPHP_E_UNSUPPORTED;
+    }
 #endif
     if (image_flags != expected_flags) return PPHP_E_PARSE;
     n_protos = get_u16(bytes, 12U);
