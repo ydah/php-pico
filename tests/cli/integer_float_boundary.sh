@@ -31,3 +31,22 @@ if grep -q 'runtime error:' "$temporary/conversion.err"; then
     cat "$temporary/conversion.err" >&2
     exit 1
 fi
+
+"$binary" -r \
+    'var_dump(json_decode("16777217"), "16777217" + 0); echo sprintf("%d", "16777217"), ":"; var_dump(json_decode("2147483647"), "-16777217" + 0, "  +16777217 " + 0, "16777217tail" + 0, (int) "16777217", -"16777217", array_sum(["16777217"]), intdiv("16777217", 1), abs("-16777217")); echo gettype("16777217.0" + 0), ":", gettype("16777217e0" + 0), ":"; var_dump("-2147483648" + 0);' \
+    > "$temporary/exact.out" 2> "$temporary/exact.err"
+
+expected_exact='int(16777217)
+int(16777217)
+16777217:int(2147483647)
+int(-16777217)
+int(16777217)
+int(16777217)
+int(16777217)
+int(-16777217)
+int(16777217)
+int(16777217)
+int(16777217)
+double:double:int(-2147483648)'
+test "$(cat "$temporary/exact.out")" = "$expected_exact"
+test ! -s "$temporary/exact.err"

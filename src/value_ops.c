@@ -174,14 +174,16 @@ static int integer_binary_float(pv_operation operation, pphp_int left,
 }
 #endif
 
-#if !PPHP_ENABLE_FLOAT
-static int string_number(const char *text, size_t length, pphp_float *number,
-                         int *is_integer, int require_complete) {
+static int string_integer_exact(const char *text, size_t length,
+                                int require_complete, pphp_int *result,
+                                int *out_of_range) {
     size_t position = 0U;
     int negative = 0;
     int digits = 0;
+    int in_range = 1;
     uint64_t magnitude = 0U;
     uint64_t limit;
+    *out_of_range = 0;
     while (position < length &&
            (text[position] == ' ' || text[position] == '\t' ||
             text[position] == '\n' || text[position] == '\r')) position++;
@@ -193,11 +195,13 @@ static int string_number(const char *text, size_t length, pphp_float *number,
     while (position < length && text[position] >= '0' &&
            text[position] <= '9') {
         unsigned digit = (unsigned)(text[position++] - '0');
-        if (magnitude > (limit - digit) / 10U) {
-            *is_integer = -1;
-            return 0;
+        if (in_range) {
+            if (magnitude > (limit - digit) / 10U) {
+                in_range = 0;
+            } else {
+                magnitude = magnitude * 10U + digit;
+            }
         }
-        magnitude = magnitude * 10U + digit;
         digits++;
     }
     if (digits == 0 ||
@@ -210,18 +214,23 @@ static int string_number(const char *text, size_t length, pphp_float *number,
                 text[position] == '\n' || text[position] == '\r')) position++;
         if (position != length) return 0;
     }
+    if (!in_range) {
+        *out_of_range = 1;
+        return 0;
+    }
     if (negative && magnitude == (uint64_t)PPHP_INT_MAXIMUM + 1U) {
-        *number = PPHP_INT_MINIMUM;
+        *result = PPHP_INT_MINIMUM;
     } else {
         pphp_int integer = (pphp_int)magnitude;
-        *number = negative ? -integer : integer;
+        *result = negative ? -integer : integer;
     }
-    *is_integer = 1;
     return 1;
 }
-#else
-static int string_number(const char *text, size_t length, pphp_float *number,
-                         int *is_integer, int require_complete) {
+
+#if PPHP_ENABLE_FLOAT
+static int floating_string_number(const char *text, size_t length,
+                                  pphp_float *number, int *is_integer,
+                                  int require_complete) {
     size_t i = 0U;
     int sign = 1;
     pphp_float value = 0;
@@ -306,46 +315,77 @@ static int string_number(const char *text, size_t length, pphp_float *number,
 }
 #endif
 
-int pv_to_number(pvalue value, pphp_float *number, int *is_integer) {
-    *is_integer = 0;
+static int string_numeric(const char *text, size_t length,
+                          int require_complete, pphp_numeric *numeric) {
+    int out_of_range;
+    if (string_integer_exact(text, length, require_complete,
+                             &numeric->integer, &out_of_range)) {
+        numeric->number = (pphp_float)numeric->integer;
+        numeric->is_integer = 1;
+        numeric->integer_exact = 1;
+        return 1;
+    }
+#if PPHP_ENABLE_FLOAT
+    if (!floating_string_number(text, length, &numeric->number,
+                                &numeric->is_integer,
+                                require_complete)) return 0;
+    numeric->integer_exact = 0;
+    return 1;
+#else
+    if (out_of_range) numeric->is_integer = -1;
+    return 0;
+#endif
+}
+
+int pv_to_numeric(pvalue value, int require_complete, pphp_numeric *numeric) {
+    memset(numeric, 0, sizeof(*numeric));
     switch ((pvalue_type)value.type) {
         case PT_INT:
-            *number = (pphp_float)value.as.i;
-            *is_integer = 1;
+            numeric->number = (pphp_float)value.as.i;
+            numeric->integer = value.as.i;
+            numeric->is_integer = 1;
+            numeric->integer_exact = 1;
             return 1;
 #if PPHP_ENABLE_FLOAT
         case PT_FLOAT:
-            *number = value.as.f;
-            *is_integer = 0;
+            numeric->number = value.as.f;
             return 1;
 #endif
         case PT_TRUE:
-            *number = (pphp_float)1;
-            *is_integer = 1;
+            numeric->number = (pphp_float)1;
+            numeric->integer = 1;
+            numeric->is_integer = 1;
+            numeric->integer_exact = 1;
             return 1;
         case PT_FALSE:
         case PT_NULL:
-            *number = (pphp_float)0;
-            *is_integer = 1;
+            numeric->is_integer = 1;
+            numeric->integer_exact = 1;
             return 1;
         case PT_STRING: {
             const pstring *string = (const pstring *)value.as.gc;
-            return string_number(string->data, string->length, number,
-                                 is_integer, 1);
+            return string_numeric(string->data, string->length,
+                                  require_complete, numeric);
         }
         default:
             return 0;
     }
 }
 
+int pv_to_number(pvalue value, pphp_float *number, int *is_integer) {
+    pphp_numeric numeric;
+    int converted = pv_to_numeric(value, 1, &numeric);
+    *number = numeric.number;
+    *is_integer = numeric.is_integer;
+    return converted;
+}
+
 int pv_to_number_prefix(pvalue value, pphp_float *number, int *is_integer) {
-    *is_integer = 0;
-    if (value.type == PT_STRING) {
-        const pstring *string = (const pstring *)value.as.gc;
-        return string_number(string->data, string->length, number,
-                             is_integer, 0);
-    }
-    return pv_to_number(value, number, is_integer);
+    pphp_numeric numeric;
+    int converted = pv_to_numeric(value, value.type != PT_STRING, &numeric);
+    *number = numeric.number;
+    *is_integer = numeric.is_integer;
+    return converted;
 }
 
 #if PPHP_ENABLE_FLOAT
@@ -386,10 +426,10 @@ pstring *pv_to_string(pvalue value) {
 
 int pv_binary_operation(pv_operation operation, pvalue left, pvalue right,
                         pvalue *result, const char **error) {
+    pphp_numeric left_numeric = {0};
+    pphp_numeric right_numeric = {0};
     pphp_float a;
     pphp_float b;
-    int ai = 0;
-    int bi = 0;
     if (operation == PV_CONCAT) {
         pstring *left_string = pv_to_string(left);
         pstring *right_string = pv_to_string(right);
@@ -433,23 +473,26 @@ int pv_binary_operation(pv_operation operation, pvalue left, pvalue right,
         *result = pv_heap(PT_STRING, &joined->header);
         return 1;
     }
-#if PPHP_ENABLE_FLOAT
-    if (left.type == PT_INT && right.type == PT_INT) {
-        return integer_binary_float(operation, left.as.i, right.as.i,
-                                    result, error);
-    }
-#endif
-    if (!pv_to_number_prefix(left, &a, &ai) ||
-        !pv_to_number_prefix(right, &b, &bi)) {
-        *error = ai < 0 || bi < 0
+    if (!pv_to_numeric(left, left.type != PT_STRING, &left_numeric) ||
+        !pv_to_numeric(right, right.type != PT_STRING, &right_numeric)) {
+        *error = left_numeric.is_integer < 0 || right_numeric.is_integer < 0
                      ? "integer overflow requires float support"
                      : "unsupported operand types";
         return 0;
     }
+    a = left_numeric.number;
+    b = right_numeric.number;
+#if PPHP_ENABLE_FLOAT
+    if (left_numeric.integer_exact && right_numeric.integer_exact) {
+        return integer_binary_float(operation, left_numeric.integer,
+                                    right_numeric.integer, result, error);
+    }
+#endif
     switch (operation) {
         case PV_ADD:
 #if PPHP_ENABLE_FLOAT
-            *result = numeric_result(a + b, ai && bi);
+            *result = numeric_result(a + b, left_numeric.is_integer &&
+                                              right_numeric.is_integer);
 #else
             if (!pphp_integer_add(a, b, &a)) goto integer_overflow;
             *result = pv_int(a);
@@ -457,7 +500,8 @@ int pv_binary_operation(pv_operation operation, pvalue left, pvalue right,
             return 1;
         case PV_SUB:
 #if PPHP_ENABLE_FLOAT
-            *result = numeric_result(a - b, ai && bi);
+            *result = numeric_result(a - b, left_numeric.is_integer &&
+                                              right_numeric.is_integer);
 #else
             if (!pphp_integer_subtract(a, b, &a)) goto integer_overflow;
             *result = pv_int(a);
@@ -465,7 +509,8 @@ int pv_binary_operation(pv_operation operation, pvalue left, pvalue right,
             return 1;
         case PV_MUL:
 #if PPHP_ENABLE_FLOAT
-            *result = numeric_result(a * b, ai && bi);
+            *result = numeric_result(a * b, left_numeric.is_integer &&
+                                              right_numeric.is_integer);
 #else
             if (!pphp_integer_multiply(a, b, &a)) goto integer_overflow;
             *result = pv_int(a);
@@ -477,7 +522,9 @@ int pv_binary_operation(pv_operation operation, pvalue left, pvalue right,
                 return 0;
             }
 #if PPHP_ENABLE_FLOAT
-            *result = numeric_result(a / b, ai && bi && fmod((double)a, (double)b) == 0.0);
+            *result = numeric_result(
+                a / b, left_numeric.is_integer && right_numeric.is_integer &&
+                           fmod((double)a, (double)b) == 0.0);
 #else
             if (pphp_integer_division_overflows(a, b)) goto integer_overflow;
             if (a % b != 0) {
@@ -578,12 +625,19 @@ int pphp_number_to_integer(pphp_float number, int exact, pphp_int *result) {
 }
 #endif
 
+int pphp_numeric_to_integer(const pphp_numeric *numeric, int exact,
+                            pphp_int *result) {
+    if (numeric->integer_exact) {
+        *result = numeric->integer;
+        return 1;
+    }
+    return pphp_number_to_integer(numeric->number, exact, result);
+}
+
 int pv_compare(pvalue left, pvalue right, int strict, int *result,
                const char **error) {
-    pphp_float a;
-    pphp_float b;
-    int ai;
-    int bi;
+    pphp_numeric left_numeric;
+    pphp_numeric right_numeric;
     (void)error;
     if (strict && left.type != right.type) {
         *result = left.type < right.type ? -1 : 1;
@@ -701,8 +755,15 @@ int pv_compare(pvalue left, pvalue right, int strict, int *result,
         *result = (lt > rt) - (lt < rt);
         return 1;
     }
-    if (pv_to_number(left, &a, &ai) && pv_to_number(right, &b, &bi)) {
-        *result = (a > b) - (a < b);
+    if (pv_to_numeric(left, 1, &left_numeric) &&
+        pv_to_numeric(right, 1, &right_numeric)) {
+        if (left_numeric.integer_exact && right_numeric.integer_exact) {
+            *result = (left_numeric.integer > right_numeric.integer) -
+                      (left_numeric.integer < right_numeric.integer);
+        } else {
+            *result = (left_numeric.number > right_numeric.number) -
+                      (left_numeric.number < right_numeric.number);
+        }
         return 1;
     }
     if (left.type == PT_STRING && right.type == PT_STRING) {

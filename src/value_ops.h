@@ -21,8 +21,16 @@ typedef enum pv_operation {
     PV_SHR
 } pv_operation;
 
+typedef struct pphp_numeric {
+    pphp_float number;
+    pphp_int integer;
+    int is_integer;
+    int integer_exact;
+} pphp_numeric;
+
 int pv_to_number(pvalue value, pphp_float *number, int *is_integer);
 int pv_to_number_prefix(pvalue value, pphp_float *number, int *is_integer);
+int pv_to_numeric(pvalue value, int require_complete, pphp_numeric *numeric);
 int pv_binary_operation(pv_operation operation, pvalue left, pvalue right,
                         pvalue *result, const char **error);
 int pv_compare(pvalue left, pvalue right, int strict, int *result,
@@ -36,5 +44,7 @@ int pphp_integer_negate(pphp_int value, pphp_int *result);
 int pphp_integer_division_overflows(pphp_int left, pphp_int right);
 int pphp_integer_power(pphp_int base, pphp_int exponent, pphp_int *result);
 int pphp_number_to_integer(pphp_float number, int exact, pphp_int *result);
+int pphp_numeric_to_integer(const pphp_numeric *numeric, int exact,
+                            pphp_int *result);
 
 #endif

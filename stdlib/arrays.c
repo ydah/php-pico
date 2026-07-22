@@ -294,31 +294,25 @@ static int call_array_product(pphp_state *state, const pstring *name,
         pvalue key;
         pvalue value;
         size_t next;
-        pphp_float number;
-        int integer;
+        pphp_numeric numeric;
         if (!pa_entry_at(array, position, &key, &value, &next)) break;
-        if (pv_to_number(value, &number, &integer)) {
+        if (pv_to_numeric(value, 1, &numeric)) {
 #if PPHP_ENABLE_FLOAT
-            product *= number;
+            product *= numeric.number;
             if (all_integer) {
-                pphp_int factor;
                 pphp_int multiplied;
-                if (!integer ||
-                    (value.type != PT_INT &&
-                     !pphp_number_to_integer(number, 1, &factor))) {
+                if (!numeric.integer_exact) {
+                    all_integer = 0;
+                } else if (!pphp_integer_multiply(
+                               integer_product, numeric.integer,
+                               &multiplied)) {
                     all_integer = 0;
                 } else {
-                    if (value.type == PT_INT) factor = value.as.i;
-                    if (!pphp_integer_multiply(integer_product, factor,
-                                               &multiplied)) {
-                        all_integer = 0;
-                    } else {
-                        integer_product = multiplied;
-                    }
+                    integer_product = multiplied;
                 }
             }
 #else
-            if (!pphp_integer_multiply(product, number, &product)) {
+            if (!pphp_integer_multiply(product, numeric.integer, &product)) {
                 pv_release(key);
                 pv_release(value);
                 pphp_runtime_error(state, 0U,
@@ -326,8 +320,8 @@ static int call_array_product(pphp_state *state, const pstring *name,
                 return -1;
             }
 #endif
-            all_integer = all_integer && integer;
-        } else if (integer < 0) {
+            all_integer = all_integer && numeric.is_integer;
+        } else if (numeric.is_integer < 0) {
             pv_release(key);
             pv_release(value);
             pphp_runtime_error(state, 0U,

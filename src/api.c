@@ -174,14 +174,12 @@ pvalue pphp_arg(pphp_ctx *context, int index) {
 }
 
 pphp_int pphp_arg_int(pphp_ctx *context, int index) {
-    pphp_float number;
+    pphp_numeric numeric;
     pphp_int converted = 0;
-    int integer;
     if (context == NULL || index < 0 ||
         (size_t)index >= context->argument_count ||
-        !pv_to_number(context->arguments[index], &number, &integer) ||
-        (context->arguments[index].type != PT_INT &&
-         !pphp_number_to_integer(number, 0, &converted))) {
+        !pv_to_numeric(context->arguments[index], 1, &numeric) ||
+        !pphp_numeric_to_integer(&numeric, 0, &converted)) {
         if (context != NULL) {
             (void)pphp_raise(context, "TypeError",
                              "argument %d must be integer-compatible",
@@ -189,10 +187,7 @@ pphp_int pphp_arg_int(pphp_ctx *context, int index) {
         }
         return 0;
     }
-    (void)integer;
-    return context->arguments[index].type == PT_INT
-               ? context->arguments[index].as.i
-               : converted;
+    return converted;
 }
 
 const char *pphp_arg_str(pphp_ctx *context, int index, size_t *length) {

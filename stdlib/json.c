@@ -484,23 +484,18 @@ static pvalue parse_number(json_parser *parser) {
     length = parser->position - start;
     {
         pstring *text = ps_new(parser->bytes + start, length);
-        pphp_float number;
-        int integer;
+        pphp_numeric numeric;
         if (text == NULL) goto invalid;
-        if (!pv_to_number(pv_heap(PT_STRING, &text->header),
-                          &number, &integer)) {
+        if (!pv_to_numeric(pv_heap(PT_STRING, &text->header), 1, &numeric)) {
             ps_destroy(text);
             goto invalid;
         }
         ps_destroy(text);
-        if (!floating && integer) {
-            pphp_int converted;
-            if (pphp_number_to_integer(number, 1, &converted)) {
-                return pv_int(converted);
-            }
+        if (!floating && numeric.integer_exact) {
+            return pv_int(numeric.integer);
         }
 #if PPHP_ENABLE_FLOAT
-        return pv_float(number);
+        return pv_float(numeric.number);
 #else
         goto invalid;
 #endif

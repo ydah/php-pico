@@ -441,14 +441,11 @@ static int execute_index_get(pphp_state *state, int quiet) {
     if (base.type == PT_ARRAY) {
         (void)pa_get((const parray *)base.as.gc, key, &value);
     } else if (base.type == PT_STRING) {
-        pphp_float offset_number;
+        pphp_numeric numeric;
         pphp_int offset;
-        int integer;
         const pstring *string = (const pstring *)base.as.gc;
-        if (pv_to_number(key, &offset_number, &integer) &&
-            (key.type == PT_INT ||
-             pphp_number_to_integer(offset_number, 0, &offset))) {
-            if (key.type == PT_INT) offset = key.as.i;
+        if (pv_to_numeric(key, 1, &numeric) &&
+            pphp_numeric_to_integer(&numeric, 0, &offset)) {
             if (offset < 0) offset += (pphp_int)string->length;
             if (offset >= 0 && (size_t)offset < string->length) {
                 pstring *character = ps_new(string->data + offset, 1U);
@@ -479,9 +476,9 @@ static int execute_cast(pphp_state *state, uint8_t target) {
                || target == PT_FLOAT
 #endif
     ) {
-        pphp_float number = 0;
-        int integer = 0;
-        if (!pv_to_number_prefix(value, &number, &integer) && integer < 0) {
+        pphp_numeric numeric;
+        if (!pv_to_numeric(value, value.type != PT_STRING, &numeric) &&
+            numeric.is_integer < 0) {
             pv_release(value);
             pphp_runtime_error(state, 0U,
                                "integer overflow requires float support");
@@ -489,9 +486,7 @@ static int execute_cast(pphp_state *state, uint8_t target) {
         }
         if (target == PT_INT) {
             pphp_int integer_value;
-            if (value.type == PT_INT) {
-                integer_value = value.as.i;
-            } else if (!pphp_number_to_integer(number, 0, &integer_value)) {
+            if (!pphp_numeric_to_integer(&numeric, 0, &integer_value)) {
                 pv_release(value);
                 pphp_runtime_error(state, 0U,
                                    "integer conversion is out of range");
@@ -500,7 +495,7 @@ static int execute_cast(pphp_state *state, uint8_t target) {
             result = pv_int(integer_value);
         }
 #if PPHP_ENABLE_FLOAT
-        if (target == PT_FLOAT) result = pv_float(number);
+        if (target == PT_FLOAT) result = pv_float(numeric.number);
 #endif
     } else if (target == PT_STRING) {
         pstring *string = pv_to_string(value);
@@ -1580,28 +1575,30 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                 break;
             case OP_NEG: {
                 pvalue value = pop(state);
-                pphp_float number;
-                int integer;
-                if (!pv_to_number_prefix(value, &number, &integer)) {
+                pphp_numeric numeric;
+                if (!pv_to_numeric(value, value.type != PT_STRING,
+                                   &numeric)) {
                     pphp_runtime_error(
                         state, frame->line, "%s",
-                        integer < 0
+                        numeric.is_integer < 0
                             ? "integer overflow requires float support"
                             : "unsupported operand type for unary -");
                 } else {
 #if PPHP_ENABLE_FLOAT
                     pphp_int negated;
-                    if (value.type == PT_INT &&
-                        pphp_integer_negate(value.as.i, &negated)) {
+                    if (numeric.integer_exact &&
+                        pphp_integer_negate(numeric.integer, &negated)) {
                         (void)push(state, pv_int(negated));
-                    } else if (value.type == PT_INT) {
-                        (void)push(state, pv_float(-(pphp_float)value.as.i));
+                    } else if (numeric.integer_exact) {
+                        (void)push(
+                            state,
+                            pv_float(-(pphp_float)numeric.integer));
                     } else {
-                        (void)push(state, pv_float(-number));
+                        (void)push(state, pv_float(-numeric.number));
                     }
 #else
                     pphp_int negated;
-                    if (!pphp_integer_negate(number, &negated)) {
+                    if (!pphp_integer_negate(numeric.integer, &negated)) {
                         pphp_runtime_error(
                             state, frame->line,
                             "integer overflow requires float support");
@@ -1615,20 +1612,18 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
             }
             case OP_BNOT: {
                 pvalue value = pop(state);
-                pphp_float number;
-                int integer;
-                if (!pv_to_number_prefix(value, &number, &integer)) {
+                pphp_numeric numeric;
+                if (!pv_to_numeric(value, value.type != PT_STRING,
+                                   &numeric)) {
                     pphp_runtime_error(
                         state, frame->line, "%s",
-                        integer < 0
+                        numeric.is_integer < 0
                             ? "integer overflow requires float support"
                             : "unsupported operand type for ~");
                 } else {
                     pphp_int integer_value;
-                    if (value.type == PT_INT) {
-                        integer_value = value.as.i;
-                    } else if (!pphp_number_to_integer(number, 0,
-                                                       &integer_value)) {
+                    if (!pphp_numeric_to_integer(&numeric, 0,
+                                                 &integer_value)) {
                         pphp_runtime_error(
                             state, frame->line,
                             "integer conversion is out of range");

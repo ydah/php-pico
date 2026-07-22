@@ -897,10 +897,11 @@ TEST(formatting_builtins_cover_width_precision_bases_and_print_r) {
         "echo $formatted, ':';"
         "$length = printf('[%04d]', 7); echo ':', $length, ':';"
         "$printed = print_r(['x' => 1, 2], true);"
-        "echo str_replace(\"\\n\", '|', $printed);";
+        "echo str_replace(\"\\n\", '|', $printed), ':',"
+        " sprintf('%b|%x', -1, -1);";
     output_buffer output;
     ASSERT_EQ(PPHP_OK, execute(source, &output, NULL, 0U));
-    ASSERT_STR("-0012|xy  |1.24|ff|FF|10|1010|A|1.250000e+1|12.5|%|4294967295:[0007]:6:Array|(|    [x] => 1|    [0] => 2|)|",
+    ASSERT_STR("-0012|xy  |1.24|ff|FF|10|1010|A|1.250000e+1|12.5|%|4294967295:[0007]:6:Array|(|    [x] => 1|    [0] => 2|)|:11111111111111111111111111111111|ffffffff",
                output.bytes);
 }
 
