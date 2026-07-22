@@ -106,13 +106,77 @@ static size_t test_proto_type_offset(const uint8_t *bytes,
     }
     return offset + (size_t)local_count * 2U + (size_t)catch_count * 10U;
 }
+
+static size_t test_instruction_size(const uint8_t *code, size_t length,
+                                    size_t pc) {
+    uint8_t opcode = code[pc];
+    size_t operands;
+    switch ((pphp_opcode)opcode) {
+        case OP_LOAD_I8: case OP_LOAD_LOCAL: case OP_LOAD_LOCAL_QUIET:
+        case OP_STORE_LOCAL: case OP_UNSET_LOCAL: case OP_BIND_GLOBAL:
+        case OP_ECHO: case OP_CALL_VALUE: case OP_INCLUDE: case OP_CAST:
+        case OP_NEW_OBJ_DYNAMIC: case OP_MCALL_DYNAMIC:
+            operands = 1U; break;
+        case OP_LOAD_CONST: case OP_LOAD_NAMED_CONST: case OP_DEF_CONST:
+        case OP_DEF_FUNC: case OP_CALL_ARRAY: case OP_MCALL_ARRAY:
+        case OP_NEW_OBJ_ARRAY: case OP_DEF_CCONST: case OP_DEF_INTERFACE:
+        case OP_JMP: case OP_JMP_IF: case OP_JMP_UNLESS:
+        case OP_JMP_IF_KEEP: case OP_JMP_UNLESS_KEEP:
+        case OP_JMP_NOTNULL_KEEP: case OP_JMP_IFNULL_KEEP: case OP_LINE:
+        case OP_NEW_ARRAY: case OP_PROP_GET: case OP_PROP_GET_QUIET:
+        case OP_PROP_SET: case OP_INSTANCEOF:
+            operands = 2U; break;
+        case OP_CALL: case OP_NEW_OBJ: case OP_MCALL: case OP_FE_NEXT:
+        case OP_STATIC_INIT:
+            operands = 3U; break;
+        case OP_SPROP_GET: case OP_SPROP_SET: case OP_CLSCONST:
+        case OP_SCALL_ARRAY: case OP_LOAD_I32:
+            operands = 4U; break;
+        case OP_SCALL: case OP_DEF_CLASS: case OP_DEF_METHOD:
+            operands = 5U; break;
+        case OP_DEF_PROP:
+            operands = 6U; break;
+        case OP_CLOSURE:
+            if (pc + 4U > length) return 0U;
+            operands = 3U + (size_t)code[pc + 3U] * 2U; break;
+        default: operands = 0U; break;
+    }
+    return pc + operands < length ? operands + 1U : 0U;
+}
+
+static size_t test_find_opcode(const uint8_t *bytes, size_t proto_offset,
+                               uint8_t opcode, size_t occurrence) {
+    size_t code = proto_offset + 16U;
+    size_t length = test_get_u16(bytes, proto_offset + 8U);
+    size_t pc = 0U;
+    while (pc < length) {
+        size_t size = test_instruction_size(bytes + code, length, pc);
+        if (size == 0U) return SIZE_MAX;
+        if (bytes[code + pc] == opcode && occurrence-- == 0U) return code + pc;
+        pc += size;
+    }
+    return SIZE_MAX;
+}
+
+static size_t test_constant_offset(const uint8_t *bytes, size_t proto_offset,
+                                   uint16_t index) {
+    size_t offset = proto_offset + 16U +
+                    test_align4(test_get_u16(bytes, proto_offset + 8U));
+    uint16_t i;
+    for (i = 0U; i < index; i++) {
+        uint8_t tag = bytes[offset];
+        offset += tag == 3U || tag == 4U ? 16U : 8U;
+    }
+    return offset;
+}
 #endif
 
 static void minimal_pbc(uint8_t *bytes, size_t length) {
     uint16_t flags = (uint16_t)((PPHP_INT64 ? 1U : 0U) |
                                 (PPHP_USE_DOUBLE ? 2U : 0U) |
                                 (PPHP_LINE_INFO ? 4U : 0U) |
-                                (PPHP_TYPECHECK ? 8U : 0U));
+                                (PPHP_TYPECHECK ? 8U : 0U) |
+                                (PPHP_ENABLE_FLOAT ? 16U : 0U));
     memset(bytes, 0, 128U);
     memcpy(bytes, "PPBC", 4U);
     test_put_u16(bytes, 4U, (uint16_t)PPHP_PBC_FORMAT_VERSION);
@@ -1055,9 +1119,20 @@ TEST(pbc_loader_rejects_truncated_and_wrapping_sections) {
 TEST(pbc_loader_rejects_corrupt_declared_type_metadata) {
     const char *path = "build/host/test_type_metadata.pbc";
     const char *source =
-        "class TypeBlobClass { public int $value = 1; }"
-        "function typed(TypeBlobClass|int $value): string { return 'ok'; }"
-        "echo typed(new TypeBlobClass());";
+        "class TypeBlobParent {}"
+        "class TypeBlobClass extends TypeBlobParent {"
+        " public parent $parent; public int $value = 1;"
+        " public function __construct(): void {}"
+        " public function method(int $value): int { return $value; }"
+        "}"
+        "readonly class ReadonlyBlob { public int $item; }"
+        "function typed(TypeBlobClass|int $value = 1): string { return 'ok'; }"
+        "$outside = 2;"
+        "$closure = function (int $value) use ($outside): int {"
+        " return $value + $outside;"
+        "};"
+        "if (true) { echo typed(new TypeBlobClass()); }"
+        "$cast = (int)'1'; include 'not-executed.php';";
     uint8_t *bytes;
     uint8_t *mutated;
     size_t length;
@@ -1068,7 +1143,21 @@ TEST(pbc_loader_rejects_corrupt_declared_type_metadata) {
     size_t typed_proto;
     size_t typed_type;
     size_t property_opcode = SIZE_MAX;
-    size_t i;
+    size_t second_property;
+    size_t readonly_property;
+    size_t child_class;
+    size_t call_opcode;
+    size_t jump_opcode;
+    size_t closure_opcode;
+    size_t cast_opcode;
+    size_t include_opcode;
+    size_t typecheck_opcode;
+    size_t return_opcode;
+    size_t method_opcode;
+    size_t constructor_proto;
+    size_t constructor_type;
+    size_t store_opcode;
+    size_t string_record;
     pphp_pool_init(vm_pool, sizeof(vm_pool));
     ASSERT_TRUE(write_source_pbc(source, path));
     bytes = read_pbc_from_libc(path, &length);
@@ -1085,6 +1174,48 @@ TEST(pbc_loader_rejects_corrupt_declared_type_metadata) {
     typed_type = test_proto_type_offset(bytes, typed_proto);
     ASSERT_EQ(2, bytes[typed_type]);
     ASSERT_EQ(PTYPE_NAMED, bytes[typed_type + 1U]);
+    ASSERT_EQ(PPHP_OK, load_test_pbc(bytes, length));
+
+    property_opcode = test_find_opcode(bytes, main_proto, OP_DEF_PROP, 0U);
+    second_property = test_find_opcode(bytes, main_proto, OP_DEF_PROP, 1U);
+    readonly_property = test_find_opcode(bytes, main_proto, OP_DEF_PROP, 2U);
+    child_class = test_find_opcode(bytes, main_proto, OP_DEF_CLASS, 1U);
+    method_opcode = test_find_opcode(bytes, main_proto, OP_DEF_METHOD, 1U);
+    call_opcode = test_find_opcode(bytes, main_proto, OP_CALL, 0U);
+    jump_opcode = test_find_opcode(bytes, main_proto, OP_JMP_UNLESS, 0U);
+    closure_opcode = test_find_opcode(bytes, main_proto, OP_CLOSURE, 0U);
+    cast_opcode = test_find_opcode(bytes, main_proto, OP_CAST, 0U);
+    include_opcode = test_find_opcode(bytes, main_proto, OP_INCLUDE, 0U);
+    typecheck_opcode = test_find_opcode(bytes, typed_proto,
+                                        OP_TYPECHECK_ARGS, 0U);
+    return_opcode = test_find_opcode(bytes, typed_proto, OP_RET, 0U);
+    store_opcode = test_find_opcode(bytes, typed_proto, OP_STORE_LOCAL, 0U);
+    ASSERT_TRUE(property_opcode != SIZE_MAX);
+    ASSERT_TRUE(second_property != SIZE_MAX);
+    ASSERT_TRUE(readonly_property != SIZE_MAX);
+    ASSERT_TRUE(child_class != SIZE_MAX);
+    ASSERT_TRUE(method_opcode != SIZE_MAX);
+    ASSERT_TRUE(call_opcode != SIZE_MAX);
+    ASSERT_TRUE(jump_opcode != SIZE_MAX);
+    ASSERT_TRUE(closure_opcode != SIZE_MAX);
+    ASSERT_TRUE(cast_opcode != SIZE_MAX);
+    ASSERT_TRUE(include_opcode != SIZE_MAX);
+    ASSERT_TRUE(typecheck_opcode != SIZE_MAX);
+    ASSERT_TRUE(return_opcode != SIZE_MAX);
+    ASSERT_TRUE(store_opcode != SIZE_MAX);
+    {
+        size_t constructor_opcode = test_find_opcode(
+            bytes, main_proto, OP_DEF_METHOD, 0U);
+        uint16_t constructor_index;
+        ASSERT_TRUE(constructor_opcode != SIZE_MAX);
+        constructor_index = test_get_u16(bytes, constructor_opcode + 3U);
+        ASSERT_TRUE(constructor_index < n_protos);
+        constructor_proto = test_get_u32(
+            bytes, proto_table + (size_t)constructor_index * 4U);
+        constructor_type = test_proto_type_offset(bytes, constructor_proto);
+        ASSERT_EQ(1, bytes[constructor_type]);
+        ASSERT_EQ(PTYPE_VOID, bytes[constructor_type + 1U]);
+    }
 
     memcpy(mutated, bytes, length);
     mutated[typed_type] = 17U;
@@ -1114,17 +1245,143 @@ TEST(pbc_loader_rejects_corrupt_declared_type_metadata) {
     test_put_u32(mutated, proto_table + 4U, (uint32_t)main_proto);
     ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(mutated, length));
 
-    for (i = main_proto + 16U;
-         i < main_proto + 16U + test_get_u16(bytes, main_proto + 8U); i++) {
-        if (bytes[i] == OP_DEF_PROP) {
-            property_opcode = i;
-            break;
-        }
-    }
-    ASSERT_TRUE(property_opcode != SIZE_MAX);
     memcpy(mutated, bytes, length);
     test_put_u16(mutated, property_opcode + 4U,
                  test_get_u16(bytes, main_proto + 10U));
+    ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(mutated, length));
+
+    memcpy(mutated, bytes, length);
+    mutated[typecheck_opcode] = OP_NOP;
+    ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(mutated, length));
+
+    memcpy(mutated, bytes, length);
+    mutated[return_opcode] = OP_TYPECHECK_ARGS;
+    ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(mutated, length));
+
+    memcpy(mutated, bytes, length);
+    mutated[typed_proto + 16U] = OP_NOP;
+    ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(mutated, length));
+
+    memcpy(mutated, bytes, length);
+    mutated[store_opcode + 1U] = bytes[typed_proto + 3U];
+    ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(mutated, length));
+
+    memcpy(mutated, bytes, length);
+    mutated[call_opcode + 3U] = 32U;
+    ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(mutated, length));
+
+    memcpy(mutated, bytes, length);
+    test_put_u16(mutated, call_opcode + 1U,
+                 test_get_u16(bytes, main_proto + 10U));
+    ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(mutated, length));
+
+    memcpy(mutated, bytes, length);
+    test_put_u16(mutated, jump_opcode + 1U, UINT16_MAX);
+    ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(mutated, length));
+
+    memcpy(mutated, bytes, length);
+    test_put_u16(mutated, jump_opcode + 1U, UINT16_MAX - 1U);
+    ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(mutated, length));
+
+    ASSERT_EQ(1, bytes[closure_opcode + 3U]);
+    memcpy(mutated, bytes, length);
+    test_put_u16(mutated, closure_opcode + 1U, n_protos);
+    ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(mutated, length));
+
+    memcpy(mutated, bytes, length);
+    mutated[closure_opcode + 3U] = UINT8_MAX;
+    ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(mutated, length));
+
+    memcpy(mutated, bytes, length);
+    mutated[closure_opcode + 4U] = 1U;
+    ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(mutated, length));
+
+    memcpy(mutated, bytes, length);
+    mutated[closure_opcode + 5U] = bytes[main_proto + 3U];
+    ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(mutated, length));
+
+    memcpy(mutated, bytes, length);
+    mutated[cast_opcode + 1U] = PT_OBJECT;
+    ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(mutated, length));
+
+    memcpy(mutated, bytes, length);
+    mutated[include_opcode + 1U] = 0U;
+    ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(mutated, length));
+
+    memcpy(mutated, bytes, length);
+    mutated[child_class + 5U] = PC_MOD_PUBLIC;
+    ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(mutated, length));
+
+    memcpy(mutated, bytes, length);
+    test_put_u16(mutated, method_opcode + 3U, n_protos);
+    ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(mutated, length));
+
+    memcpy(mutated, bytes, length);
+    mutated[method_opcode + 5U] = PC_MOD_READONLY;
+    ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(mutated, length));
+
+    memcpy(mutated, bytes, length);
+    mutated[property_opcode + 3U] =
+        (uint8_t)(PC_MOD_PUBLIC | PC_MOD_STATIC | PC_MOD_READONLY);
+    ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(mutated, length));
+
+    memcpy(mutated, bytes, length);
+    mutated[property_opcode + 6U] = 2U;
+    ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(mutated, length));
+
+    memcpy(mutated, bytes, length);
+    mutated[readonly_property + 3U] = PC_MOD_PUBLIC;
+    ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(mutated, length));
+
+    memcpy(mutated, bytes, length);
+    test_put_u16(mutated, readonly_property + 4U, UINT16_MAX);
+    ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(mutated, length));
+
+    {
+        uint16_t type_index = test_get_u16(bytes, second_property + 4U);
+        size_t constant = test_constant_offset(bytes, main_proto, type_index);
+        uint32_t sid;
+        ASSERT_EQ(2, bytes[constant]);
+        sid = test_get_u32(bytes, constant + 4U);
+        ASSERT_TRUE(sid < n_strings);
+        string_record = test_get_u32(bytes, 16U + (size_t)sid * 4U);
+        ASSERT_EQ(3, test_get_u16(bytes, string_record));
+        memcpy(mutated, bytes, length);
+        mutated[string_record + 2U] = 'i';
+        mutated[string_record + 3U] = '|';
+        mutated[string_record + 4U] = '|';
+        ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(mutated, length));
+
+        memcpy(mutated, bytes, length);
+        mutated[string_record + 2U] = '1';
+        ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(mutated, length));
+    }
+
+    memcpy(mutated, bytes, length);
+    test_put_u16(mutated, child_class + 3U, UINT16_MAX);
+    ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(mutated, length));
+
+    memcpy(mutated, bytes, length);
+    memcpy(mutated + typed_type + 4U, mutated + typed_type + 1U, 3U);
+    ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(mutated, length));
+
+    memcpy(mutated, bytes, length);
+    mutated[typed_type + 1U] = PTYPE_MIXED;
+    test_put_u16(mutated, typed_type + 2U, UINT16_MAX);
+    ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(mutated, length));
+
+    memcpy(mutated, bytes, length);
+    mutated[typed_type + 8U] = PTYPE_STATIC;
+    test_put_u16(mutated, typed_type + 9U, UINT16_MAX);
+    ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(mutated, length));
+
+    memcpy(mutated, bytes, length);
+    mutated[typed_type + 8U] = PTYPE_VOID;
+    test_put_u16(mutated, typed_type + 9U, UINT16_MAX);
+    ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(mutated, length));
+
+    memcpy(mutated, bytes, length);
+    mutated[constructor_type + 1U] = PTYPE_INT;
     ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(mutated, length));
 
     free(mutated);
@@ -1832,7 +2089,7 @@ TEST(static_class_members_promotion_and_magic_methods_execute) {
         " public function inherited() { return parent::value(); }"
         "}"
         "class PromotedMagic {"
-        " public function __construct(private $x, public readonly $y = 2) {}"
+        " public function __construct(private $x, public readonly int $y = 2) {}"
         " public function __get($name) { return 'get:' . $name; }"
         " public function __set($name, $value) { $this->x = $value; }"
         " public function __toString() { return 'value=' . $this->x; }"

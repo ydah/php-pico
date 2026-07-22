@@ -10,6 +10,7 @@ int64=${6:?int64 typecheck compiler required}
 rp_equivalent=${7:?RP2040-equivalent typecheck compiler required}
 ubsan=${8:?UBSan typecheck compiler required}
 asan=${9:?ASan typecheck compiler required}
+no_float_off=${10:?integer-only non-typecheck compiler required}
 
 temporary=$(mktemp -d "${TMPDIR:-/tmp}/php-pico-typecheck.XXXXXX")
 trap 'rm -rf "$temporary"' EXIT HUP INT TERM
@@ -149,8 +150,113 @@ assert_failure "$typecheck_on" 'function bad(?int|string $value) {}' \
     'nullable shorthand cannot be combined with a union' nullable-union
 assert_failure "$typecheck_on" 'class Bad { public callable $value; }' \
     'callable is not valid as a property type' callable-property
-assert_failure "$no_float" 'function bad(float $value) {}' \
-    'float type declarations require PPHP_ENABLE_FLOAT=1' no-float-type
+assert_no_float_declarations() {
+    binary=$1
+    suffix=$2
+    assert_failure "$binary" 'function bad(float $value) {}' \
+        'float type declarations require PPHP_ENABLE_FLOAT=1' "no-float-type-$suffix"
+    assert_failure "$binary" 'class Bad { public float $value; }' \
+        'float type declarations require PPHP_ENABLE_FLOAT=1' "no-float-property-$suffix"
+    assert_failure "$binary" 'class Bad { public function value(): float {} }' \
+        'float type declarations require PPHP_ENABLE_FLOAT=1' "no-float-method-$suffix"
+    assert_failure "$binary" '$bad = function (float $value) {};' \
+        'float type declarations require PPHP_ENABLE_FLOAT=1' "no-float-closure-$suffix"
+    assert_failure "$binary" '$bad = fn (): float => 1;' \
+        'float type declarations require PPHP_ENABLE_FLOAT=1' "no-float-arrow-$suffix"
+    assert_failure "$binary" \
+        'class Bad { public function __construct(public float $value) {} }' \
+        'float type declarations require PPHP_ENABLE_FLOAT=1' "no-float-promoted-$suffix"
+}
+assert_no_float_declarations "$no_float" on
+assert_no_float_declarations "$no_float_off" off
+
+context_source='class ContextBase {}
+class ContextChild extends ContextBase {
+    public function same(self $value): self { return $value; }
+    public function parentValue(parent $value): parent { return $value; }
+    public function closures(): self {
+        $closure = function (self $value): self { return $value; };
+        $arrow = fn (parent $value): parent => $value;
+        $closure($this); $arrow(new ContextBase()); return $this;
+    }
+    public function __CONSTRUCT(): void {}
+}
+echo get_class((new ContextChild())->closures());'
+assert_output "$typecheck_on" "$context_source" 'ContextChild'
+assert_failure "$typecheck_on" 'function bad(): self {}' \
+    'self type requires class scope' top-self
+assert_failure "$typecheck_on" '$bad = function (): parent {};' \
+    'parent type requires class scope' closure-parent
+assert_failure "$typecheck_on" '$bad = fn (): static => null;' \
+    'static type is only valid as a method return type' arrow-static
+assert_failure "$typecheck_on" 'class Bad { public function value(): parent {} }' \
+    'parent type requires a parent class' missing-parent
+assert_failure "$typecheck_off" 'function bad(): void { return 1; }' \
+    'a void function must not return a value' void-return-off
+assert_failure "$typecheck_on" 'class Bad { public function __Construct() { return 1; } }' \
+    'a void function must not return a value' constructor-return
+assert_failure "$typecheck_on" 'class Bad { public function __DESTRUCT() { return 1; } }' \
+    'a void function must not return a value' destructor-return
+assert_failure "$typecheck_on" 'class Bad { public function __construct(): int {} }' \
+    'constructor may only declare void' constructor-type
+
+variance_source='interface VariantContract {
+    public function convert(VariantBase|int $value): VariantBase;
+}
+class VariantBase {}
+class VariantChild extends VariantBase implements VariantContract {
+    public function convert(mixed $value): VariantChild { return new VariantChild(); }
+}
+class VariantGrandchild extends VariantChild {
+    public function convert(mixed $value, int $extra = 0): VariantGrandchild {
+        return new VariantGrandchild();
+    }
+}
+echo get_class((new VariantGrandchild())->convert("ok"));'
+assert_output "$typecheck_on" "$variance_source" 'VariantGrandchild'
+assert_failure "$typecheck_on" \
+    'class A { public function f(int|string $v): A { return $this; } } class B extends A { public function f(int $v): A { return $this; } }' \
+    'must implement method f' variance-parameter
+assert_failure "$typecheck_on" \
+    'class A { public function f(int $v): A { return $this; } } class B extends A { public function f(int $v): mixed { return $this; } }' \
+    'must implement method f' variance-return
+assert_failure "$typecheck_on" \
+    'interface I { public function f(int $v): int; } class C implements I { public function f(int $v, int $required): int { return 1; } }' \
+    'must implement method f' variance-arity
+assert_failure "$typecheck_on" \
+    'interface I { public function f(int ...$v): int; } class C implements I { public function f(int $v): int { return 1; } }' \
+    'must implement method f' variance-variadic
+
+readonly_source='class ReadonlyPromotion {
+    public function __construct(public readonly int $id = 7) {}
+}
+$value = new ReadonlyPromotion(); $copy = clone $value;
+echo $value->id, ":", $copy->id, ":";
+try { $value->{"id"} = 8; } catch (Error $error) { echo "dynamic:"; }
+class ReadonlyChild extends ReadonlyPromotion {}
+try { (new ReadonlyChild())->id = 9; } catch (Error $error) { echo "inherited"; }'
+assert_output "$typecheck_on" "$readonly_source" '7:7:dynamic:inherited'
+assert_failure "$typecheck_off" \
+    'class Bad { public function method(public int $value) {} }' \
+    'property promotion is only valid in a constructor' promotion-context
+assert_failure "$typecheck_off" \
+    'class Bad { public readonly $value; }' \
+    'a readonly property must have a type' readonly-untyped
+assert_failure "$typecheck_off" \
+    'class Bad { public readonly int $value = 1; }' \
+    'a readonly property cannot have a default value' readonly-default
+assert_failure "$typecheck_off" \
+    'class Bad { public static readonly int $value; }' \
+    'a readonly property cannot be static' readonly-static
+assert_failure "$typecheck_off" \
+    'class Bad { public function __construct(public readonly $value) {} }' \
+    'a readonly property must have a type' readonly-promoted-untyped
+assert_failure "$typecheck_off" \
+    'readonly class Base {} class Bad extends Base {}' \
+    'readonly classes may only extend readonly classes' readonly-parent
+assert_failure "$typecheck_off" \
+    'class Base {} readonly class Bad extends Base {}' \
+    'readonly classes may only extend readonly classes' readonly-child
 
 assert_output "$int64" \
     'function wide(int $value): int { return $value; } echo wide(2147483648);' \
@@ -163,17 +269,36 @@ class PbcValue implements PbcMarker {
     public string $name = "pbc";
     public function identity(self $value): self { return $value; }
 }
+interface PbcVariant {
+    public function convert(PbcValue|int $value): PbcValue;
+}
+class PbcChild extends PbcValue implements PbcVariant {
+    public function convert(mixed $value): self { return $this; }
+}
+readonly class PbcReadonly {
+    public function __construct(public int $id = 4) {}
+}
+function pbc_void_finally(): void {
+    try { return; } finally {}
+}
+class PbcVoidConstructor {
+    public function __construct() {
+        try { return; } finally {}
+    }
+}
 function pbc_typed(PbcMarker $value): string { return $value->name; }
 $value = new PbcValue();
 echo pbc_typed($value), ":", $value->identity($value)->name, ":";
 try { pbc_typed("bad"); } catch (TypeError $error) { echo get_class($error); }
+pbc_void_finally(); new PbcVoidConstructor();
+echo ":", get_class((new PbcChild())->convert("ok")), ":", (new PbcReadonly())->id;
 PHP
 "$typecheck_on" -c "$temporary/typed.php" -o "$temporary/typed.pbc"
-test "$("$pbc_on" "$temporary/typed.pbc")" = 'pbc:pbc:TypeError' ||
+test "$("$pbc_on" "$temporary/typed.pbc")" = 'pbc:pbc:TypeError:PbcChild:4' ||
     fail 'type metadata was not enforced by the compiler-free runtime'
 ASAN_OPTIONS=detect_leaks=0 "$asan" "$temporary/typed.pbc" \
     >"$temporary/asan-pbc.out"
-test "$(cat "$temporary/asan-pbc.out")" = 'pbc:pbc:TypeError' ||
+test "$(cat "$temporary/asan-pbc.out")" = 'pbc:pbc:TypeError:PbcChild:4' ||
     fail 'ASan runtime changed typed PBC execution'
 
 if "$pbc_off" "$temporary/typed.pbc" >"$temporary/mismatch.out" \
@@ -192,5 +317,33 @@ if "$pbc_on" "$temporary/corrupt.pbc" >"$temporary/corrupt.out" \
 fi
 grep -q 'invalid or incompatible PBC image' "$temporary/corrupt.err" ||
     fail 'corrupt PBC was not rejected'
+
+cat >"$temporary/variance-bad.php" <<'PHP'
+<?php
+class PbcVarianceBase {
+    public function value(int|string $value): int { return 1; }
+}
+class PbcVarianceBad extends PbcVarianceBase {
+    public function value(int $value): int { return 1; }
+}
+PHP
+"$typecheck_on" -c "$temporary/variance-bad.php" \
+    -o "$temporary/variance-bad.pbc"
+if "$pbc_on" "$temporary/variance-bad.pbc" \
+        >"$temporary/variance-bad.out" 2>"$temporary/variance-bad.err"; then
+    fail 'compiler-free runtime accepted incompatible method variance'
+fi
+grep -q 'must implement method value' "$temporary/variance-bad.err" ||
+    fail 'compiler-free runtime did not validate method variance'
+
+printf '<?php echo 1;\n' >"$temporary/float-config.php"
+"$typecheck_off" -c "$temporary/float-config.php" \
+    -o "$temporary/float-config.pbc"
+if "$no_float_off" "$temporary/float-config.pbc" \
+        >"$temporary/float-config.out" 2>"$temporary/float-config.err"; then
+    fail 'integer-only runtime accepted float-enabled PBC'
+fi
+grep -q 'invalid or incompatible PBC image' "$temporary/float-config.err" ||
+    fail 'float PBC configuration mismatch was not reported'
 
 echo 'typecheck tests passed'

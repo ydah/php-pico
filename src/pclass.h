@@ -119,7 +119,8 @@ int pclass_add_constant(pclass *class_entry, const char *name, size_t length,
 int pclass_get_constant(const pclass *class_entry, const char *name,
                         size_t length, pvalue *value);
 int pclass_add_interface(pclass *class_entry, pclass *interface_entry);
-int pclass_is_complete(const pclass *class_entry, const pmethod **missing);
+int pclass_is_complete(pphp_state *state, const pclass *class_entry,
+                       const pmethod **missing);
 const pproperty *pclass_find_property(const pclass *class_entry,
                                       const char *name, size_t length);
 const pmethod *pclass_find_method(const pclass *class_entry,

@@ -1730,12 +1730,6 @@ static int construct_object(pphp_state *state, pframe *frame,
 static int return_from_function(pphp_state *state, pvalue result) {
     pframe *frame = &state->frames[state->frame_count - 1U];
     size_t base = frame->base;
-    if (frame->has_return_override) {
-        pv_release(result);
-        result = frame->return_override;
-        frame->return_override = pv_null();
-        frame->has_return_override = 0;
-    }
 #if PPHP_TYPECHECK
     if (!type_spec_accepts(state, frame, &frame->proto->return_type, result)) {
         char expected[128];
@@ -1749,6 +1743,12 @@ static int return_from_function(pphp_state *state, pvalue result) {
         return 0;
     }
 #endif
+    if (frame->has_return_override) {
+        pv_release(result);
+        result = frame->return_override;
+        frame->return_override = pv_null();
+        frame->has_return_override = 0;
+    }
     release_range(state, base, state->stack_count);
     state->stack_count = base;
     release_frame_owners(frame);
@@ -2427,6 +2427,13 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                         pphp_runtime_error(state, frame->line, "cannot extend final class");
                         break;
                     }
+                    if (((parent->flags & PC_READONLY) != 0U) !=
+                        ((flags & PC_READONLY) != 0U)) {
+                        pphp_runtime_error(
+                            state, frame->line,
+                            "readonly classes may only extend readonly classes");
+                        break;
+                    }
                 }
                 state->building_class = pclass_new(ps_data(name), name->length, parent, flags);
                 if (state->building_class == NULL) {
@@ -2581,9 +2588,8 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
             case OP_DEF_END: {
                 const pmethod *missing = NULL;
                 if (state->building_class != NULL &&
-                    (state->building_class->flags &
-                     (PC_ABSTRACT | PC_INTERFACE)) == 0U &&
-                    !pclass_is_complete(state->building_class, &missing)) {
+                    !pclass_is_complete(state, state->building_class,
+                                        &missing)) {
                     pphp_runtime_error(
                         state, frame->line,
                         "class %.*s must implement method %.*s()",
@@ -3080,6 +3086,12 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                         pphp_runtime_error(state, frame->line,
                                            "cannot access non-public static "
                                            "property %.*s",
+                                           (int)member_name->length,
+                                           ps_data(member_name));
+                    } else if ((property->flags & PC_READONLY) != 0U) {
+                        pv_release(value);
+                        pphp_runtime_error(state, frame->line,
+                                           "cannot modify readonly static property %.*s",
                                            (int)member_name->length,
                                            ps_data(member_name));
 #if PPHP_TYPECHECK

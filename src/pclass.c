@@ -352,52 +352,204 @@ int pclass_add_interface(pclass *class_entry, pclass *interface_entry) {
     return 1;
 }
 
-static int method_implements(const pclass *class_entry,
-                             const pmethod *requirement) {
-    const pmethod *implementation = pclass_find_method(
-        class_entry, ps_data(requirement->name), requirement->name->length);
-    if (implementation == NULL ||
-        (implementation->flags & PC_ABSTRACT) != 0U) return 0;
-    if ((requirement->flags & PC_STATIC) !=
-        (implementation->flags & PC_STATIC)) return 0;
-    if ((requirement->owner->flags & PC_INTERFACE) != 0U &&
-        (implementation->flags & PC_PUBLIC) == 0U) return 0;
+static int method_visibility_compatible(uint8_t implementation,
+                                        uint8_t requirement) {
+    if ((requirement & PC_PUBLIC) != 0U) return (implementation & PC_PUBLIC) != 0U;
+    if ((requirement & PC_PROTECTED) != 0U) return (implementation & PC_PRIVATE) == 0U;
     return 1;
 }
 
-static int interfaces_complete(const pclass *class_entry,
+#if PPHP_TYPECHECK
+static pclass *declared_member_class(pphp_state *state, const pclass *owner,
+                                     const ptype_member *member) {
+    if (member->kind == PTYPE_SELF || member->kind == PTYPE_STATIC) {
+        return (pclass *)owner;
+    }
+    if (member->kind == PTYPE_PARENT) {
+        return owner == NULL ? NULL : owner->parent;
+    }
+    if (member->kind != PTYPE_NAMED || member->name == NULL) return NULL;
+    if (owner != NULL && name_equal_ci(owner->name, ps_data(member->name),
+                                       member->name->length)) {
+        return (pclass *)owner;
+    }
+    return pphp_find_class(state, ps_data(member->name), member->name->length);
+}
+
+static const pstring *declared_member_name(const pclass *owner,
+                                           const ptype_member *member) {
+    if (member->kind == PTYPE_SELF || member->kind == PTYPE_STATIC) {
+        return owner == NULL ? NULL : owner->name;
+    }
+    if (member->kind == PTYPE_PARENT) {
+        return owner == NULL || owner->parent == NULL ? NULL
+                                                      : owner->parent->name;
+    }
+    return member->kind == PTYPE_NAMED ? member->name : NULL;
+}
+
+static int declared_member_subtype(pphp_state *state,
+                                   const ptype_member *sub,
+                                   const pclass *sub_owner,
+                                   const ptype_member *super,
+                                   const pclass *super_owner) {
+    pclass *sub_class;
+    pclass *super_class;
+    const pstring *sub_name;
+    const pstring *super_name;
+    if (super->kind == PTYPE_MIXED) return 1;
+    if (sub->kind == PTYPE_MIXED) return 0;
+    if (super->kind == PTYPE_STATIC && sub->kind != PTYPE_STATIC) return 0;
+    if (sub->kind < PTYPE_SELF && super->kind < PTYPE_SELF) {
+        return sub->kind == super->kind;
+    }
+    sub_class = declared_member_class(state, sub_owner, sub);
+    super_class = declared_member_class(state, super_owner, super);
+    if (sub_class != NULL && super_class != NULL) {
+        return pclass_is_a(sub_class, super_class);
+    }
+    sub_name = declared_member_name(sub_owner, sub);
+    super_name = declared_member_name(super_owner, super);
+    return sub_name != NULL && super_name != NULL &&
+           name_equal_ci(sub_name, ps_data(super_name), super_name->length);
+}
+
+static int declared_spec_subtype(pphp_state *state, const ptype_spec *sub,
+                                 const pclass *sub_owner,
+                                 const ptype_spec *super,
+                                 const pclass *super_owner) {
+    size_t i;
+    size_t j;
+    if (super == NULL || super->count == 0U ||
+        (super->count == 1U && super->members[0].kind == PTYPE_MIXED)) {
+        return 1;
+    }
+    if (sub == NULL || sub->count == 0U) return 0;
+    for (i = 0U; i < sub->count; i++) {
+        int covered = 0;
+        for (j = 0U; j < super->count; j++) {
+            if (declared_member_subtype(state, &sub->members[i], sub_owner,
+                                        &super->members[j], super_owner)) {
+                covered = 1;
+                break;
+            }
+        }
+        if (!covered) return 0;
+    }
+    return 1;
+}
+#endif
+
+static int method_signature_compatible(pphp_state *state,
+                                       const pmethod *implementation,
+                                       const pmethod *requirement) {
+    const pproto *actual = implementation->proto;
+    const pproto *required = requirement->proto;
+    size_t i;
+    if ((requirement->flags & PC_STATIC) !=
+        (implementation->flags & PC_STATIC)) return 0;
+    if (!method_visibility_compatible(implementation->flags,
+                                      requirement->flags)) return 0;
+    if (actual == NULL || required == NULL) return 1;
+    if (actual->n_required > required->n_required ||
+        (required->variadic && !actual->variadic) ||
+        (!actual->variadic && actual->n_params < required->n_params)) {
+        return 0;
+    }
+#if PPHP_TYPECHECK
+    for (i = 0U; i < required->n_params; i++) {
+        size_t actual_index = i < actual->n_params
+                                  ? i : (size_t)actual->n_params - 1U;
+        if (!declared_spec_subtype(
+                state, &required->parameter_types[i], requirement->owner,
+                &actual->parameter_types[actual_index],
+                implementation->owner)) return 0;
+    }
+    if (!declared_spec_subtype(state, &actual->return_type,
+                               implementation->owner,
+                               &required->return_type,
+                               requirement->owner)) return 0;
+#else
+    (void)state;
+    (void)i;
+#endif
+    return 1;
+}
+
+static int method_implements(pphp_state *state, const pclass *class_entry,
+                             const pmethod *requirement,
+                             int require_concrete) {
+    const pmethod *implementation = pclass_find_method(
+        class_entry, ps_data(requirement->name), requirement->name->length);
+    return implementation != NULL &&
+           (!require_concrete ||
+            (implementation->flags & PC_ABSTRACT) == 0U) &&
+           method_signature_compatible(state, implementation, requirement);
+}
+
+static int interfaces_complete(pphp_state *state, const pclass *class_entry,
                                const pclass *interface_entry,
-                               const pmethod **missing) {
+                               const pmethod **missing,
+                               int require_concrete) {
     size_t i;
     for (i = 0U; i < interface_entry->method_count; i++) {
-        if (!method_implements(class_entry, &interface_entry->methods[i])) {
+        const pmethod *implementation = pclass_find_method(
+            class_entry, ps_data(interface_entry->methods[i].name),
+            interface_entry->methods[i].name->length);
+        if ((require_concrete || implementation != NULL) &&
+            !method_implements(state, class_entry,
+                               &interface_entry->methods[i],
+                               require_concrete)) {
             if (missing != NULL) *missing = &interface_entry->methods[i];
             return 0;
         }
     }
     for (i = 0U; i < interface_entry->interface_count; i++) {
-        if (!interfaces_complete(class_entry, interface_entry->interfaces[i],
-                                 missing)) return 0;
+        if (!interfaces_complete(state, class_entry,
+                                 interface_entry->interfaces[i], missing,
+                                 require_concrete)) return 0;
     }
     return 1;
 }
 
-int pclass_is_complete(const pclass *class_entry, const pmethod **missing) {
+int pclass_is_complete(pphp_state *state, const pclass *class_entry,
+                       const pmethod **missing) {
     const pclass *cursor;
     size_t i;
+    int require_concrete;
     if (missing != NULL) *missing = NULL;
     if (class_entry == NULL) return 0;
+    require_concrete = (class_entry->flags &
+                        (PC_ABSTRACT | PC_INTERFACE)) == 0U;
+    if (class_entry->parent != NULL) {
+        for (i = 0U; i < class_entry->method_count; i++) {
+            const pmethod *requirement = pclass_find_method(
+                class_entry->parent, ps_data(class_entry->methods[i].name),
+                class_entry->methods[i].name->length);
+            if (requirement != NULL &&
+                (requirement->flags & PC_PRIVATE) == 0U &&
+                !name_equal_ci(requirement->name, "__construct", 11U) &&
+                !method_signature_compatible(state, &class_entry->methods[i],
+                                             requirement)) {
+                if (missing != NULL) *missing = requirement;
+                return 0;
+            }
+        }
+    }
     for (cursor = class_entry; cursor != NULL; cursor = cursor->parent) {
         for (i = 0U; i < cursor->method_count; i++) {
-            if ((cursor->methods[i].flags & PC_ABSTRACT) != 0U &&
-                !method_implements(class_entry, &cursor->methods[i])) {
+            if (require_concrete &&
+                (cursor->methods[i].flags & PC_ABSTRACT) != 0U &&
+                !method_implements(state, class_entry, &cursor->methods[i],
+                                   1)) {
                 if (missing != NULL) *missing = &cursor->methods[i];
                 return 0;
             }
         }
         for (i = 0U; i < cursor->interface_count; i++) {
-            if (!interfaces_complete(class_entry, cursor->interfaces[i],
-                                     missing)) return 0;
+            if (!interfaces_complete(state, class_entry,
+                                     cursor->interfaces[i], missing,
+                                     require_concrete)) return 0;
         }
     }
     return 1;

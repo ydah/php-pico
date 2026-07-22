@@ -34,6 +34,9 @@ typedef struct generator {
     size_t jump_count;
     const pc_ast *finally_blocks[PPHP_PARSE_DEPTH_MAX];
     unsigned finally_count;
+    int class_scope;
+    int class_has_parent;
+    int return_void;
     int failed;
 } generator;
 
@@ -47,6 +50,82 @@ static void fail(generator *gen, uint32_t line, const char *format, ...) {
     va_start(arguments, format);
     (void)vsnprintf(gen->error->message, sizeof(gen->error->message), format, arguments);
     va_end(arguments);
+}
+
+typedef enum declared_type_context {
+    TYPE_CONTEXT_NONE,
+    TYPE_CONTEXT_CLASS,
+    TYPE_CONTEXT_METHOD
+} declared_type_context;
+
+static int token_bytes_equal_ci(pc_token token, const char *bytes,
+                                size_t length) {
+    size_t i;
+    if (token.length != length) return 0;
+    for (i = 0U; i < length; i++) {
+        unsigned char left = (unsigned char)token.start[i];
+        unsigned char right = (unsigned char)bytes[i];
+        if (left >= 'A' && left <= 'Z') left = (unsigned char)(left + ('a' - 'A'));
+        if (right >= 'A' && right <= 'Z') right = (unsigned char)(right + ('a' - 'A'));
+        if (left != right) return 0;
+    }
+    return 1;
+}
+
+static int type_is_only(const pc_ast *type, pc_token_type token) {
+    return type != NULL && type->next == NULL &&
+           type->as.type_decl.name.type == token;
+}
+
+static int validate_type_spec(generator *gen, const pc_ast *type,
+                              declared_type_context context, int has_parent,
+                              int is_return, int is_property) {
+    while (type != NULL && !gen->failed) {
+        pc_token_type token = type->as.type_decl.name.type;
+#if !PPHP_ENABLE_FLOAT
+        if (token == T_FLOAT_TYPE) {
+            fail(gen, type->line,
+                 "float type declarations require PPHP_ENABLE_FLOAT=1");
+            return 0;
+        }
+#endif
+        if ((token == T_SELF || token == T_PARENT) &&
+            context == TYPE_CONTEXT_NONE) {
+            fail(gen, type->line,
+                 token == T_SELF ? "self type requires class scope"
+                                 : "parent type requires class scope");
+            return 0;
+        }
+        if (token == T_PARENT && !has_parent) {
+            fail(gen, type->line, "parent type requires a parent class");
+            return 0;
+        }
+        if (token == T_STATIC &&
+            (context != TYPE_CONTEXT_METHOD || !is_return)) {
+            fail(gen, type->line,
+                 "static type is only valid as a method return type");
+            return 0;
+        }
+        if (is_property &&
+            (token == T_VOID || token == T_STATIC || token == T_CALLABLE)) {
+            fail(gen, type->line, "invalid property type");
+            return 0;
+        }
+        type = type->next;
+    }
+    return !gen->failed;
+}
+
+static int validate_callable_types(generator *gen, const pc_ast *parameters,
+                                   const pc_ast *return_type,
+                                   declared_type_context context,
+                                   int has_parent) {
+    while (parameters != NULL) {
+        if (!validate_type_spec(gen, parameters->as.parameter.type, context,
+                                has_parent, 0, 0)) return 0;
+        parameters = parameters->next;
+    }
+    return validate_type_spec(gen, return_type, context, has_parent, 1, 0);
 }
 
 #if PPHP_TYPECHECK
@@ -78,13 +157,6 @@ static int compile_type_spec(generator *gen, const pc_ast *type,
             fail(gen, type->line, "unsupported declared type");
             return 0;
         }
-#if !PPHP_ENABLE_FLOAT
-        if (kind == PTYPE_FLOAT) {
-            fail(gen, type->line,
-                 "float type declarations require PPHP_ENABLE_FLOAT=1");
-            return 0;
-        }
-#endif
         if (!ptype_spec_add(spec, kind,
                             kind == PTYPE_NAMED ? token.start : NULL,
                             kind == PTYPE_NAMED ? token.length : 0U)) {
@@ -900,6 +972,13 @@ static void compile_closure_expression(generator *gen, const pc_ast *node) {
     child.module = gen->module;
     child.proto = proto;
     child.error = gen->error;
+    child.class_scope = gen->class_scope;
+    child.class_has_parent = gen->class_has_parent;
+    child.return_void = type_is_only(node->as.closure.return_type, T_VOID);
+    if (!validate_callable_types(
+            gen, node->as.closure.parameters, node->as.closure.return_type,
+            gen->class_scope ? TYPE_CONTEXT_CLASS : TYPE_CONTEXT_NONE,
+            gen->class_has_parent)) return;
 #if PPHP_TYPECHECK
     if (!compile_callable_types(gen, proto, node->as.closure.parameters,
                                 node->as.closure.return_type)) return;
@@ -909,6 +988,10 @@ static void compile_closure_expression(generator *gen, const pc_ast *node) {
     emit_byte(&child, OP_TYPECHECK_ARGS, node->line);
 #endif
     if (node->as.closure.is_arrow) {
+        if (child.return_void) {
+            fail(&child, node->line,
+                 "a void function must not return a value");
+        }
         compile_expression(&child, node->as.closure.body);
         emit_byte(&child, OP_RET, node->line);
     } else {
@@ -2775,8 +2858,19 @@ static void compile_statement(generator *gen, const pc_ast *node) {
             break;
         }
         case AST_RETURN:
+            if (gen->return_void && node->as.expression.expression != NULL) {
+                fail(gen, node->line,
+                     "a void function must not return a value");
+                break;
+            }
             if (gen->finally_count != 0U) {
                 uint8_t slot;
+                if (gen->return_void &&
+                    node->as.expression.expression == NULL) {
+                    compile_transfer_finally_blocks(gen, 0U);
+                    emit_byte(gen, OP_RET_NULL, node->line);
+                    break;
+                }
                 if (!pproto_add_local(gen->proto, "\x01return", 7U, &slot)) {
                     fail(gen, node->line, "cannot allocate pending return slot");
                     break;
@@ -3044,6 +3138,11 @@ static int compile_function(generator *gen, const pc_ast *function,
     while (parameter != NULL) {
         uint8_t slot;
         pc_token name = parameter->as.parameter.name;
+        if (parameter->as.parameter.flags != 0U) {
+            fail(gen, parameter->line,
+                 "property promotion is only valid in a constructor");
+            return 0;
+        }
         if (name.length != 0U && name.start[0] == '$') {
             name.start++;
             name.length--;
@@ -3083,6 +3182,10 @@ static int compile_function(generator *gen, const pc_ast *function,
     child.module = gen->module;
     child.proto = proto;
     child.error = gen->error;
+    child.return_void = type_is_only(function->as.function.return_type, T_VOID);
+    if (!validate_callable_types(gen, function->as.function.parameters,
+                                 function->as.function.return_type,
+                                 TYPE_CONTEXT_NONE, 0)) return 0;
 #if PPHP_TYPECHECK
     if (!compile_callable_types(gen, proto,
                                 function->as.function.parameters,
@@ -3104,14 +3207,19 @@ static int compile_function(generator *gen, const pc_ast *function,
     return 1;
 }
 
-static int compile_method(generator *gen, pc_token class_name,
+static int compile_method(generator *gen, const pc_ast *class_node,
                           const pc_ast *method) {
+    pc_token class_name = class_node->as.class_decl.name;
     size_t qualified_length = class_name.length + 2U + method->as.function.name.length;
     char *qualified;
     pproto *proto;
     const pc_ast *parameter;
     generator child;
     int saw_default = 0;
+    int is_constructor = token_bytes_equal_ci(method->as.function.name,
+                                              "__construct", 11U);
+    int is_destructor = token_bytes_equal_ci(method->as.function.name,
+                                             "__destruct", 10U);
     uint8_t ignored;
     if ((method->as.function.flags & PC_MOD_ABSTRACT) != 0U &&
         !method->as.function.declaration_only) {
@@ -3153,6 +3261,30 @@ static int compile_method(generator *gen, pc_token class_name,
     while (parameter != NULL) {
         pc_token name = parameter->as.parameter.name;
         uint8_t slot;
+        if (parameter->as.parameter.flags != 0U) {
+            if (!is_constructor) {
+                fail(gen, parameter->line,
+                     "property promotion is only valid in a constructor");
+                return 0;
+            }
+            if (parameter->as.parameter.variadic) {
+                fail(gen, parameter->line,
+                     "a promoted property cannot be variadic");
+                return 0;
+            }
+            if (((parameter->as.parameter.flags & PC_MOD_READONLY) != 0U ||
+                 (class_node->as.class_decl.flags & PC_MOD_READONLY) != 0U) &&
+                parameter->as.parameter.type == NULL) {
+                fail(gen, parameter->line,
+                     "a readonly property must have a type");
+                return 0;
+            }
+            if (!validate_type_spec(
+                    gen, parameter->as.parameter.type, TYPE_CONTEXT_CLASS,
+                    class_node->as.class_decl.parent.length != 0U, 0, 1)) {
+                return 0;
+            }
+        }
         if (name.length != 0U && name.start[0] == '$') {
             name.start++;
             name.length--;
@@ -3192,13 +3324,24 @@ static int compile_method(generator *gen, pc_token class_name,
     child.module = gen->module;
     child.proto = proto;
     child.error = gen->error;
-#if PPHP_TYPECHECK
-    if (method->as.function.name.length == 11U &&
-        memcmp(method->as.function.name.start, "__construct", 11U) == 0 &&
-        method->as.function.return_type != NULL) {
-        fail(gen, method->line, "a constructor cannot declare a return type");
+    child.class_scope = 1;
+    child.class_has_parent = class_node->as.class_decl.parent.length != 0U;
+    child.return_void = is_constructor || is_destructor ||
+                        type_is_only(method->as.function.return_type, T_VOID);
+    if ((is_constructor || is_destructor) &&
+        method->as.function.return_type != NULL &&
+        !type_is_only(method->as.function.return_type, T_VOID)) {
+        fail(gen, method->line,
+             is_constructor
+                 ? "a constructor may only declare void as its return type"
+                 : "a destructor may only declare void as its return type");
         return 0;
     }
+    if (!validate_callable_types(gen, method->as.function.parameters,
+                                 method->as.function.return_type,
+                                 TYPE_CONTEXT_METHOD,
+                                 child.class_has_parent)) return 0;
+#if PPHP_TYPECHECK
     if (!compile_callable_types(gen, proto,
                                 method->as.function.parameters,
                                 method->as.function.return_type)) return 0;
@@ -3207,8 +3350,7 @@ static int compile_method(generator *gen, pc_token class_name,
 #if PPHP_TYPECHECK
     emit_byte(&child, OP_TYPECHECK_ARGS, method->line);
 #endif
-    if (method->as.function.name.length == 11U &&
-        memcmp(method->as.function.name.start, "__construct", 11U) == 0) {
+    if (is_constructor) {
         parameter = method->as.function.parameters;
         while (parameter != NULL && !child.failed) {
             if (parameter->as.parameter.flags != 0U) {
@@ -3264,6 +3406,37 @@ static void compile_class_definition(generator *gen, const pc_ast *class_node) {
     const pc_ast *member = class_node->as.class_decl.members;
     uint16_t class_name = name_constant(gen, class_node->as.class_decl.name);
     uint16_t parent_name = UINT16_MAX;
+    const int readonly_class =
+        (class_node->as.class_decl.flags & PC_MOD_READONLY) != 0U;
+    {
+        const pc_ast *check = member;
+        while (check != NULL && !gen->failed) {
+            if (check->kind == AST_PROPERTY) {
+                uint8_t flags = check->as.property.flags;
+                if (readonly_class) flags |= PC_MOD_READONLY;
+                if (!validate_type_spec(
+                        gen, check->as.property.type, TYPE_CONTEXT_CLASS,
+                        class_node->as.class_decl.parent.length != 0U, 0, 1)) {
+                    break;
+                }
+                if ((flags & PC_MOD_READONLY) != 0U &&
+                    check->as.property.type == NULL) {
+                    fail(gen, check->line,
+                         "a readonly property must have a type");
+                } else if ((flags & PC_MOD_READONLY) != 0U &&
+                           check->as.property.default_value != NULL) {
+                    fail(gen, check->line,
+                         "a readonly property cannot have a default value");
+                } else if ((flags & (PC_MOD_STATIC | PC_MOD_READONLY)) ==
+                           (PC_MOD_STATIC | PC_MOD_READONLY)) {
+                    fail(gen, check->line,
+                         "a readonly property cannot be static");
+                }
+            }
+            check = check->next;
+        }
+        if (gen->failed) return;
+    }
     if (class_node->as.class_decl.parent.length != 0U) {
         parent_name = name_constant(gen, class_node->as.class_decl.parent);
     }
@@ -3285,31 +3458,25 @@ static void compile_class_definition(generator *gen, const pc_ast *class_node) {
         const pc_ast *method = member;
         while (method != NULL && !gen->failed) {
             if (method->kind == AST_FUNCTION &&
-                method->as.function.name.length == 11U &&
-                memcmp(method->as.function.name.start, "__construct", 11U) == 0) {
+                token_bytes_equal_ci(method->as.function.name,
+                                     "__construct", 11U)) {
                 const pc_ast *parameter = method->as.function.parameters;
                 while (parameter != NULL) {
                     if (parameter->as.parameter.flags != 0U) {
                         uint16_t property_name;
-                        if (parameter->as.parameter.default_value != NULL) {
-                            compile_expression(
-                                gen, parameter->as.parameter.default_value);
-                        } else {
-                            emit_byte(gen, OP_LOAD_NULL, parameter->line);
-                        }
+                        uint8_t flags = parameter->as.parameter.flags;
+                        if (readonly_class) flags |= PC_MOD_READONLY;
+                        emit_byte(gen, OP_LOAD_NULL, parameter->line);
                         property_name = member_name_constant(
                             gen, parameter->as.parameter.name);
                         emit_byte(gen, OP_DEF_PROP, parameter->line);
                         emit_u16(gen, property_name, parameter->line);
-                        emit_byte(gen, parameter->as.parameter.flags,
-                                  parameter->line);
+                        emit_byte(gen, flags, parameter->line);
 #if PPHP_TYPECHECK
                         emit_u16(gen, declared_type_constant(
                                           gen, parameter->as.parameter.type),
                                  parameter->line);
-                        emit_byte(gen,
-                                  parameter->as.parameter.default_value != NULL,
-                                  parameter->line);
+                        emit_byte(gen, 0U, parameter->line);
 #endif
                     }
                     parameter = parameter->next;
@@ -3322,7 +3489,9 @@ static void compile_class_definition(generator *gen, const pc_ast *class_node) {
     while (member != NULL && !gen->failed) {
         if (member->kind == AST_PROPERTY) {
             uint16_t name;
+            uint8_t flags = member->as.property.flags;
             pc_token property_name = member->as.property.name;
+            if (readonly_class) flags |= PC_MOD_READONLY;
             if (member->as.property.default_value != NULL) {
                 compile_expression(gen, member->as.property.default_value);
             } else {
@@ -3335,7 +3504,7 @@ static void compile_class_definition(generator *gen, const pc_ast *class_node) {
             name = name_constant(gen, property_name);
             emit_byte(gen, OP_DEF_PROP, member->line);
             emit_u16(gen, name, member->line);
-            emit_byte(gen, member->as.property.flags, member->line);
+            emit_byte(gen, flags, member->line);
 #if PPHP_TYPECHECK
             emit_u16(gen, declared_type_constant(gen, member->as.property.type),
                      member->line);
@@ -3558,7 +3727,7 @@ int pc_codegen_program(const pc_ast *program, pmodule *module,
             const pc_ast *member = statement->as.class_decl.members;
             while (member != NULL && !gen.failed) {
                 if (member->kind == AST_FUNCTION) {
-                    (void)compile_method(&gen, statement->as.class_decl.name, member);
+                    (void)compile_method(&gen, statement, member);
                 }
                 member = member->next;
             }

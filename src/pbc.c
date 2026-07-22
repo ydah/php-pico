@@ -233,155 +233,530 @@ static int pbc_advance(size_t *offset, size_t need, size_t length) {
     return 1;
 }
 
-static int pbc_validate_code(const pproto *proto) {
+static int pbc_string_constant(const pproto *proto, uint16_t index) {
+    return index < proto->constant_count &&
+           proto->constants[index].type == PT_STRING;
+}
+
+static int pbc_flag_visibility(uint8_t flags) {
+    uint8_t visibility = flags & (uint8_t)(1U | 2U | 4U);
+    return visibility == 1U || visibility == 2U || visibility == 4U;
+}
+
+#if PPHP_TYPECHECK
+static int pbc_bytes_equal_ci(const char *left, size_t left_length,
+                              const char *right, size_t right_length) {
+    size_t i;
+    if (left_length != right_length) return 0;
+    for (i = 0U; i < left_length; i++) {
+        unsigned char a = (unsigned char)left[i];
+        unsigned char b = (unsigned char)right[i];
+        if (a >= 'A' && a <= 'Z') a = (unsigned char)(a + ('a' - 'A'));
+        if (b >= 'A' && b <= 'Z') b = (unsigned char)(b + ('a' - 'A'));
+        if (a != b) return 0;
+    }
+    return 1;
+}
+
+static int pbc_identifier_bytes(const char *bytes, size_t length) {
+    size_t i;
+    unsigned char byte;
+    if (length == 0U) return 0;
+    byte = (unsigned char)bytes[0];
+    if (!((byte >= 'A' && byte <= 'Z') ||
+          (byte >= 'a' && byte <= 'z') || byte == '_' || byte >= 0x80U)) {
+        return 0;
+    }
+    for (i = 1U; i < length; i++) {
+        byte = (unsigned char)bytes[i];
+        if (!((byte >= 'A' && byte <= 'Z') ||
+              (byte >= 'a' && byte <= 'z') ||
+              (byte >= '0' && byte <= '9') || byte == '_' ||
+              byte >= 0x80U)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int pbc_reserved_type_name(const char *bytes, size_t length) {
+    static const char *const names[] = {
+        "int", "float", "string", "bool", "array", "callable", "mixed",
+        "void", "null", "self", "static", "parent"
+    };
+    size_t i;
+    for (i = 0U; i < sizeof(names) / sizeof(names[0]); i++) {
+        if (pbc_bytes_equal_ci(bytes, length, names[i], strlen(names[i]))) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int pbc_named_type_valid(const pstring *name) {
+    return name != NULL &&
+           pbc_identifier_bytes(ps_data(name), name->length) &&
+           !pbc_reserved_type_name(ps_data(name), name->length);
+}
+
+static int pbc_property_type_valid(const pstring *type, int has_parent) {
+    const char *bytes;
+    size_t starts[16];
+    size_t lengths[16];
+    size_t start = 0U;
+    size_t count = 0U;
+    size_t i;
+    size_t j;
+    if (type == NULL) return 1;
+    bytes = ps_data(type);
+    for (i = 0U; i <= type->length; i++) {
+        if (i != type->length && bytes[i] != '|') continue;
+        if (i == start || count == 16U) return 0;
+        starts[count] = start;
+        lengths[count] = i - start;
+        for (j = 0U; j < count; j++) {
+            if (pbc_bytes_equal_ci(bytes + starts[j], lengths[j],
+                                   bytes + start, i - start)) return 0;
+        }
+        count++;
+        start = i + 1U;
+    }
+    for (i = 0U; i < count; i++) {
+        const char *name = bytes + starts[i];
+        size_t length = lengths[i];
+        int reserved = pbc_reserved_type_name(name, length);
+        if (pbc_bytes_equal_ci(name, length, "void", 4U) ||
+            pbc_bytes_equal_ci(name, length, "static", 6U) ||
+            pbc_bytes_equal_ci(name, length, "callable", 8U) ||
+            (!has_parent && pbc_bytes_equal_ci(name, length, "parent", 6U)) ||
+            (count > 1U && pbc_bytes_equal_ci(name, length, "mixed", 5U)) ||
+            (!PPHP_ENABLE_FLOAT &&
+             pbc_bytes_equal_ci(name, length, "float", 5U))) return 0;
+        if (!reserved && !pbc_identifier_bytes(name, length)) return 0;
+    }
+    return count != 0U;
+}
+#endif
+
+static size_t pbc_instruction_size(const pproto *proto, size_t pc) {
+    uint8_t opcode;
+    size_t operands = 0U;
+    if (pc >= proto->code_length) return 0U;
+    opcode = proto->code[pc++];
+    switch ((pphp_opcode)opcode) {
+        case OP_LOAD_I8: case OP_LOAD_LOCAL: case OP_LOAD_LOCAL_QUIET:
+        case OP_STORE_LOCAL: case OP_UNSET_LOCAL: case OP_BIND_GLOBAL:
+        case OP_ECHO: case OP_CALL_VALUE: case OP_INCLUDE: case OP_CAST:
+        case OP_NEW_OBJ_DYNAMIC: case OP_MCALL_DYNAMIC:
+            operands = 1U; break;
+        case OP_LOAD_CONST: case OP_LOAD_NAMED_CONST: case OP_DEF_CONST:
+        case OP_DEF_FUNC: case OP_CALL_ARRAY: case OP_MCALL_ARRAY:
+        case OP_NEW_OBJ_ARRAY: case OP_DEF_CCONST: case OP_DEF_INTERFACE:
+        case OP_JMP: case OP_JMP_IF: case OP_JMP_UNLESS:
+        case OP_JMP_IF_KEEP: case OP_JMP_UNLESS_KEEP:
+        case OP_JMP_NOTNULL_KEEP: case OP_JMP_IFNULL_KEEP: case OP_LINE:
+        case OP_NEW_ARRAY: case OP_PROP_GET: case OP_PROP_GET_QUIET:
+        case OP_PROP_SET: case OP_INSTANCEOF:
+            operands = 2U; break;
+        case OP_CALL: case OP_NEW_OBJ: case OP_MCALL: case OP_FE_NEXT:
+        case OP_STATIC_INIT:
+            operands = 3U; break;
+        case OP_SPROP_GET: case OP_SPROP_SET: case OP_CLSCONST:
+        case OP_SCALL_ARRAY: case OP_LOAD_I32:
+            operands = 4U; break;
+        case OP_SCALL: case OP_DEF_CLASS: case OP_DEF_METHOD:
+            operands = 5U; break;
+        case OP_DEF_PROP:
+            operands = PPHP_TYPECHECK ? 6U : 3U; break;
+        case OP_CLOSURE:
+            if (!pbc_range_available(pc, 3U, proto->code_length)) return 0U;
+            operands = 3U + (size_t)proto->code[pc + 2U] * 2U; break;
+        case OP_NOP: case OP_HALT: case OP_POP: case OP_DUP: case OP_SWAP:
+        case OP_LOAD_NULL: case OP_LOAD_TRUE: case OP_LOAD_FALSE:
+        case OP_LOAD_ARGC: case OP_ADD: case OP_SUB: case OP_MUL: case OP_DIV:
+        case OP_MOD: case OP_POW: case OP_NEG: case OP_CONCAT: case OP_BAND:
+        case OP_BOR: case OP_BXOR: case OP_BNOT: case OP_SHL: case OP_SHR:
+        case OP_EQ: case OP_NE: case OP_IDENT: case OP_NIDENT: case OP_LT:
+        case OP_LE: case OP_GT: case OP_GE: case OP_CMP: case OP_NOT:
+        case OP_INSTANCEOF_DYNAMIC: case OP_RET: case OP_RET_NULL:
+        case OP_CALL_VALUE_ARRAY:
+#if PPHP_TYPECHECK
+        case OP_TYPECHECK_ARGS:
+#endif
+        case OP_ARR_PUSH: case OP_ARR_SET: case OP_IDX_GET: case OP_IDX_SET:
+        case OP_IDX_APPEND: case OP_FE_INIT: case OP_FE_FREE:
+        case OP_ARR_EXTEND: case OP_ARR_SEPARATE: case OP_IDX_UNSET:
+        case OP_IDX_GET_QUIET: case OP_NEW_OBJ_DYNAMIC_ARRAY: case OP_THROW:
+        case OP_CLONE: case OP_DEF_END: case OP_PROP_GET_DYNAMIC:
+        case OP_PROP_SET_DYNAMIC: case OP_PROP_GET_DYNAMIC_QUIET:
+        case OP_MCALL_DYNAMIC_ARRAY:
+            break;
+        default: return 0U;
+    }
+    return pbc_range_available(pc, operands, proto->code_length)
+               ? operands + 1U : 0U;
+}
+
+static int pbc_instruction_boundary(const pproto *proto, size_t target) {
     size_t pc = 0U;
+    if (target > proto->code_length) return 0;
+    while (pc < target) {
+        size_t size = pbc_instruction_size(proto, pc);
+        if (size == 0U || size > target - pc) return 0;
+        pc += size;
+    }
+    return pc == target;
+}
+
+static int pbc_validate_code(const pmodule *module, size_t proto_index) {
+    const pproto *proto = module->protos[proto_index];
+    size_t pc = 0U;
+    int building_class = 0;
+    int class_readonly = 0;
+#if PPHP_TYPECHECK
+    int class_has_parent = 0;
+    size_t typecheck_pc = SIZE_MAX;
+#else
+    (void)proto_index;
+#endif
     while (pc < proto->code_length) {
+        size_t size = pbc_instruction_size(proto, pc);
+        if (size == 0U) goto invalid;
+        pc += size;
+    }
+    pc = 0U;
+    while (pc < proto->code_length) {
+        size_t instruction = pc;
+        size_t size = pbc_instruction_size(proto, pc);
         uint8_t opcode = proto->code[pc++];
-        size_t operands = 0U;
+        uint16_t first = size > 2U ? get_u16(proto->code, pc) : 0U;
+        size_t next = instruction + size;
         switch ((pphp_opcode)opcode) {
-            case OP_LOAD_I8:
-            case OP_LOAD_LOCAL:
-            case OP_LOAD_LOCAL_QUIET:
-            case OP_STORE_LOCAL:
-            case OP_UNSET_LOCAL:
-            case OP_BIND_GLOBAL:
-            case OP_ECHO:
-            case OP_CALL_VALUE:
-            case OP_INCLUDE:
-            case OP_CAST:
-            case OP_NEW_OBJ_DYNAMIC:
-            case OP_MCALL_DYNAMIC:
-                operands = 1U;
+            case OP_LOAD_LOCAL: case OP_LOAD_LOCAL_QUIET: case OP_STORE_LOCAL:
+            case OP_UNSET_LOCAL: case OP_BIND_GLOBAL:
+                if (proto->code[pc] >= proto->n_locals) goto invalid;
                 break;
+            case OP_STATIC_INIT: {
+                int16_t relative = (int16_t)get_u16(proto->code, pc + 1U);
+                size_t target = (size_t)((ptrdiff_t)next + relative);
+                if (proto->code[pc] >= proto->n_locals ||
+                    !pbc_instruction_boundary(proto, target)) {
+                    goto invalid;
+                }
+                break;
+            }
             case OP_LOAD_CONST:
-            case OP_LOAD_NAMED_CONST:
-            case OP_DEF_CONST:
+                if (first >= proto->constant_count) goto invalid;
+                break;
+            case OP_LOAD_NAMED_CONST: case OP_DEF_CONST: case OP_CALL_ARRAY:
+            case OP_MCALL_ARRAY: case OP_NEW_OBJ_ARRAY: case OP_DEF_CCONST:
+            case OP_DEF_INTERFACE: case OP_PROP_GET: case OP_PROP_GET_QUIET:
+            case OP_PROP_SET: case OP_INSTANCEOF:
+                if (!pbc_string_constant(proto, first)) goto invalid;
+                if ((opcode == OP_DEF_CCONST || opcode == OP_DEF_INTERFACE) &&
+                    !building_class) goto invalid;
+                break;
             case OP_DEF_FUNC:
-            case OP_CALL_ARRAY:
-            case OP_MCALL_ARRAY:
-            case OP_NEW_OBJ_ARRAY:
-            case OP_DEF_CCONST:
-            case OP_DEF_INTERFACE:
-            case OP_JMP:
-            case OP_JMP_IF:
-            case OP_JMP_UNLESS:
-            case OP_JMP_IF_KEEP:
-            case OP_JMP_UNLESS_KEEP:
-            case OP_JMP_NOTNULL_KEEP:
-            case OP_JMP_IFNULL_KEEP:
-            case OP_LINE:
-            case OP_NEW_ARRAY:
-            case OP_PROP_GET:
-            case OP_PROP_GET_QUIET:
-            case OP_PROP_SET:
-            case OP_INSTANCEOF:
-                operands = 2U;
+                if (first >= module->count ||
+                    module->protos[first]->is_method ||
+                    !module->protos[first]->conditional) goto invalid;
                 break;
-            case OP_CALL:
-            case OP_NEW_OBJ:
-            case OP_MCALL:
-            case OP_FE_NEXT:
-            case OP_STATIC_INIT:
-                operands = 3U;
+            case OP_CALL: case OP_NEW_OBJ: case OP_MCALL:
+                if (!pbc_string_constant(proto, first) ||
+                    proto->code[pc + 2U] > 31U) goto invalid;
                 break;
-            case OP_SPROP_GET:
-            case OP_SPROP_SET:
-            case OP_CLSCONST:
-            case OP_SCALL_ARRAY:
-            case OP_LOAD_I32:
-                operands = 4U;
+            case OP_CALL_VALUE: case OP_NEW_OBJ_DYNAMIC:
+            case OP_MCALL_DYNAMIC:
+                if (proto->code[pc] > 31U) goto invalid;
                 break;
-            case OP_SCALL:
-            case OP_DEF_CLASS:
-            case OP_DEF_METHOD:
-                operands = 5U;
+            case OP_SCALL: case OP_SCALL_ARRAY: case OP_SPROP_GET:
+            case OP_SPROP_SET: case OP_CLSCONST:
+                if (!pbc_string_constant(proto, first) ||
+                    !pbc_string_constant(proto, get_u16(proto->code, pc + 2U)) ||
+                    (opcode == OP_SCALL && proto->code[pc + 4U] > 31U)) {
+                    goto invalid;
+                }
                 break;
-            case OP_DEF_PROP:
-                operands = PPHP_TYPECHECK ? 6U : 3U;
+            case OP_JMP: case OP_JMP_IF: case OP_JMP_UNLESS:
+            case OP_JMP_IF_KEEP: case OP_JMP_UNLESS_KEEP:
+            case OP_JMP_NOTNULL_KEEP: case OP_JMP_IFNULL_KEEP: {
+                int16_t relative = (int16_t)first;
+                size_t target = (size_t)((ptrdiff_t)next + relative);
+                if (!pbc_instruction_boundary(proto, target)) {
+                    goto invalid;
+                }
                 break;
-            case OP_CLOSURE:
-                if (!pbc_range_available(pc, 3U, proto->code_length)) return 0;
-                operands = 3U + (size_t)proto->code[pc + 2U] * 2U;
+            }
+            case OP_FE_NEXT: {
+                int16_t relative = (int16_t)first;
+                size_t target = (size_t)((ptrdiff_t)next + relative);
+                if (proto->code[pc + 2U] > 1U ||
+                    !pbc_instruction_boundary(proto, target)) {
+                    goto invalid;
+                }
                 break;
-            case OP_NOP:
-            case OP_HALT:
-            case OP_POP:
-            case OP_DUP:
-            case OP_SWAP:
-            case OP_LOAD_NULL:
-            case OP_LOAD_TRUE:
-            case OP_LOAD_FALSE:
-            case OP_LOAD_ARGC:
-            case OP_ADD:
-            case OP_SUB:
-            case OP_MUL:
-            case OP_DIV:
-            case OP_MOD:
-            case OP_POW:
-            case OP_NEG:
-            case OP_CONCAT:
-            case OP_BAND:
-            case OP_BOR:
-            case OP_BXOR:
-            case OP_BNOT:
-            case OP_SHL:
-            case OP_SHR:
-            case OP_EQ:
-            case OP_NE:
-            case OP_IDENT:
-            case OP_NIDENT:
-            case OP_LT:
-            case OP_LE:
-            case OP_GT:
-            case OP_GE:
-            case OP_CMP:
-            case OP_NOT:
-            case OP_INSTANCEOF_DYNAMIC:
-            case OP_RET:
-            case OP_RET_NULL:
-            case OP_CALL_VALUE_ARRAY:
+            }
+            case OP_INCLUDE:
+                if (proto->code[pc] != 113U && proto->code[pc] != 114U &&
+                    proto->code[pc] != 129U && proto->code[pc] != 130U) {
+                    goto invalid;
+                }
+                break;
+            case OP_CAST:
+                if (proto->code[pc] != PT_INT && proto->code[pc] != PT_STRING &&
+                    proto->code[pc] != PT_TRUE && proto->code[pc] != PT_ARRAY
+#if PPHP_ENABLE_FLOAT
+                    && proto->code[pc] != PT_FLOAT
+#endif
+                ) goto invalid;
+                break;
+            case OP_DEF_CLASS: {
+                uint16_t parent = get_u16(proto->code, pc + 2U);
+                uint8_t flags = proto->code[pc + 4U];
+                if (building_class || !pbc_string_constant(proto, first) ||
+                    (parent != UINT16_MAX &&
+                     !pbc_string_constant(proto, parent)) ||
+                    (flags & (uint8_t)~(16U | 32U | 64U | 128U)) != 0U ||
+                    (flags & (16U | 32U)) == (16U | 32U) ||
+                    ((flags & 128U) != 0U &&
+                     ((flags & 16U) == 0U || (flags & (32U | 64U)) != 0U))) {
+                    goto invalid;
+                }
+                building_class = 1;
+                class_readonly = (flags & 64U) != 0U;
+#if PPHP_TYPECHECK
+                class_has_parent = parent != UINT16_MAX;
+#endif
+                break;
+            }
+            case OP_DEF_METHOD: {
+                uint16_t target = get_u16(proto->code, pc + 2U);
+                uint8_t flags = proto->code[pc + 4U];
+                if (!building_class || !pbc_string_constant(proto, first) ||
+                    target == 0U || target >= module->count ||
+                    module->protos[target]->conditional ||
+                    !pbc_flag_visibility(flags) ||
+                    (flags & (uint8_t)~(1U | 2U | 4U | 8U | 16U | 32U)) != 0U ||
+                    (flags & (16U | 32U)) == (16U | 32U) ||
+                    (((flags & 8U) == 0U) !=
+                     (module->protos[target]->is_method != 0U))) goto invalid;
+                break;
+            }
+            case OP_DEF_PROP: {
+                uint8_t flags = proto->code[pc + 2U];
+                if (!building_class || !pbc_string_constant(proto, first) ||
+                    !pbc_flag_visibility(flags) ||
+                    (flags & (uint8_t)~(1U | 2U | 4U | 8U | 64U)) != 0U ||
+                    (flags & (8U | 64U)) == (8U | 64U) ||
+                    (class_readonly && (flags & 64U) == 0U)) goto invalid;
+#if PPHP_TYPECHECK
+                {
+                    uint16_t type_index = get_u16(proto->code, pc + 3U);
+                    uint8_t has_default = proto->code[pc + 5U];
+                    const pstring *type = NULL;
+                    if (has_default > 1U ||
+                        ((flags & 64U) != 0U && has_default != 0U) ||
+                        ((flags & 64U) != 0U && type_index == UINT16_MAX) ||
+                        (type_index != UINT16_MAX &&
+                         !pbc_string_constant(proto, type_index)) ||
+                        ((type_index != UINT16_MAX) &&
+                         (type = (const pstring *)
+                              proto->constants[type_index].as.gc) == NULL) ||
+                        !pbc_property_type_valid(type, class_has_parent)) {
+                        goto invalid;
+                    }
+                }
+#endif
+                break;
+            }
+            case OP_DEF_END:
+                if (!building_class) goto invalid;
+                building_class = 0;
+                class_readonly = 0;
+#if PPHP_TYPECHECK
+                class_has_parent = 0;
+#endif
+                break;
+            case OP_CLOSURE: {
+                uint8_t count = proto->code[pc + 2U];
+                size_t capture;
+                if (first == 0U || first >= module->count ||
+                    module->protos[first]->conditional ||
+                    (size_t)module->protos[first]->n_params + count >
+                        module->protos[first]->n_locals) goto invalid;
+                for (capture = 0U; capture < count; capture++) {
+                    if (proto->code[pc + 3U + capture * 2U] != 0U ||
+                        proto->code[pc + 4U + capture * 2U] >=
+                            proto->n_locals) goto invalid;
+                }
+                break;
+            }
 #if PPHP_TYPECHECK
             case OP_TYPECHECK_ARGS:
-#endif
-            case OP_ARR_PUSH:
-            case OP_ARR_SET:
-            case OP_IDX_GET:
-            case OP_IDX_SET:
-            case OP_IDX_APPEND:
-            case OP_FE_INIT:
-            case OP_FE_FREE:
-            case OP_ARR_EXTEND:
-            case OP_ARR_SEPARATE:
-            case OP_IDX_UNSET:
-            case OP_IDX_GET_QUIET:
-            case OP_NEW_OBJ_DYNAMIC_ARRAY:
-            case OP_THROW:
-            case OP_CLONE:
-            case OP_DEF_END:
-            case OP_PROP_GET_DYNAMIC:
-            case OP_PROP_SET_DYNAMIC:
-            case OP_PROP_GET_DYNAMIC_QUIET:
-            case OP_MCALL_DYNAMIC_ARRAY:
+                if (typecheck_pc != SIZE_MAX) goto invalid;
+                typecheck_pc = instruction;
                 break;
-            default:
-                return 0;
-        }
-        if (!pbc_range_available(pc, operands, proto->code_length)) return 0;
-#if PPHP_TYPECHECK
-        if (opcode == OP_DEF_PROP) {
-            uint16_t name_index = get_u16(proto->code, pc);
-            uint16_t type_index = get_u16(proto->code, pc + 3U);
-            if (name_index >= proto->constant_count ||
-                proto->constants[name_index].type != PT_STRING ||
-                (type_index != UINT16_MAX &&
-                 (type_index >= proto->constant_count ||
-                  proto->constants[type_index].type != PT_STRING))) return 0;
-        }
 #endif
-        pc += operands;
+            default: break;
+        }
+        pc = next;
     }
-    return pc == proto->code_length;
+    if (building_class) goto invalid;
+    for (pc = 0U; pc < proto->catch_count; pc++) {
+        const pcatch *entry = &proto->catches[pc];
+        if (!pbc_instruction_boundary(proto, entry->try_start) ||
+            !pbc_instruction_boundary(proto, entry->try_end) ||
+            !pbc_instruction_boundary(proto, entry->handler_pc)) {
+            goto invalid;
+        }
+    }
+#if PPHP_TYPECHECK
+    if (proto_index == 0U) {
+        if (typecheck_pc != SIZE_MAX) goto invalid;
+    } else {
+        size_t cursor = 0U;
+        size_t fixed = proto->variadic ? (size_t)proto->n_params - 1U
+                                       : proto->n_params;
+        size_t parameter;
+        for (parameter = proto->n_required; parameter < fixed; parameter++) {
+            size_t target;
+            int16_t relative;
+            if (!pbc_range_available(cursor, 7U, proto->code_length) ||
+                proto->code[cursor] != OP_LOAD_ARGC ||
+                proto->code[cursor + 1U] != OP_LOAD_I8 ||
+                proto->code[cursor + 2U] != parameter ||
+                proto->code[cursor + 3U] != OP_GT ||
+                proto->code[cursor + 4U] != OP_JMP_IF) goto invalid;
+            relative = (int16_t)get_u16(proto->code, cursor + 5U);
+            target = (size_t)((ptrdiff_t)(cursor + 7U) + relative);
+            if (target < cursor + 9U || target > proto->code_length ||
+                proto->code[target - 2U] != OP_STORE_LOCAL ||
+                proto->code[target - 1U] !=
+                    parameter + (proto->is_method ? 1U : 0U)) goto invalid;
+            cursor = target;
+        }
+        if (typecheck_pc != cursor) goto invalid;
+    }
+#endif
+    return 1;
+invalid:
+    return 0;
 }
+
+#if PPHP_TYPECHECK
+static int pbc_validate_type_context(const pmodule *module) {
+    uint8_t *scopes = pphp_alloc(module->count);
+    uint8_t *roles = pphp_alloc(module->count);
+    size_t i;
+    int changed = 1;
+    if (scopes == NULL || roles == NULL) {
+        pphp_free(scopes);
+        pphp_free(roles);
+        return 0;
+    }
+    memset(scopes, 0, module->count);
+    memset(roles, 0, module->count);
+    for (i = 0U; i < module->count; i++) {
+        const pproto *proto = module->protos[i];
+        size_t pc = 0U;
+        uint8_t scope = 0U;
+        while (pc < proto->code_length) {
+            uint8_t opcode = proto->code[pc];
+            size_t size = pbc_instruction_size(proto, pc);
+            if (opcode == OP_DEF_CLASS) {
+                scope = get_u16(proto->code, pc + 3U) == UINT16_MAX ? 1U : 2U;
+            } else if (opcode == OP_DEF_METHOD) {
+                uint16_t target = get_u16(proto->code, pc + 3U);
+                uint16_t name_index = get_u16(proto->code, pc + 1U);
+                const pstring *name = (const pstring *)
+                    proto->constants[name_index].as.gc;
+                uint8_t role = pbc_bytes_equal_ci(
+                                   ps_data(name), name->length,
+                                   "__construct", 11U) ? 2U :
+                               pbc_bytes_equal_ci(
+                                   ps_data(name), name->length,
+                                   "__destruct", 10U) ? 3U : 1U;
+                if (roles[target] != 0U ||
+                    (scopes[target] != 0U && scopes[target] != scope)) goto invalid;
+                scopes[target] = scope;
+                roles[target] = role;
+            } else if (opcode == OP_CLOSURE) {
+                uint16_t target = get_u16(proto->code, pc + 1U);
+                if (roles[target] != 0U && roles[target] != 128U) goto invalid;
+                roles[target] = 128U;
+            } else if (opcode == OP_DEF_END) {
+                scope = 0U;
+            }
+            pc += size;
+        }
+    }
+    while (changed) {
+        changed = 0;
+        for (i = 0U; i < module->count; i++) {
+            const pproto *proto;
+            size_t pc;
+            if (scopes[i] == 0U) continue;
+            proto = module->protos[i];
+            pc = 0U;
+            while (pc < proto->code_length) {
+                size_t size = pbc_instruction_size(proto, pc);
+                if (proto->code[pc] == OP_CLOSURE) {
+                    uint16_t target = get_u16(proto->code, pc + 1U);
+                    if ((roles[target] & 127U) != 0U ||
+                        (scopes[target] != 0U &&
+                         scopes[target] != scopes[i])) goto invalid;
+                    if (scopes[target] == 0U) {
+                        scopes[target] = scopes[i];
+                        changed = 1;
+                    }
+                }
+                pc += size;
+            }
+        }
+    }
+    for (i = 0U; i < module->count; i++) {
+        const pproto *proto = module->protos[i];
+        size_t spec_index;
+        int no_value_return = (roles[i] == 2U || roles[i] == 3U ||
+            (proto->return_type.count == 1U &&
+             proto->return_type.members[0].kind == PTYPE_VOID));
+        if ((roles[i] == 2U || roles[i] == 3U) &&
+            !(proto->return_type.count == 0U ||
+              (proto->return_type.count == 1U &&
+               proto->return_type.members[0].kind == PTYPE_VOID))) goto invalid;
+        for (spec_index = 0U; spec_index < (size_t)proto->n_params + 1U;
+             spec_index++) {
+            const ptype_spec *spec = spec_index < proto->n_params
+                                         ? &proto->parameter_types[spec_index]
+                                         : &proto->return_type;
+            size_t member;
+            for (member = 0U; member < spec->count; member++) {
+                uint8_t kind = spec->members[member].kind;
+                if ((kind == PTYPE_SELF || kind == PTYPE_PARENT) &&
+                    scopes[i] == 0U) goto invalid;
+                if (kind == PTYPE_PARENT && scopes[i] != 2U) goto invalid;
+                if (kind == PTYPE_STATIC &&
+                    (spec_index < proto->n_params ||
+                     (roles[i] & 127U) == 0U)) goto invalid;
+            }
+        }
+        if (no_value_return) {
+            size_t pc = 0U;
+            while (pc < proto->code_length) {
+                if (proto->code[pc] == OP_RET) goto invalid;
+                pc += pbc_instruction_size(proto, pc);
+            }
+        }
+    }
+    pphp_free(scopes);
+    pphp_free(roles);
+    return 1;
+invalid:
+    pphp_free(scopes);
+    pphp_free(roles);
+    return 0;
+}
+#endif
 
 static int strings_add(string_list *list, pstring *string, uint16_t *index) {
     size_t i;
@@ -547,7 +922,8 @@ int pphp_pbc_write_file(const pmodule *module, const char *path) {
     put_u16(bytes, 6U, (uint16_t)((PPHP_INT64 ? 1U : 0U) |
                                   (PPHP_USE_DOUBLE ? 2U : 0U) |
                                   (PPHP_LINE_INFO ? 4U : 0U) |
-                                  (PPHP_TYPECHECK ? 8U : 0U)));
+                                  (PPHP_TYPECHECK ? 8U : 0U) |
+                                  (PPHP_ENABLE_FLOAT ? 16U : 0U)));
     put_u32(bytes, 8U, (uint32_t)total);
     put_u16(bytes, 12U, (uint16_t)module->count);
     put_u16(bytes, 14U, (uint16_t)strings.count);
@@ -737,7 +1113,8 @@ int pphp_pbc_load(const void *data, size_t length, pmodule *module) {
         (uint16_t)((PPHP_INT64 ? 1U : 0U) |
                    (PPHP_USE_DOUBLE ? 2U : 0U) |
                    (PPHP_LINE_INFO ? 4U : 0U) |
-                   (PPHP_TYPECHECK ? 8U : 0U));
+                   (PPHP_TYPECHECK ? 8U : 0U) |
+                   (PPHP_ENABLE_FLOAT ? 16U : 0U));
     uint16_t n_protos;
     uint16_t n_strings;
     size_t table_entries;
@@ -853,6 +1230,11 @@ int pphp_pbc_load(const void *data, size_t length, pmodule *module) {
         proto->conditional = (uint8_t)((bytes[offset + 2U] & 8U) != 0U);
         local_count = bytes[offset + 3U];
         if ((bytes[offset + 2U] & (uint8_t)~11U) != 0U ||
+            bytes[offset + 4U] != 0U || bytes[offset + 5U] != 0U ||
+            (proto->is_method && proto->conditional) ||
+            (i == 0U && (proto->n_params != 0U || proto->n_required != 0U ||
+                         proto->variadic || proto->is_method ||
+                         proto->conditional)) ||
             proto->n_params > 31U || proto->n_required > proto->n_params ||
             (proto->variadic && proto->n_params == 0U) ||
             (size_t)proto->n_params + (proto->is_method ? 1U : 0U) >
@@ -952,6 +1334,7 @@ int pphp_pbc_load(const void *data, size_t length, pmodule *module) {
             entry.reserved = 0U;
             if (entry.try_start > entry.try_end || entry.try_end > code_length ||
                 entry.handler_pc >= code_length ||
+                bytes[offset + 9U] != 0U ||
                 (entry.variable_slot != UINT8_MAX &&
                  entry.variable_slot >= proto->n_locals)) goto failed_module;
             if (class_sid != UINT16_MAX) {
@@ -1006,11 +1389,17 @@ int pphp_pbc_load(const void *data, size_t length, pmodule *module) {
                     (!PPHP_ENABLE_FLOAT && kind == PTYPE_FLOAT)) {
                     goto failed_module;
                 }
-                if (kind == PTYPE_NAMED) type_name = &strings[sid].base;
+                if (kind == PTYPE_NAMED) {
+                    type_name = &strings[sid].base;
+                    if (!pbc_named_type_valid(type_name)) goto failed_module;
+                }
                 for (previous = 0U; previous < spec->count; previous++) {
                     if (spec->members[previous].kind == kind &&
                         (kind != PTYPE_NAMED ||
-                         ps_equal(spec->members[previous].name, type_name))) {
+                         pbc_bytes_equal_ci(
+                             ps_data(spec->members[previous].name),
+                             spec->members[previous].name->length,
+                             ps_data(type_name), type_name->length))) {
                         goto failed_module;
                     }
                 }
@@ -1022,9 +1411,14 @@ int pphp_pbc_load(const void *data, size_t length, pmodule *module) {
             }
         }
 #endif
-        if (!pbc_validate_code(proto)) goto failed_module;
         if (!size_align4(&offset) || offset != limit) goto failed_module;
     }
+    for (i = 0U; i < module->count; i++) {
+        if (!pbc_validate_code(module, i)) goto failed_module;
+    }
+#if PPHP_TYPECHECK
+    if (!pbc_validate_type_context(module)) goto failed_module;
+#endif
     for (i = 0U; i < n_strings; i++) strings[i].owner = module;
     result = PPHP_OK;
     goto done;

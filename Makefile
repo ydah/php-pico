@@ -87,10 +87,14 @@ TYPECHECK_OFF_HOST_BINARY := build/host/php-pico-typecheck-off
 TYPECHECK_ON_PBC_BINARY := build/host/php-pico-typecheck-pbc-on
 TYPECHECK_OFF_PBC_BINARY := build/host/php-pico-typecheck-pbc-off
 TYPECHECK_NO_FLOAT_BINARY := build/host/php-pico-typecheck-no-float
+TYPECHECK_NO_FLOAT_OFF_BINARY := build/host/php-pico-typecheck-no-float-off
 TYPECHECK_INT64_BINARY := build/host/php-pico-typecheck-int64
 TYPECHECK_RP_BINARY := build/host/php-pico-typecheck-rp
 TYPECHECK_UBSAN_BINARY := build/host/php-pico-typecheck-ubsan
 TYPECHECK_ASAN_BINARY := build/host/php-pico-typecheck-asan
+TYPECHECK_VM_TEST_BINARY := build/host/test_vm_typecheck
+TYPECHECK_VM_UBSAN_BINARY := build/host/test_vm_typecheck_ubsan
+TYPECHECK_VM_ASAN_BINARY := build/host/test_vm_typecheck_asan
 TYPECHECK_CONFIG_ON_OBJECT := build/host/test_typecheck_config_on.o
 TYPECHECK_CONFIG_OFF_OBJECT := build/host/test_typecheck_config_off.o
 TYPECHECK_CONFIG_INVALID_OBJECT := build/host/test_typecheck_config_invalid.o
@@ -293,6 +297,14 @@ $(TYPECHECK_NO_FLOAT_BINARY): FORCE $(RUNTIME_COMMON_SOURCES) $(COMPILER_SOURCES
 		tools/disasm.c shell/p2sh.c shell/p2sh_device.c ports/host/main.c \
 		$(LDFLAGS) -o $@
 
+$(TYPECHECK_NO_FLOAT_OFF_BINARY): FORCE $(RUNTIME_COMMON_SOURCES) $(COMPILER_SOURCES) compiler/codegen.c tools/disasm.c shell/p2sh.c shell/p2sh_device.c ports/host/main.c
+	@mkdir -p $(@D)
+	$(CC) $(filter-out -DPPHP_TYPECHECK=% -DPPHP_ENABLE_FLOAT=%,$(COMPILER_CPPFLAGS)) \
+		-DPPHP_TYPECHECK=0 -DPPHP_ENABLE_FLOAT=0 $(CFLAGS) \
+		$(RUNTIME_COMMON_SOURCES) $(COMPILER_SOURCES) compiler/codegen.c \
+		tools/disasm.c shell/p2sh.c shell/p2sh_device.c ports/host/main.c \
+		$(LDFLAGS) -o $@
+
 $(TYPECHECK_INT64_BINARY): FORCE $(COMPILER_HOST_SOURCES)
 	@mkdir -p $(@D)
 	$(CC) $(filter-out -DPPHP_TYPECHECK=%,$(COMPILER_CPPFLAGS)) \
@@ -318,6 +330,26 @@ $(TYPECHECK_ASAN_BINARY): FORCE $(COMPILER_HOST_SOURCES)
 	$(CC) $(filter-out -DPPHP_TYPECHECK=%,$(COMPILER_CPPFLAGS)) \
 		-DPPHP_TYPECHECK=1 $(CFLAGS) -O1 -g -fno-omit-frame-pointer \
 		-fsanitize=address,undefined $(COMPILER_HOST_SOURCES) \
+		-fsanitize=address,undefined $(LDLIBS) -o $@
+
+$(TYPECHECK_VM_TEST_BINARY): FORCE $(VM_TEST_SOURCES)
+	@mkdir -p $(@D)
+	$(CC) $(filter-out -DPPHP_TYPECHECK=%,$(COMPILER_CPPFLAGS)) \
+		-DPPHP_TYPECHECK=1 $(CFLAGS) $(VM_TEST_SOURCES) $(LDFLAGS) \
+		$(LDLIBS) -o $@
+
+$(TYPECHECK_VM_UBSAN_BINARY): FORCE $(VM_TEST_SOURCES)
+	@mkdir -p $(@D)
+	$(CC) $(filter-out -DPPHP_TYPECHECK=%,$(COMPILER_CPPFLAGS)) \
+		-DPPHP_TYPECHECK=1 $(CFLAGS) -O1 -g -fno-omit-frame-pointer \
+		-fsanitize=undefined $(VM_TEST_SOURCES) -fsanitize=undefined \
+		$(LDLIBS) -o $@
+
+$(TYPECHECK_VM_ASAN_BINARY): FORCE $(VM_TEST_SOURCES)
+	@mkdir -p $(@D)
+	$(CC) $(filter-out -DPPHP_TYPECHECK=%,$(COMPILER_CPPFLAGS)) \
+		-DPPHP_TYPECHECK=1 $(CFLAGS) -O1 -g -fno-omit-frame-pointer \
+		-fsanitize=address,undefined $(VM_TEST_SOURCES) \
 		-fsanitize=address,undefined $(LDLIBS) -o $@
 
 $(TEST_BINARY): FORCE $(TEST_SOURCES)
@@ -413,12 +445,16 @@ test-typecheck-config: FORCE tests/unit/test_typecheck_config.c
 	@grep -q 'PPHP_TYPECHECK must be 0 or 1' \
 		$(TYPECHECK_CONFIG_INVALID_LOG)
 
-test-typecheck: test-typecheck-config $(TYPECHECK_ON_HOST_BINARY) $(TYPECHECK_OFF_HOST_BINARY) $(TYPECHECK_ON_PBC_BINARY) $(TYPECHECK_OFF_PBC_BINARY) $(TYPECHECK_NO_FLOAT_BINARY) $(TYPECHECK_INT64_BINARY) $(TYPECHECK_RP_BINARY) $(TYPECHECK_UBSAN_BINARY) $(TYPECHECK_ASAN_BINARY)
+test-typecheck: test-typecheck-config $(TYPECHECK_ON_HOST_BINARY) $(TYPECHECK_OFF_HOST_BINARY) $(TYPECHECK_ON_PBC_BINARY) $(TYPECHECK_OFF_PBC_BINARY) $(TYPECHECK_NO_FLOAT_BINARY) $(TYPECHECK_NO_FLOAT_OFF_BINARY) $(TYPECHECK_INT64_BINARY) $(TYPECHECK_RP_BINARY) $(TYPECHECK_UBSAN_BINARY) $(TYPECHECK_ASAN_BINARY) $(TYPECHECK_VM_TEST_BINARY) $(TYPECHECK_VM_UBSAN_BINARY) $(TYPECHECK_VM_ASAN_BINARY)
 	sh tests/cli/typecheck.sh $(TYPECHECK_ON_HOST_BINARY) \
 		$(TYPECHECK_OFF_HOST_BINARY) $(TYPECHECK_ON_PBC_BINARY) \
 		$(TYPECHECK_OFF_PBC_BINARY) $(TYPECHECK_NO_FLOAT_BINARY) \
 		$(TYPECHECK_INT64_BINARY) $(TYPECHECK_RP_BINARY) \
-		$(TYPECHECK_UBSAN_BINARY) $(TYPECHECK_ASAN_BINARY)
+		$(TYPECHECK_UBSAN_BINARY) $(TYPECHECK_ASAN_BINARY) \
+		$(TYPECHECK_NO_FLOAT_OFF_BINARY)
+	$(TYPECHECK_VM_TEST_BINARY)
+	$(TYPECHECK_VM_UBSAN_BINARY)
+	ASAN_OPTIONS=detect_leaks=$(ASAN_LEAKS) $(TYPECHECK_VM_ASAN_BINARY)
 
 test-phpt: $(HOST_BINARY)
 	sh tools/phpt_run.sh --binary $(HOST_BINARY) tests/phpt
