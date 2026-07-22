@@ -11,7 +11,7 @@ static int name_is(const pstring *name, const char *expected) {
 
 static int fail_arguments(pphp_state *state, const pstring *name) {
     pphp_runtime_error(state, 0U, "%.*s() received invalid arguments",
-                       (int)name->length, name->data);
+                       (int)name->length, ps_data(name));
     return -1;
 }
 
@@ -36,7 +36,7 @@ static pstring *argument_string(pphp_state *state, const pstring *name,
     pstring *string = pv_to_string(value);
     if (string == NULL) {
         pphp_runtime_error(state, 0U, "%.*s() expects string-compatible values",
-                           (int)name->length, name->data);
+                           (int)name->length, ps_data(name));
     }
     return string;
 }
@@ -69,7 +69,7 @@ static int call_substr(pphp_state *state, const pstring *name,
         if (offset + length > size) length = size - offset;
     }
     {
-        int handled = string_result(state, string->data + offset,
+        int handled = string_result(state, ps_data(string) + offset,
                                     (size_t)length, result);
         ps_destroy(string);
         return handled;
@@ -88,7 +88,7 @@ static int find_bytes(const pstring *haystack, const pstring *needle,
     if (reverse) {
         i = haystack->length - needle->length;
         for (;;) {
-            if (i >= start && memcmp(haystack->data + i, needle->data,
+            if (i >= start && memcmp(ps_data(haystack) + i, ps_data(needle),
                                      needle->length) == 0) {
                 *position = i;
                 return 1;
@@ -98,7 +98,7 @@ static int find_bytes(const pstring *haystack, const pstring *needle,
         }
     } else {
         for (i = start; i + needle->length <= haystack->length; i++) {
-            if (memcmp(haystack->data + i, needle->data, needle->length) == 0) {
+            if (memcmp(ps_data(haystack) + i, ps_data(needle), needle->length) == 0) {
                 *position = i;
                 return 1;
             }
@@ -163,10 +163,10 @@ static int call_edge_test(pphp_state *state, const pstring *name,
     }
     matches = needle->length <= haystack->length;
     if (matches && name_is(name, "str_starts_with")) {
-        matches = memcmp(haystack->data, needle->data, needle->length) == 0;
+        matches = memcmp(ps_data(haystack), ps_data(needle), needle->length) == 0;
     } else if (matches) {
-        matches = memcmp(haystack->data + haystack->length - needle->length,
-                         needle->data, needle->length) == 0;
+        matches = memcmp(ps_data(haystack) + haystack->length - needle->length,
+                         ps_data(needle), needle->length) == 0;
     }
     *result = pv_bool(matches);
     ps_destroy(haystack);
@@ -190,7 +190,7 @@ static int call_ascii_case(pphp_state *state, const pstring *name,
         pphp_runtime_error(state, 0U, "out of memory changing string case");
         return -1;
     }
-    memcpy(bytes, input->data, input->length);
+    memcpy(bytes, ps_data(input), input->length);
     for (i = 0U; i < input->length; i++) {
         unsigned char c = (unsigned char)bytes[i];
         int selected = (!name_is(name, "ucfirst") &&
@@ -214,7 +214,7 @@ static int trim_contains(const pstring *characters, unsigned char c) {
                c == '\v' || c == 0U;
     }
     for (i = 0U; i < characters->length; i++) {
-        if ((unsigned char)characters->data[i] == c) return 1;
+        if ((unsigned char)ps_data(characters)[i] == c) return 1;
     }
     return 0;
 }
@@ -237,11 +237,11 @@ static int call_trim(pphp_state *state, const pstring *name,
     }
     end = input->length;
     if (left) while (begin < end && trim_contains(characters,
-                      (unsigned char)input->data[begin])) begin++;
+                      (unsigned char)ps_data(input)[begin])) begin++;
     if (right) while (end > begin && trim_contains(characters,
-                       (unsigned char)input->data[end - 1U])) end--;
+                       (unsigned char)ps_data(input)[end - 1U])) end--;
     {
-        int handled = string_result(state, input->data + begin,
+        int handled = string_result(state, ps_data(input) + begin,
                                     end - begin, result);
         ps_destroy(input);
         ps_destroy(characters);
@@ -281,10 +281,10 @@ static int call_repeat_or_reverse(pphp_state *state, const pstring *name,
     }
     if (name_is(name, "str_repeat")) {
         for (i = 0U; i < (size_t)arguments[1].as.i; i++) {
-            memcpy(bytes + i * input->length, input->data, input->length);
+            memcpy(bytes + i * input->length, ps_data(input), input->length);
         }
     } else {
-        for (i = 0U; i < length; i++) bytes[i] = input->data[length - i - 1U];
+        for (i = 0U; i < length; i++) bytes[i] = ps_data(input)[length - i - 1U];
     }
     {
         int handled = string_result(state, bytes, length, result);
@@ -300,8 +300,8 @@ static int compare_ascii(const pstring *left, const pstring *right,
     size_t length = left->length < right->length ? left->length : right->length;
     if (length > limit) length = limit;
     for (i = 0U; i < length; i++) {
-        unsigned char a = (unsigned char)left->data[i];
-        unsigned char b = (unsigned char)right->data[i];
+        unsigned char a = (unsigned char)ps_data(left)[i];
+        unsigned char b = (unsigned char)ps_data(right)[i];
         if (insensitive && a >= 'A' && a <= 'Z') a = (unsigned char)(a + 32U);
         if (insensitive && b >= 'A' && b <= 'Z') b = (unsigned char)(b + 32U);
         if (a != b) return a < b ? -1 : 1;
@@ -358,7 +358,7 @@ static int call_hex(pphp_state *state, const pstring *name,
             return -1;
         }
         for (i = 0U; i < input->length; i++) {
-            unsigned char c = (unsigned char)input->data[i];
+            unsigned char c = (unsigned char)ps_data(input)[i];
             bytes[i * 2U] = digits[c >> 4U];
             bytes[i * 2U + 1U] = digits[c & 15U];
         }
@@ -379,7 +379,7 @@ static int call_hex(pphp_state *state, const pstring *name,
             unsigned values[2];
             size_t j;
             for (j = 0U; j < 2U; j++) {
-                unsigned char c = (unsigned char)input->data[i + j];
+                unsigned char c = (unsigned char)ps_data(input)[i + j];
                 if (c >= '0' && c <= '9') values[j] = (unsigned)(c - '0');
                 else if (c >= 'a' && c <= 'f') values[j] = (unsigned)(c - 'a') + 10U;
                 else if (c >= 'A' && c <= 'F') values[j] = (unsigned)(c - 'A') + 10U;
@@ -414,7 +414,7 @@ static int call_chr_ord(pphp_state *state, const pstring *name,
             ps_destroy(input);
             return fail_arguments(state, name);
         }
-        *result = pv_int((pphp_int)(unsigned char)input->data[0]);
+        *result = pv_int((pphp_int)(unsigned char)ps_data(input)[0]);
         ps_destroy(input);
         return 1;
     }
@@ -481,10 +481,10 @@ static int call_implode(pphp_state *state, const pstring *name,
             return -1;
         }
         if (items++ != 0U) {
-            memcpy(bytes + output, glue->data, glue->length);
+            memcpy(bytes + output, ps_data(glue), glue->length);
             output += glue->length;
         }
-        memcpy(bytes + output, part->data, part->length);
+        memcpy(bytes + output, ps_data(part), part->length);
         output += part->length;
         ps_destroy(part);
         position = next;
@@ -550,7 +550,7 @@ static int call_explode(pphp_state *state, const pstring *name,
     while (pieces + 1U < limit && start <= input->length) {
         size_t found;
         if (!find_bytes(input, delimiter, start, 0, &found)) break;
-        if (!push_slice(state, array, input->data + start, found - start)) {
+        if (!push_slice(state, array, ps_data(input) + start, found - start)) {
             pv_release(pv_heap(PT_ARRAY, &array->header));
             ps_destroy(delimiter);
             ps_destroy(input);
@@ -559,7 +559,7 @@ static int call_explode(pphp_state *state, const pstring *name,
         pieces++;
         start = found + delimiter->length;
     }
-    if (!push_slice(state, array, input->data + start, input->length - start)) {
+    if (!push_slice(state, array, ps_data(input) + start, input->length - start)) {
         pv_release(pv_heap(PT_ARRAY, &array->header));
         ps_destroy(delimiter);
         ps_destroy(input);
@@ -594,7 +594,7 @@ static int call_str_split(pphp_state *state, const pstring *name,
     for (offset = 0U; offset < input->length; offset += chunk) {
         size_t length = input->length - offset < chunk
                             ? input->length - offset : chunk;
-        if (!push_slice(state, array, input->data + offset, length)) {
+        if (!push_slice(state, array, ps_data(input) + offset, length)) {
             pv_release(pv_heap(PT_ARRAY, &array->header));
             ps_destroy(input);
             return -1;
@@ -627,7 +627,7 @@ static int replace_scalar(pphp_state *state, const pstring *name,
         return -1;
     }
     if (search->length == 0U) {
-        int handled = string_result(state, subject->data, subject->length, result);
+        int handled = string_result(state, ps_data(subject), subject->length, result);
         ps_destroy(search);
         ps_destroy(replacement);
         ps_destroy(subject);
@@ -656,13 +656,13 @@ static int replace_scalar(pphp_state *state, const pstring *name,
     }
     position = 0U;
     while (find_bytes(subject, search, position, 0, &found)) {
-        memcpy(bytes + output, subject->data + position, found - position);
+        memcpy(bytes + output, ps_data(subject) + position, found - position);
         output += found - position;
-        memcpy(bytes + output, replacement->data, replacement->length);
+        memcpy(bytes + output, ps_data(replacement), replacement->length);
         output += replacement->length;
         position = found + search->length;
     }
-    memcpy(bytes + output, subject->data + position, subject->length - position);
+    memcpy(bytes + output, ps_data(subject) + position, subject->length - position);
     output += subject->length - position;
     {
         int handled = string_result(state, bytes, output, result);
@@ -807,7 +807,7 @@ static int call_str_pad(pphp_state *state, const pstring *name,
         return fail_arguments(state, name);
     }
     if (target <= input->length) {
-        int handled = string_result(state, input->data, input->length, result);
+        int handled = string_result(state, ps_data(input), input->length, result);
         ps_destroy(input);
         ps_destroy(padding);
         return handled;
@@ -822,10 +822,10 @@ static int call_str_pad(pphp_state *state, const pstring *name,
         pphp_runtime_error(state, 0U, "out of memory padding string");
         return -1;
     }
-    for (i = 0U; i < left; i++) bytes[i] = padding->data[i % padding->length];
-    memcpy(bytes + left, input->data, input->length);
+    for (i = 0U; i < left; i++) bytes[i] = ps_data(padding)[i % padding->length];
+    memcpy(bytes + left, ps_data(input), input->length);
     for (i = 0U; i < right; i++) {
-        bytes[left + input->length + i] = padding->data[i % padding->length];
+        bytes[left + input->length + i] = ps_data(padding)[i % padding->length];
     }
     {
         int handled = string_result(state, bytes, target, result);
@@ -871,7 +871,7 @@ static int call_base_conversion(pphp_state *state, const pstring *name,
         size_t i;
         if (input == NULL) return -1;
         for (i = 0U; i < input->length; i++) {
-            unsigned char c = (unsigned char)input->data[i];
+            unsigned char c = (unsigned char)ps_data(input)[i];
             unsigned digit;
             if (c >= '0' && c <= '9') digit = (unsigned)(c - '0');
             else if (c >= 'a' && c <= 'f') digit = (unsigned)(c - 'a') + 10U;

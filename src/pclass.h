@@ -54,8 +54,11 @@ struct pclass {
     pclass **interfaces;
     size_t interface_count;
     size_t interface_capacity;
+    uint16_t refcnt;
+    uint16_t runtime_refs;
     uint8_t flags;
     uint8_t persistent;
+    uint8_t values_released;
 };
 
 struct pobject {
@@ -71,6 +74,11 @@ struct pobject {
 
 pclass *pclass_new(const char *name, size_t length, pclass *parent, uint8_t flags);
 void pclass_destroy(pclass *class_entry);
+void pclass_retain(pclass *class_entry);
+void pclass_release(pclass *class_entry);
+void pclass_retain_runtime(pclass *class_entry);
+void pclass_release_runtime(pclass *class_entry);
+void pclass_release_values(pclass *class_entry);
 int pclass_add_property(pclass *class_entry, const char *name, size_t length,
                         uint8_t flags, pvalue default_value);
 int pclass_add_method(pclass *class_entry, const char *name, size_t length,
@@ -101,6 +109,7 @@ const pmethod *pclass_find_method(const pclass *class_entry,
 pobject *pobject_new(pphp_state *state, pclass *class_entry);
 pobject *pobject_clone(const pobject *source);
 void pobject_destroy(pobject *object);
+void pobject_run_destructor(pobject *object);
 int pclass_is_a(const pclass *class_entry, const pclass *expected);
 int pclass_member_visible(uint8_t flags, const pclass *owner,
                           const pclass *scope);

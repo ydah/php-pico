@@ -42,7 +42,7 @@ static void trace_instruction(const pphp_state *state, const pframe *frame,
     length = snprintf(line, sizeof(line),
                       "TRACE %.*s pc=%04zu op=%s stack=%zu\n",
                       (int)frame->proto->name->length,
-                      frame->proto->name->data, pc,
+                      ps_data(frame->proto->name), pc,
                       pphp_opcode_name(opcode), state->stack_count);
     if (length <= 0) return;
     if ((size_t)length >= sizeof(line)) length = (int)sizeof(line) - 1;
@@ -98,7 +98,7 @@ static void warn_undefined_variable(pphp_state *state, const pframe *frame,
                                     uint8_t slot) {
     const pstring *name = frame->proto->locals[slot];
     pphp_warning(state, frame->line, "Undefined variable $%.*s",
-                 (int)name->length, name->data);
+                 (int)name->length, ps_data(name));
 }
 #else
 #define warn_undefined_variable(...) ((void)0)
@@ -112,9 +112,9 @@ static pstring *static_slot_key(pphp_state *state, const pframe *frame,
     char *bytes = pphp_alloc(length);
     pstring *key;
     if (bytes == NULL) return NULL;
-    memcpy(bytes, function_name->data, function_name->length);
+    memcpy(bytes, ps_data(function_name), function_name->length);
     memcpy(bytes + function_name->length, "::", 2U);
-    memcpy(bytes + function_name->length + 2U, local_name->data,
+    memcpy(bytes + function_name->length + 2U, ps_data(local_name),
            local_name->length);
     key = psymbol_intern(&state->symbols, bytes, length);
     pphp_free(bytes);
@@ -129,7 +129,7 @@ static parray *slot_storage(pphp_state *state, const pframe *frame,
     }
     if (frame->all_globals || slot_mask_has(frame->global_mask, slot)) {
         const pstring *local = frame->proto->locals[slot];
-        *key = psymbol_intern(&state->symbols, local->data, local->length);
+        *key = psymbol_intern(&state->symbols, ps_data(local), local->length);
         return state->globals;
     }
     *key = NULL;
@@ -285,7 +285,7 @@ static pstring *runtime_string(pphp_state *state, pvalue value) {
             }
             return NULL;
         }
-        copy = ps_new(((pstring *)converted.as.gc)->data,
+        copy = ps_new(ps_data((pstring *)converted.as.gc),
                       ((pstring *)converted.as.gc)->length);
         pv_release(converted);
         return copy;
@@ -299,7 +299,7 @@ static int output_echo(pphp_state *state, pvalue value) {
         pphp_runtime_error(state, 0U, "value cannot be converted to string");
         return 0;
     }
-    pphp_output(state, string->data, string->length);
+    pphp_output(state, ps_data(string), string->length);
     ps_destroy(string);
     return 1;
 }
@@ -503,7 +503,7 @@ static int execute_index_get(pphp_state *state, int quiet) {
             pphp_numeric_to_integer(&numeric, 0, &offset)) {
             if (offset < 0) offset += (pphp_int)string->length;
             if (offset >= 0 && (size_t)offset < string->length) {
-                pstring *character = ps_new(string->data + offset, 1U);
+                pstring *character = ps_new(ps_data(string) + offset, 1U);
                 if (character == NULL) {
                     pphp_runtime_error(state, 0U,
                                        "out of memory reading string offset");
@@ -613,7 +613,7 @@ static int throw_exception(pphp_state *state, pvalue exception,
                        frame->proto->constants[entry->class_constant].type == PT_STRING) {
                 const pstring *name = (const pstring *)
                     frame->proto->constants[entry->class_constant].as.gc;
-                pclass *expected = pphp_find_class(state, name->data, name->length);
+                pclass *expected = pphp_find_class(state, ps_data(name), name->length);
                 matches = exception.type == PT_OBJECT && expected != NULL &&
                           pclass_is_a(((pobject *)exception.as.gc)->class_entry, expected);
             }
@@ -669,11 +669,11 @@ static int throw_exception(pphp_state *state, pvalue exception,
         pphp_runtime_error(state, line,
                            "PHP Fatal error: Uncaught %.*s: %.*s in %.*s:%lu",
                            (int)object->class_entry->name->length,
-                           object->class_entry->name->data,
+                           ps_data(object->class_entry->name),
                            message == NULL ? 0 : (int)message->length,
-                           message == NULL ? "" : message->data,
+                           message == NULL ? "" : ps_data(message),
                            file == NULL ? 8 : (int)file->length,
-                           file == NULL ? "<source>" : file->data,
+                           file == NULL ? "<source>" : ps_data(file),
                            (unsigned long)line);
     } else {
         pphp_runtime_error(state, 0U, "Uncaught non-object exception");
@@ -869,13 +869,13 @@ static int call_function(pphp_state *state, pframe *caller, uint16_t name_index,
     callee = pphp_find_function(state, name, &callee_module);
     if (callee == NULL) {
         pphp_runtime_error(state, caller->line, "Call to undefined function %.*s()",
-                           (int)name->length, name->data);
+                           (int)name->length, ps_data(name));
         return 0;
     }
     if (argument_count < callee->n_required) {
         pphp_runtime_error(state, caller->line,
                            "Too few arguments to function %.*s(), %u required, %u given",
-                           (int)name->length, name->data, callee->n_required,
+                           (int)name->length, ps_data(name), callee->n_required,
                            argument_count);
         return 0;
     }
@@ -926,13 +926,13 @@ static int call_named_value(pphp_state *state, pframe *caller,
     if (callee == NULL) {
         pphp_runtime_error(state, caller->line,
                            "Call to undefined function %.*s()",
-                           (int)name->length, name->data);
+                           (int)name->length, ps_data(name));
         return 0;
     }
     if (argument_count < callee->n_required) {
         pphp_runtime_error(state, caller->line,
                            "Too few arguments to function %.*s(), %u required, %u given",
-                           (int)name->length, name->data, callee->n_required,
+                           (int)name->length, ps_data(name), callee->n_required,
                            argument_count);
         return 0;
     }
@@ -995,7 +995,7 @@ static int call_value(pphp_state *state, pframe *caller,
         }
         method = pclass_find_method(
             ((pobject *)target.as.gc)->class_entry,
-            ((const pstring *)method_name.as.gc)->data,
+            ps_data((const pstring *)method_name.as.gc),
             ((const pstring *)method_name.as.gc)->length);
         if (method == NULL ||
             !pclass_member_visible(method->flags, method->owner,
@@ -1086,7 +1086,7 @@ static pclass *resolve_class_name(pphp_state *state, pframe *frame,
         return frame->called_class == NULL ? frame->called_scope
                                            : frame->called_class;
     }
-    return pphp_find_class(state, name->data, name->length);
+    return pphp_find_class(state, ps_data(name), name->length);
 }
 
 static int invoke_named_method(pphp_state *state, pframe *frame,
@@ -1135,17 +1135,17 @@ static int invoke_named_method(pphp_state *state, pframe *frame,
             return push(state, result);
         }
     }
-    method = pclass_find_method(object->class_entry, name->data, name->length);
+    method = pclass_find_method(object->class_entry, ps_data(name), name->length);
     if (method == NULL) {
         pphp_runtime_error(state, frame->line, "undefined method %.*s()",
-                           (int)name->length, name->data);
+                           (int)name->length, ps_data(name));
         return 0;
     }
     if (!pclass_member_visible(method->flags, method->owner,
                                frame->called_scope)) {
         pphp_runtime_error(state, frame->line,
                            "cannot access non-public method %.*s()",
-                           (int)name->length, name->data);
+                           (int)name->length, ps_data(name));
         return 0;
     }
     return enter_method(state, frame, method, argument_count, 0);
@@ -1190,7 +1190,7 @@ static int enter_method(pphp_state *state, pframe *caller, const pmethod *method
     if (argument_count < callee->n_required) {
         pphp_runtime_error(state, caller->line,
                            "Too few arguments to method %.*s(), %u required, %u given",
-                           (int)method->name->length, method->name->data,
+                           (int)method->name->length, ps_data(method->name),
                            callee->n_required, argument_count);
         return 0;
     }
@@ -1254,7 +1254,7 @@ static int enter_static_method(pphp_state *state, pframe *caller,
     if (argument_count < callee->n_required) {
         pphp_runtime_error(state, caller->line,
                            "Too few arguments to static method %.*s()",
-                           (int)method->name->length, method->name->data);
+                           (int)method->name->length, ps_data(method->name));
         return 0;
     }
     if (state->frame_count >= PPHP_FRAME_MAX) {
@@ -1294,16 +1294,16 @@ static int invoke_static_method(pphp_state *state, pframe *frame,
     class_entry = resolve_class_name(state, frame, class_name);
     if (class_entry == NULL) {
         pphp_runtime_error(state, frame->line, "Class %.*s not found",
-                           (int)class_name->length, class_name->data);
+                           (int)class_name->length, ps_data(class_name));
         return 0;
     }
-    method = pclass_find_method(class_entry, method_name->data,
+    method = pclass_find_method(class_entry, ps_data(method_name),
                                 method_name->length);
     if (method == NULL ||
         !pclass_member_visible(method->flags, method->owner,
                                frame->called_scope)) {
         pphp_runtime_error(state, frame->line, "undefined static method %.*s()",
-                           (int)method_name->length, method_name->data);
+                           (int)method_name->length, ps_data(method_name));
         return 0;
     }
     if ((method->flags & PC_STATIC) != 0U) {
@@ -1341,13 +1341,13 @@ static int construct_object(pphp_state *state, pframe *frame,
     class_entry = resolve_class_name(state, frame, name);
     if (class_entry == NULL) {
         pphp_runtime_error(state, frame->line, "Class %.*s not found",
-                           (int)name->length, name->data);
+                           (int)name->length, ps_data(name));
         return 0;
     }
     object = pobject_new(state, class_entry);
     if (object == NULL) {
         pphp_runtime_error(state, frame->line, "cannot instantiate class %.*s",
-                           (int)name->length, name->data);
+                           (int)name->length, ps_data(name));
         return 0;
     }
     base = state->stack_count - argument_count;
@@ -1418,7 +1418,7 @@ static int construct_object(pphp_state *state, pframe *frame,
     if (argument_count != 0U) {
         pphp_runtime_error(state, frame->line,
                            "Class %.*s has no constructor",
-                           (int)name->length, name->data);
+                           (int)name->length, ps_data(name));
         return 0;
     }
     return 1;
@@ -1637,7 +1637,7 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                             pv_heap(PT_STRING, (pheader *)&name->header), &value)) {
                     pphp_runtime_error(state, frame->line,
                                        "undefined constant %.*s",
-                                       (int)name->length, name->data);
+                                       (int)name->length, ps_data(name));
                 } else {
                     (void)push(state, value);
                 }
@@ -1819,7 +1819,7 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                     pphp_runtime_error(state, frame->line,
                                        "include path must be string-compatible");
                 } else {
-                    (void)pphp_exec_include(state, path->data, mode,
+                    (void)pphp_exec_include(state, ps_data(path), mode,
                                             &include_result);
                     ps_destroy(path);
                     if (state->error[0] == '\0') {
@@ -2073,13 +2073,13 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                     pphp_runtime_error(state, frame->line,
                                        "function %.*s is already defined",
                                        (int)proto->name->length,
-                                       proto->name->data);
+                                       ps_data(proto->name));
                 } else if (!pphp_register_runtime_function(
                                state, proto, frame->module)) {
                     pphp_runtime_error(state, frame->line,
                                        "cannot register function %.*s",
                                        (int)proto->name->length,
-                                       proto->name->data);
+                                       ps_data(proto->name));
                 }
                 break;
             }
@@ -2096,7 +2096,7 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                 if (parent_index != UINT16_MAX) {
                     const pstring *parent_name = constant_string(state, frame, parent_index);
                     if (parent_name == NULL ||
-                        (parent = pphp_find_class(state, parent_name->data,
+                        (parent = pphp_find_class(state, ps_data(parent_name),
                                                   parent_name->length)) == NULL) {
                         pphp_runtime_error(state, frame->line, "parent class is not defined");
                         break;
@@ -2106,7 +2106,7 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                         break;
                     }
                 }
-                state->building_class = pclass_new(name->data, name->length, parent, flags);
+                state->building_class = pclass_new(ps_data(name), name->length, parent, flags);
                 if (state->building_class == NULL) {
                     pphp_runtime_error(state, frame->line, "cannot create class definition");
                 }
@@ -2120,11 +2120,11 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                 if (state->building_class == NULL || name == NULL ||
                     ((flags & PC_STATIC) != 0U
                          ? !pclass_add_static_property(state->building_class,
-                                                      name->data, name->length,
+                                                      ps_data(name), name->length,
                                                       flags,
                                                       default_value)
                          : !pclass_add_property(state->building_class,
-                                                name->data, name->length,
+                                                ps_data(name), name->length,
                                                 flags, default_value))) {
                     pphp_runtime_error(state, frame->line, "cannot define property");
                 }
@@ -2137,7 +2137,7 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                 pclass *interface_entry = name == NULL
                                               ? NULL
                                               : pphp_find_class(
-                                                    state, name->data,
+                                                    state, ps_data(name),
                                                     name->length);
                 if (state->building_class == NULL ||
                     interface_entry == NULL ||
@@ -2146,7 +2146,7 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                     pphp_runtime_error(state, frame->line,
                                        "cannot implement interface %.*s",
                                        name == NULL ? 0 : (int)name->length,
-                                       name == NULL ? "" : name->data);
+                                       name == NULL ? "" : ps_data(name));
                 }
                 break;
             }
@@ -2155,7 +2155,7 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                 const pstring *name = constant_string(state, frame, name_index);
                 pvalue value = pop(state);
                 if (state->building_class == NULL || name == NULL ||
-                    !pclass_add_constant(state->building_class, name->data,
+                    !pclass_add_constant(state->building_class, ps_data(name),
                                          name->length, value)) {
                     pphp_runtime_error(state, frame->line,
                                        "cannot define class constant");
@@ -2170,7 +2170,7 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                 const pstring *name = constant_string(state, frame, name_index);
                 if (state->building_class == NULL || name == NULL ||
                     frame->module == NULL || proto_index >= frame->module->count ||
-                    !pclass_add_method(state->building_class, name->data, name->length,
+                    !pclass_add_method(state->building_class, ps_data(name), name->length,
                                        flags, frame->module->protos[proto_index],
                                        frame->module)) {
                     pphp_runtime_error(state, frame->line, "cannot define method");
@@ -2193,7 +2193,7 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                     pv_release(value);
                     pphp_runtime_error(state, frame->line,
                                        "constant %.*s is already defined",
-                                       (int)name->length, name->data);
+                                       (int)name->length, ps_data(name));
                 } else if (!pa_set(state->constants,
                                    pv_heap(PT_STRING, (pheader *)&name->header),
                                    value)) {
@@ -2215,9 +2215,9 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                         state, frame->line,
                         "class %.*s must implement method %.*s()",
                         (int)state->building_class->name->length,
-                        state->building_class->name->data,
+                        ps_data(state->building_class->name),
                         missing == NULL ? 0 : (int)missing->name->length,
-                        missing == NULL ? "" : missing->name->data);
+                        missing == NULL ? "" : ps_data(missing->name));
                 } else if (state->building_class == NULL ||
                            !pphp_register_class(state,
                                                 state->building_class)) {
@@ -2288,7 +2288,7 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                 if (name != NULL && object_value.type == PT_OBJECT) {
                     pobject *object = (pobject *)object_value.as.gc;
                     const pproperty *property = pclass_find_property(
-                        object->class_entry, name->data, name->length);
+                        object->class_entry, ps_data(name), name->length);
                     if (property != NULL &&
                         pclass_member_visible(property->flags,
                                               property->owner,
@@ -2310,7 +2310,7 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                     const pstring *name = (const pstring *)name_value.as.gc;
                     pobject *object = (pobject *)object_value.as.gc;
                     const pproperty *property = pclass_find_property(
-                        object->class_entry, name->data, name->length);
+                        object->class_entry, ps_data(name), name->length);
                     if (property != NULL &&
                         pclass_member_visible(property->flags,
                                               property->owner,
@@ -2336,7 +2336,7 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                 {
                     pobject *object = (pobject *)object_value.as.gc;
                     const pproperty *property = pclass_find_property(
-                        object->class_entry, name->data, name->length);
+                        object->class_entry, ps_data(name), name->length);
                     if (property == NULL) {
                         pvalue argument = pv_heap(
                             PT_STRING, (pheader *)&name->header);
@@ -2348,13 +2348,13 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                         } else if (invoked == 0) {
                             pphp_runtime_error(state, frame->line,
                                                "undefined property %.*s",
-                                               (int)name->length, name->data);
+                                               (int)name->length, ps_data(name));
                         }
                     } else if (!pclass_member_visible(property->flags, property->owner,
                                                       frame->called_scope)) {
                         pphp_runtime_error(state, frame->line,
                                            "cannot access non-public property %.*s",
-                                           (int)name->length, name->data);
+                                           (int)name->length, ps_data(name));
                     } else {
                         pvalue value = object->slots[property->slot];
                         pv_retain(value);
@@ -2378,7 +2378,7 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                 } else {
                     pobject *object = (pobject *)object_value.as.gc;
                     const pproperty *property = pclass_find_property(
-                        object->class_entry, name->data, name->length);
+                        object->class_entry, ps_data(name), name->length);
                     if (property == NULL) {
                         pvalue argument = name_value;
                         pvalue value = pv_null();
@@ -2389,14 +2389,14 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                         } else if (invoked == 0) {
                             pphp_runtime_error(state, frame->line,
                                                "undefined property %.*s",
-                                               (int)name->length, name->data);
+                                               (int)name->length, ps_data(name));
                         }
                     } else if (!pclass_member_visible(
                                    property->flags, property->owner,
                                    frame->called_scope)) {
                         pphp_runtime_error(state, frame->line,
                                            "cannot access non-public property %.*s",
-                                           (int)name->length, name->data);
+                                           (int)name->length, ps_data(name));
                     } else {
                         pvalue value = object->slots[property->slot];
                         pv_retain(value);
@@ -2421,7 +2421,7 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                 {
                     pobject *object = (pobject *)object_value.as.gc;
                     const pproperty *property = pclass_find_property(
-                        object->class_entry, name->data, name->length);
+                        object->class_entry, ps_data(name), name->length);
                     if (property == NULL) {
                         pvalue arguments[2];
                         pvalue ignored = pv_null();
@@ -2438,19 +2438,19 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                         } else if (invoked == 0) {
                             pphp_runtime_error(state, frame->line,
                                                "undefined property %.*s",
-                                               (int)name->length, name->data);
+                                               (int)name->length, ps_data(name));
                         }
                     } else if (!pclass_member_visible(property->flags, property->owner,
                                                       frame->called_scope)) {
                         pphp_runtime_error(state, frame->line,
                                            "cannot access non-public property %.*s",
-                                           (int)name->length, name->data);
+                                           (int)name->length, ps_data(name));
                     } else if ((property->flags & PC_READONLY) != 0U &&
                                (frame->called_scope != property->owner ||
                                 pobject_property_written(object, property->slot))) {
                         pphp_runtime_error(state, frame->line,
                                            "cannot modify readonly property %.*s",
-                                           (int)name->length, name->data);
+                                           (int)name->length, ps_data(name));
                     } else {
                         pv_retain(value);
                         pv_release(object->slots[property->slot]);
@@ -2479,7 +2479,7 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                 } else {
                     pobject *object = (pobject *)object_value.as.gc;
                     const pproperty *property = pclass_find_property(
-                        object->class_entry, name->data, name->length);
+                        object->class_entry, ps_data(name), name->length);
                     if (property == NULL) {
                         pvalue arguments[2];
                         pvalue ignored = pv_null();
@@ -2495,21 +2495,21 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                         } else if (invoked == 0) {
                             pphp_runtime_error(state, frame->line,
                                                "undefined property %.*s",
-                                               (int)name->length, name->data);
+                                               (int)name->length, ps_data(name));
                         }
                     } else if (!pclass_member_visible(
                                    property->flags, property->owner,
                                    frame->called_scope)) {
                         pphp_runtime_error(state, frame->line,
                                            "cannot access non-public property %.*s",
-                                           (int)name->length, name->data);
+                                           (int)name->length, ps_data(name));
                     } else if ((property->flags & PC_READONLY) != 0U &&
                                (frame->called_scope != property->owner ||
                                 pobject_property_written(object,
                                                          property->slot))) {
                         pphp_runtime_error(state, frame->line,
                                            "cannot modify readonly property %.*s",
-                                           (int)name->length, name->data);
+                                           (int)name->length, ps_data(name));
                     } else {
                         pv_retain(value);
                         pv_release(object->slots[property->slot]);
@@ -2613,12 +2613,12 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                 if (opcode == OP_SPROP_GET) {
                     pvalue value = pv_null();
                     const pproperty *property = pclass_find_static_property(
-                        class_entry, member_name->data, member_name->length);
+                        class_entry, ps_data(member_name), member_name->length);
                     if (property == NULL) {
                         pphp_runtime_error(state, frame->line,
                                            "undefined static property %.*s",
                                            (int)member_name->length,
-                                           member_name->data);
+                                           ps_data(member_name));
                     } else if (!pclass_member_visible(
                                    property->flags, property->owner,
                                    frame->called_scope)) {
@@ -2626,27 +2626,27 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                                            "cannot access non-public static "
                                            "property %.*s",
                                            (int)member_name->length,
-                                           member_name->data);
+                                           ps_data(member_name));
                     } else if (!pclass_get_static_property(
-                                   class_entry, member_name->data,
+                                   class_entry, ps_data(member_name),
                                    member_name->length, &value)) {
                         pphp_runtime_error(state, frame->line,
                                            "undefined static property %.*s",
                                            (int)member_name->length,
-                                           member_name->data);
+                                           ps_data(member_name));
                     } else {
                         (void)push(state, value);
                     }
                 } else if (opcode == OP_SPROP_SET) {
                     pvalue value = pop(state);
                     const pproperty *property = pclass_find_static_property(
-                        class_entry, member_name->data, member_name->length);
+                        class_entry, ps_data(member_name), member_name->length);
                     if (property == NULL) {
                         pv_release(value);
                         pphp_runtime_error(state, frame->line,
                                            "undefined static property %.*s",
                                            (int)member_name->length,
-                                           member_name->data);
+                                           ps_data(member_name));
                     } else if (!pclass_member_visible(
                                    property->flags, property->owner,
                                    frame->called_scope)) {
@@ -2655,20 +2655,20 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                                            "cannot access non-public static "
                                            "property %.*s",
                                            (int)member_name->length,
-                                           member_name->data);
+                                           ps_data(member_name));
                     } else if (!pclass_set_static_property(
-                                   class_entry, member_name->data,
+                                   class_entry, ps_data(member_name),
                                    member_name->length, value)) {
                         pv_release(value);
                         pphp_runtime_error(state, frame->line,
                                            "undefined static property %.*s",
                                            (int)member_name->length,
-                                           member_name->data);
+                                           ps_data(member_name));
                     } else {
                         (void)push(state, value);
                     }
                 } else if (ps_equal_bytes(member_name, "class", 5U)) {
-                    pstring *name_copy = ps_new(class_entry->name->data,
+                    pstring *name_copy = ps_new(ps_data(class_entry->name),
                                                 class_entry->name->length);
                     if (name_copy == NULL) {
                         pphp_runtime_error(state, frame->line,
@@ -2679,12 +2679,12 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                     }
                 } else {
                     pvalue value = pv_null();
-                    if (!pclass_get_constant(class_entry, member_name->data,
+                    if (!pclass_get_constant(class_entry, ps_data(member_name),
                                              member_name->length, &value)) {
                         pphp_runtime_error(state, frame->line,
                                            "undefined class constant %.*s",
                                            (int)member_name->length,
-                                           member_name->data);
+                                           ps_data(member_name));
                     } else {
                         (void)push(state, value);
                     }
@@ -2713,7 +2713,7 @@ int pphp_vm_execute(pphp_state *state, const pmodule *module) {
                     const pstring *name =
                         (const pstring *)class_value.as.gc;
                     pclass *expected = pphp_find_class(
-                        state, name->data, name->length);
+                        state, ps_data(name), name->length);
                     matches = expected != NULL &&
                               pclass_is_a(
                                   ((pobject *)value.as.gc)->class_entry,

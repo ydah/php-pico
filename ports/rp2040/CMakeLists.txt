@@ -36,6 +36,7 @@ set(PPHP_SOURCES
   ${PPHP_ROOT}/src/symbol.c
   ${PPHP_ROOT}/src/parray.c
   ${PPHP_ROOT}/src/resource.c
+  ${PPHP_ROOT}/src/module.c
   ${PPHP_ROOT}/src/pclass.c
   ${PPHP_ROOT}/src/closure.c
   ${PPHP_ROOT}/src/api.c

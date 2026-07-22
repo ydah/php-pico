@@ -318,6 +318,7 @@ TEST(pbc_string_constants_are_zero_copy_image_views) {
     pphp_pool_stats after;
     const pstring *literal = NULL;
     size_t i;
+    ASSERT_EQ(12, sizeof(pstring));
     ASSERT_TRUE(source != NULL);
     memcpy(source, prefix, sizeof(prefix) - 1U);
     memset(source + sizeof(prefix) - 1U, 'x', literal_length);
@@ -334,12 +335,12 @@ TEST(pbc_string_constants_are_zero_copy_image_views) {
     ASSERT_EQ(length, module.image_length);
     ASSERT_TRUE(module.ro_string_count != 0U);
     for (i = 0U; i < module.ro_string_count; i++) {
-        const pstring *string = &module.ro_strings[i];
+        const pstring *string = &module.ro_strings[i].base;
         ASSERT_EQ(PT_ROSTRING, string->header.type);
-        ASSERT_TRUE((const uint8_t *)string->data >= bytes);
-        ASSERT_TRUE((const uint8_t *)string->data + string->length <
+        ASSERT_TRUE((const uint8_t *)ps_data(string) >= bytes);
+        ASSERT_TRUE((const uint8_t *)ps_data(string) + string->length <
                     bytes + length);
-        ASSERT_EQ(0, string->data[string->length]);
+        ASSERT_EQ(0, ps_data(string)[string->length]);
         if (string->length == literal_length) literal = string;
     }
     ASSERT_TRUE(literal != NULL);
@@ -369,13 +370,54 @@ TEST(pbc_string_records_are_binary_safe_and_nul_terminated) {
     bytes[29U] = 0U;
     ASSERT_EQ(PPHP_OK, pphp_pbc_load(bytes, 48U, &module));
     ASSERT_EQ(1, module.ro_string_count);
-    ASSERT_EQ(3, module.ro_strings[0].length);
+    ASSERT_EQ(3, module.ro_strings[0].base.length);
     ASSERT_EQ(0, module.ro_strings[0].data[1]);
     ASSERT_EQ('b', module.ro_strings[0].data[2]);
     pmodule_destroy(&module);
 
     bytes[29U] = 1U;
     ASSERT_EQ(PPHP_E_PARSE, load_test_pbc(bytes, 48U));
+}
+
+TEST(pbc_strings_work_across_runtime_consumers) {
+    const char *path = "build/host/test_pbc_string_consumers.pbc";
+    const char *source =
+        "$empty = ''; $nul = \"a\\x00b\";"
+        "echo strlen($empty), ':', strlen($nul), ':',"
+        " ($nul === \"a\\x00b\" ? 1 : 0), ':',"
+        " json_encode(['x' => $nul]), ':',"
+        " sprintf('%04d-%s', 7, 'ok'), ':', ('a' <=> 'b');";
+    pphp_state *state;
+    output_buffer output;
+    uint8_t *bytes;
+    size_t length;
+
+    pphp_pool_init(vm_pool, sizeof(vm_pool));
+    ASSERT_TRUE(write_source_pbc(source, path));
+    state = pphp_open(vm_pool, sizeof(vm_pool));
+    ASSERT_TRUE(state != NULL);
+    bytes = read_pbc_from_pool(path, &length);
+    ASSERT_TRUE(bytes != NULL);
+    memset(&output, 0, sizeof(output));
+    pphp_set_output(state, capture_output, &output);
+    ASSERT_EQ(PPHP_OK, pphp_exec_pbc_owned(state, bytes, length));
+    ASSERT_STR("0:3:1:{\"x\":\"a\\u0000b\"}:0007-ok:-1", output.bytes);
+    pphp_close(state);
+    ASSERT_EQ(0, remove(path));
+}
+
+TEST(pbc_writer_rejects_oversized_record_counts) {
+    const char *path = "build/host/test_pbc_oversized_writer.pbc";
+    pmodule module;
+    pproto *entry;
+    ASSERT_TRUE(pmodule_init(&module));
+    entry = pproto_new("{main}", 6U);
+    ASSERT_TRUE(entry != NULL);
+    ASSERT_TRUE(pmodule_add(&module, entry));
+    entry->catch_count = (size_t)UINT16_MAX + 1U;
+    ASSERT_EQ(PPHP_E_NOMEM, pphp_pbc_write_file(&module, path));
+    entry->catch_count = 0U;
+    pmodule_destroy(&module);
 }
 
 TEST(pbc_modules_keep_classes_closures_and_owned_backings_alive) {
@@ -470,12 +512,16 @@ TEST(pbc_modules_keep_classes_closures_and_owned_backings_alive) {
 TEST(pbc_xip_images_can_be_used_by_sequential_states) {
     const char *path = "build/host/test_pbc_two_states.pbc";
     uint8_t *bytes;
+    uint8_t *snapshot;
     size_t length;
     size_t i;
     pphp_pool_init(vm_pool, sizeof(vm_pool));
     ASSERT_TRUE(write_source_pbc("echo 'state';", path));
     bytes = read_pbc_from_libc(path, &length);
     ASSERT_TRUE(bytes != NULL);
+    snapshot = malloc(length);
+    ASSERT_TRUE(snapshot != NULL);
+    memcpy(snapshot, bytes, length);
     for (i = 0U; i < 2U; i++) {
         pphp_state *state = pphp_open(vm_pool, sizeof(vm_pool));
         output_buffer output;
@@ -485,7 +531,9 @@ TEST(pbc_xip_images_can_be_used_by_sequential_states) {
         ASSERT_EQ(PPHP_OK, pphp_exec_pbc(state, bytes, length));
         ASSERT_STR("state", output.bytes);
         pphp_close(state);
+        ASSERT_EQ(0, memcmp(bytes, snapshot, length));
     }
+    free(snapshot);
     free(bytes);
     ASSERT_EQ(0, remove(path));
 }
@@ -508,6 +556,117 @@ TEST(source_modules_outlive_objects_kept_in_globals) {
     ASSERT_STR("alive", output.bytes);
     pphp_close(state);
     ASSERT_STR("alive:source-destroy", output.bytes);
+}
+
+TEST(shutdown_destructors_run_before_class_metadata_is_released) {
+    const char *path = "build/host/test_shutdown_class_lifetime.pbc";
+    const char *source =
+        "<?php class ShutdownHolder { public static $value; }"
+        "class ShutdownVictim {"
+        " function __destruct() { echo ShutdownHelper::$message; }"
+        "}"
+        "class ShutdownHelper { public static $message = ':cross'; }"
+        "class ShutdownSelf {"
+        " public static $value; public static $message = ':self';"
+        " function __destruct() { echo self::$message; }"
+        "}"
+        "ShutdownHolder::$value = new ShutdownVictim();"
+        "ShutdownSelf::$value = new ShutdownSelf();";
+    pphp_state *state;
+    output_buffer output;
+    uint8_t *bytes;
+    size_t length;
+
+    pphp_pool_init(vm_pool, sizeof(vm_pool));
+    state = pphp_open(vm_pool, sizeof(vm_pool));
+    ASSERT_TRUE(state != NULL);
+    memset(&output, 0, sizeof(output));
+    pphp_set_output(state, capture_output, &output);
+    ASSERT_EQ(PPHP_OK,
+              pphp_exec_source(state, source, strlen(source), "shutdown-source"));
+    pphp_close(state);
+    ASSERT_STR(":self:cross", output.bytes);
+
+    pphp_pool_init(vm_pool, sizeof(vm_pool));
+    ASSERT_TRUE(write_source_pbc(source + 6U, path));
+    state = pphp_open(vm_pool, sizeof(vm_pool));
+    ASSERT_TRUE(state != NULL);
+    bytes = read_pbc_from_pool(path, &length);
+    ASSERT_TRUE(bytes != NULL);
+    memset(&output, 0, sizeof(output));
+    pphp_set_output(state, capture_output, &output);
+    ASSERT_EQ(PPHP_OK, pphp_exec_pbc_owned(state, bytes, length));
+    pphp_close(state);
+    ASSERT_STR(":self:cross", output.bytes);
+    ASSERT_EQ(0, remove(path));
+}
+
+TEST(transient_pbc_modules_are_released_after_success_and_failure) {
+    const char *success_path = "build/host/test_transient_success.pbc";
+    const char *failure_path = "build/host/test_transient_failure.pbc";
+    uint8_t *success;
+    uint8_t *failure;
+    size_t success_length;
+    size_t failure_length;
+    size_t baseline_modules;
+    size_t baseline_used;
+    size_t i;
+    pphp_state *state;
+    const char *source_success = "<?php $transientSource = 3 + 4;";
+    const char *source_failure =
+        "<?php function transient_source_failed_definition() { return 3; }"
+        "missing_transient_source_call();";
+
+    pphp_pool_init(vm_pool, sizeof(vm_pool));
+    ASSERT_TRUE(write_source_pbc("$transient = 1 + 2;", success_path));
+    ASSERT_TRUE(write_source_pbc(
+        "function transient_failed_definition() { return 1; }"
+        "if (true) { function transient_failed_conditional() { return 2; } }"
+        "missing_transient_call();", failure_path));
+    success = read_pbc_from_libc(success_path, &success_length);
+    failure = read_pbc_from_libc(failure_path, &failure_length);
+    ASSERT_TRUE(success != NULL);
+    ASSERT_TRUE(failure != NULL);
+    state = pphp_open(vm_pool, sizeof(vm_pool));
+    ASSERT_TRUE(state != NULL);
+
+    ASSERT_EQ(PPHP_OK, pphp_exec_pbc(state, success, success_length));
+    ASSERT_EQ(PPHP_E_RUNTIME, pphp_exec_pbc(state, failure, failure_length));
+    baseline_modules = state->repl_module_count;
+    baseline_used = pphp_pool_get_stats().used;
+    for (i = 0U; i < 64U; i++) {
+        ASSERT_EQ(PPHP_OK, pphp_exec_pbc(state, success, success_length));
+        ASSERT_EQ(PPHP_E_RUNTIME,
+                  pphp_exec_pbc(state, failure, failure_length));
+        ASSERT_EQ(baseline_modules, state->repl_module_count);
+        ASSERT_EQ(baseline_used, pphp_pool_get_stats().used);
+    }
+
+    ASSERT_EQ(PPHP_OK,
+              pphp_exec_source(state, source_success, strlen(source_success),
+                               "transient-source-success"));
+    ASSERT_EQ(PPHP_E_RUNTIME,
+              pphp_exec_source(state, source_failure, strlen(source_failure),
+                               "transient-source-failure"));
+    baseline_modules = state->repl_module_count;
+    baseline_used = pphp_pool_get_stats().used;
+    for (i = 0U; i < 32U; i++) {
+        ASSERT_EQ(PPHP_OK,
+                  pphp_exec_source(state, source_success,
+                                   strlen(source_success),
+                                   "transient-source-success"));
+        ASSERT_EQ(PPHP_E_RUNTIME,
+                  pphp_exec_source(state, source_failure,
+                                   strlen(source_failure),
+                                   "transient-source-failure"));
+        ASSERT_EQ(baseline_modules, state->repl_module_count);
+        ASSERT_EQ(baseline_used, pphp_pool_get_stats().used);
+    }
+    pphp_close(state);
+    free(success);
+    free(failure);
+    ASSERT_EQ(0, remove(success_path));
+    ASSERT_EQ(0, remove(failure_path));
 }
 
 TEST(pbc_loader_rejects_truncated_and_wrapping_sections) {
@@ -1518,9 +1677,13 @@ int main(void) {
         {"PBC round trip", pbc_serialization_round_trips_through_loader},
         {"PBC string XIP", pbc_string_constants_are_zero_copy_image_views},
         {"PBC binary strings", pbc_string_records_are_binary_safe_and_nul_terminated},
+        {"PBC string consumers", pbc_strings_work_across_runtime_consumers},
+        {"PBC writer bounds", pbc_writer_rejects_oversized_record_counts},
         {"PBC retained lifetimes", pbc_modules_keep_classes_closures_and_owned_backings_alive},
         {"PBC sequential states", pbc_xip_images_can_be_used_by_sequential_states},
         {"source retained lifetimes", source_modules_outlive_objects_kept_in_globals},
+        {"shutdown class lifetimes", shutdown_destructors_run_before_class_metadata_is_released},
+        {"transient PBC lifetimes", transient_pbc_modules_are_released_after_success_and_failure},
         {"PBC malformed bounds", pbc_loader_rejects_truncated_and_wrapping_sections},
         {"array COW runtime", arrays_use_copy_on_write_and_normalized_keys},
         {"language conformance", language_conformance_covers_casts_lvalues_nullsafe_and_interpolation},

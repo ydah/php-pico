@@ -39,6 +39,7 @@ static int keys_equal(pvalue left, pvalue right) {
 }
 
 static int numeric_string_key(const pstring *string, pphp_int *integer) {
+    const char *data = ps_data(string);
     size_t i = 0U;
     int negative = 0;
     uint64_t value = 0U;
@@ -46,21 +47,21 @@ static int numeric_string_key(const pstring *string, pphp_int *integer) {
     if (string->length == 0U) {
         return 0;
     }
-    if (string->data[i] == '-') {
+    if (data[i] == '-') {
         negative = 1;
         i++;
         if (i == string->length) return 0;
-    } else if (string->data[i] == '+') {
+    } else if (data[i] == '+') {
         return 0;
     }
-    if (string->data[i] == '0' && i + 1U < string->length) {
+    if (data[i] == '0' && i + 1U < string->length) {
         return 0;
     }
     limit = (uint64_t)PPHP_INT_MAXIMUM + (negative ? 1U : 0U);
     for (; i < string->length; i++) {
         unsigned digit;
-        if (string->data[i] < '0' || string->data[i] > '9') return 0;
-        digit = (unsigned)(string->data[i] - '0');
+        if (data[i] < '0' || data[i] > '9') return 0;
+        digit = (unsigned)(data[i] - '0');
         if (value > (limit - digit) / 10U) return 0;
         value = value * 10U + digit;
     }

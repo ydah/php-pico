@@ -143,7 +143,9 @@ static int encode_array(json_buffer *buffer, const parray *array, int pretty,
         if (!list) {
             if (key.type == PT_STRING) {
                 const pstring *string = (const pstring *)key.as.gc;
-                if (!encode_string(buffer, string->data, string->length)) goto failed;
+                if (!encode_string(buffer, ps_data(string), string->length)) {
+                    goto failed;
+                }
             } else {
                 char number[32];
                 int length = snprintf(number, sizeof(number), "%lld",
@@ -183,7 +185,8 @@ static int encode_object(json_buffer *buffer, const pobject *object,
         if (emitted != 0U && !character(buffer, ',')) return 0;
         if (pretty && (!character(buffer, '\n') ||
                        !indentation(buffer, depth + 1U))) return 0;
-        if (!encode_string(buffer, property->name->data, property->name->length) ||
+        if (!encode_string(buffer, ps_data(property->name),
+                           property->name->length) ||
             !character(buffer, ':') || (pretty && !character(buffer, ' ')) ||
             !encode_value(buffer, object->slots[property->slot], pretty,
                           depth + 1U)) return 0;
@@ -214,7 +217,7 @@ static int encode_value(json_buffer *buffer, pvalue value, int pretty,
 #endif
         case PT_STRING: {
             const pstring *string = (const pstring *)value.as.gc;
-            return encode_string(buffer, string->data, string->length);
+            return encode_string(buffer, ps_data(string), string->length);
         }
         case PT_ARRAY:
             return encode_array(buffer, (const parray *)value.as.gc, pretty,
@@ -582,7 +585,7 @@ int pphp_call_json_builtin(pphp_state *state, const pstring *name,
         }
         string = (const pstring *)arguments[0].as.gc;
         memset(&parser, 0, sizeof(parser));
-        parser.bytes = string->data;
+        parser.bytes = ps_data(string);
         parser.length = string->length;
         value = parse_value(&parser);
         skip_space(&parser);

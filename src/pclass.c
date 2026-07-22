@@ -20,7 +20,7 @@ static int name_equal_ci(const pstring *name, const char *other, size_t length) 
     size_t i;
     if (name->length != length) return 0;
     for (i = 0U; i < length; i++) {
-        unsigned char left = (unsigned char)name->data[i];
+        unsigned char left = (unsigned char)ps_data(name)[i];
         unsigned char right = (unsigned char)other[i];
         if (left >= 'A' && left <= 'Z') left = (unsigned char)(left + ('a' - 'A'));
         if (right >= 'A' && right <= 'Z') right = (unsigned char)(right + ('a' - 'A'));
@@ -34,6 +34,7 @@ pclass *pclass_new(const char *name, size_t length, pclass *parent, uint8_t flag
     size_t i;
     if (class_entry == NULL) return NULL;
     memset(class_entry, 0, sizeof(*class_entry));
+    class_entry->refcnt = 1U;
     class_entry->name = ps_new(name, length);
     class_entry->parent = parent;
     class_entry->flags = flags;
@@ -41,10 +42,11 @@ pclass *pclass_new(const char *name, size_t length, pclass *parent, uint8_t flag
         pphp_free(class_entry);
         return NULL;
     }
+    pclass_retain(parent);
     if (parent != NULL) {
         for (i = 0U; i < parent->property_count; i++) {
             const pproperty *property = &parent->properties[i];
-            if (!pclass_add_property(class_entry, property->name->data,
+            if (!pclass_add_property(class_entry, ps_data(property->name),
                                      property->name->length, property->flags,
                                      property->default_value)) {
                 pclass_destroy(class_entry);
@@ -57,27 +59,74 @@ pclass *pclass_new(const char *name, size_t length, pclass *parent, uint8_t flag
     return class_entry;
 }
 
-void pclass_destroy(pclass *class_entry) {
-    size_t i;
+void pclass_retain(pclass *class_entry) {
+    if (class_entry != NULL && class_entry->refcnt != UINT16_MAX) {
+        class_entry->refcnt++;
+    }
+}
+
+void pclass_retain_runtime(pclass *class_entry) {
     if (class_entry == NULL) return;
+    pclass_retain(class_entry);
+    if (class_entry->runtime_refs != UINT16_MAX) class_entry->runtime_refs++;
+}
+
+void pclass_release_values(pclass *class_entry) {
+    size_t i;
+    parray *static_properties;
+    parray *constants;
+    if (class_entry == NULL || class_entry->values_released) return;
+    class_entry->values_released = 1U;
+    for (i = 0U; i < class_entry->property_count; i++) {
+        pv_release(class_entry->properties[i].default_value);
+        class_entry->properties[i].default_value = pv_null();
+    }
+    static_properties = class_entry->static_properties;
+    constants = class_entry->constants;
+    class_entry->static_properties = NULL;
+    class_entry->constants = NULL;
+    pa_destroy(static_properties);
+    pa_destroy(constants);
+}
+
+void pclass_release(pclass *class_entry) {
+    size_t i;
+    if (class_entry == NULL || class_entry->refcnt == 0U ||
+        class_entry->refcnt == UINT16_MAX) return;
+    class_entry->refcnt--;
+    if (class_entry->refcnt != 0U) return;
+    pclass_release_values(class_entry);
     for (i = 0U; i < class_entry->property_count; i++) {
         ps_destroy(class_entry->properties[i].name);
-        pv_release(class_entry->properties[i].default_value);
     }
     for (i = 0U; i < class_entry->method_count; i++) {
+        pmodule_release((pmodule *)class_entry->methods[i].module);
         ps_destroy(class_entry->methods[i].name);
     }
     ps_destroy(class_entry->name);
     pphp_free(class_entry->properties);
     pphp_free(class_entry->methods);
-    pphp_free(class_entry->interfaces);
     for (i = 0U; i < class_entry->static_property_count; i++) {
         ps_destroy(class_entry->static_property_defs[i].name);
     }
     pphp_free(class_entry->static_property_defs);
-    pa_destroy(class_entry->static_properties);
-    pa_destroy(class_entry->constants);
+    for (i = 0U; i < class_entry->interface_count; i++) {
+        pclass_release(class_entry->interfaces[i]);
+    }
+    pphp_free(class_entry->interfaces);
+    pclass_release(class_entry->parent);
     pphp_free(class_entry);
+}
+
+void pclass_release_runtime(pclass *class_entry) {
+    if (class_entry == NULL) return;
+    if (class_entry->runtime_refs != 0U &&
+        class_entry->runtime_refs != UINT16_MAX) class_entry->runtime_refs--;
+    pclass_release(class_entry);
+}
+
+void pclass_destroy(pclass *class_entry) {
+    pclass_release(class_entry);
 }
 
 static int class_table_add(parray **table, const char *name, size_t length,
@@ -230,6 +279,7 @@ int pclass_add_interface(pclass *class_entry, pclass *interface_entry) {
         class_entry->interfaces = resized;
         class_entry->interface_capacity = capacity;
     }
+    pclass_retain(interface_entry);
     class_entry->interfaces[class_entry->interface_count++] = interface_entry;
     return 1;
 }
@@ -237,7 +287,7 @@ int pclass_add_interface(pclass *class_entry, pclass *interface_entry) {
 static int method_implements(const pclass *class_entry,
                              const pmethod *requirement) {
     const pmethod *implementation = pclass_find_method(
-        class_entry, requirement->name->data, requirement->name->length);
+        class_entry, ps_data(requirement->name), requirement->name->length);
     if (implementation == NULL ||
         (implementation->flags & PC_ABSTRACT) != 0U) return 0;
     if ((requirement->flags & PC_STATIC) !=
@@ -330,6 +380,7 @@ int pclass_add_method(pclass *class_entry, const char *name, size_t length,
     method->module = module;
     method->owner = class_entry;
     method->native = NULL;
+    pmodule_retain((pmodule *)module);
     class_entry->method_count++;
     return 1;
 }
@@ -388,6 +439,7 @@ pobject *pobject_new(pphp_state *state, pclass *class_entry) {
     object->header.type = PT_OBJECT;
     object->header.flags = 0U;
     object->class_entry = class_entry;
+    pclass_retain_runtime(class_entry);
     object->owner_state = state == NULL || state->root_state == NULL
                               ? state : state->root_state;
     object->gc_prev = NULL;
@@ -473,10 +525,11 @@ void pobject_mark_property_written(pobject *object, uint8_t slot) {
     written[slot] = 1U;
 }
 
-void pobject_destroy(pobject *object) {
-    size_t i;
-    if (object == NULL) return;
-    pphp_gc_unbuffer(&object->header);
+void pobject_run_destructor(pobject *object) {
+    int needs_guard;
+    if (object == NULL || object->owner_state == NULL ||
+        (object->header.flags & UINT8_C(0xc0)) != 0U) return;
+    needs_guard = object->header.refcnt == 0U;
     if (object->owner_state != NULL &&
         (object->header.flags & UINT8_C(0xc0)) == 0U) {
         const pmethod *destructor = pclass_find_method(
@@ -490,7 +543,7 @@ void pobject_destroy(pobject *object) {
             (void)snprintf(saved_error, sizeof(saved_error), "%s",
                            object->owner_state->error);
             object->header.flags |= UINT8_C(0x80);
-            object->header.refcnt = 1U;
+            if (needs_guard) object->header.refcnt = 1U;
             if (object->owner_state->invoke != NULL &&
                 method_name != NULL && callable != NULL &&
                 pa_push(callable, pv_heap(PT_OBJECT, &object->header)) &&
@@ -505,13 +558,22 @@ void pobject_destroy(pobject *object) {
             }
             pv_release(pv_heap(PT_STRING,
                                method_name == NULL ? NULL : &method_name->header));
-            object->header.refcnt = 0U;
+            if (needs_guard) object->header.refcnt = 0U;
             (void)snprintf(object->owner_state->error,
                            sizeof(object->owner_state->error), "%s",
                            saved_error);
             object->owner_state->error_line = saved_line;
         }
     }
+}
+
+void pobject_destroy(pobject *object) {
+    size_t i;
+    pclass *class_entry;
+    if (object == NULL) return;
+    class_entry = object->class_entry;
+    pphp_gc_unbuffer(&object->header);
+    pobject_run_destructor(object);
     if (object->owner_state != NULL) {
         if (object->gc_prev != NULL) {
             object->gc_prev->gc_next = object->gc_next;
@@ -524,8 +586,9 @@ void pobject_destroy(pobject *object) {
         object->native_finalizer(object->native_data);
     }
     pphp_free(object->native_data);
-    for (i = 0U; i < object->class_entry->property_count; i++) {
+    for (i = 0U; i < class_entry->property_count; i++) {
         pv_release(object->slots[i]);
     }
     pphp_free(object);
+    pclass_release_runtime(class_entry);
 }

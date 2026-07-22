@@ -130,8 +130,20 @@ pphp_state *pphp_open(void *pool, size_t pool_size) {
 
 void pphp_close(pphp_state *state) {
     size_t i;
+    pobject *object;
     if (state == NULL) {
         return;
+    }
+    object = state->gc_objects;
+    if (object != NULL) {
+        pv_retain(pv_heap(PT_OBJECT, &object->header));
+    }
+    while (object != NULL) {
+        pobject *next = object->gc_next;
+        if (next != NULL) pv_retain(pv_heap(PT_OBJECT, &next->header));
+        pobject_run_destructor(object);
+        pv_release(pv_heap(PT_OBJECT, &object->header));
+        object = next;
     }
     pa_destroy(state->globals);
     pa_destroy(state->statics);
@@ -139,9 +151,11 @@ void pphp_close(pphp_state *state) {
     pa_destroy(state->included_files);
     (void)pphp_gc_collect(state);
     pphp_clear_classes(state);
+    for (i = 0U; i < state->runtime_function_count; i++) {
+        pmodule_release((pmodule *)state->runtime_functions[i].module);
+    }
     for (i = 0U; i < state->repl_module_count; i++) {
-        pmodule_destroy(state->repl_modules[i]);
-        pphp_free(state->repl_modules[i]);
+        pmodule_release(state->repl_modules[i]);
     }
     pphp_free(state->repl_modules);
     for (i = 0U; i < state->native_function_count; i++) {
@@ -158,8 +172,8 @@ static int function_name_equal(const pstring *left, const pstring *right) {
     size_t i;
     if (left->length != right->length) return 0;
     for (i = 0U; i < left->length; i++) {
-        unsigned char a = (unsigned char)left->data[i];
-        unsigned char b = (unsigned char)right->data[i];
+        unsigned char a = (unsigned char)ps_data(left)[i];
+        unsigned char b = (unsigned char)ps_data(right)[i];
         if (a >= 'A' && a <= 'Z') a = (unsigned char)(a + ('a' - 'A'));
         if (b >= 'A' && b <= 'Z') b = (unsigned char)(b + ('a' - 'A'));
         if (a != b) return 0;
@@ -218,6 +232,7 @@ int pphp_register_runtime_function(pphp_state *state, const pproto *proto,
     }
     root->runtime_functions[root->runtime_function_count].proto = proto;
     root->runtime_functions[root->runtime_function_count].module = module;
+    pmodule_retain((pmodule *)module);
     root->runtime_function_count++;
     return 1;
 }
@@ -233,34 +248,72 @@ void pphp_remove_module_functions(pphp_state *state, const pmodule *module) {
         if (root->runtime_functions[read_index].module != module) {
             root->runtime_functions[write_index++] =
                 root->runtime_functions[read_index];
+        } else {
+            pmodule_release((pmodule *)module);
         }
     }
     root->runtime_function_count = write_index;
+}
+
+static int move_module(pmodule *module, pmodule **owned) {
+    size_t i;
+    *owned = pphp_alloc(sizeof(**owned));
+    if (*owned == NULL) return 0;
+    **owned = *module;
+    (*owned)->heap_allocated = 1U;
+    for (i = 0U; i < (*owned)->ro_string_count; i++) {
+        (*owned)->ro_strings[i].owner = *owned;
+    }
+    memset(module, 0, sizeof(*module));
+    return 1;
 }
 
 static int retain_module(pphp_state *state, pmodule *module,
                          pmodule **owned) {
     pmodule **resized;
     size_t capacity;
-    *owned = pphp_alloc(sizeof(**owned));
-    if (*owned == NULL) return 0;
     if (state->repl_module_count == state->repl_module_capacity) {
         capacity = state->repl_module_capacity == 0U
                        ? 8U : state->repl_module_capacity * 2U;
         resized = pphp_realloc(state->repl_modules,
                                capacity * sizeof(*resized));
         if (resized == NULL) {
-            pphp_free(*owned);
-            *owned = NULL;
             return 0;
         }
         state->repl_modules = resized;
         state->repl_module_capacity = capacity;
     }
-    **owned = *module;
-    memset(module, 0, sizeof(*module));
+    if (!move_module(module, owned)) return 0;
     state->repl_modules[state->repl_module_count++] = *owned;
     return 1;
+}
+
+static void release_retained_module(pphp_state *state, pmodule *module) {
+    size_t i;
+    if (state == NULL || module == NULL) return;
+    for (i = 0U; i < state->repl_module_count; i++) {
+        if (state->repl_modules[i] != module) continue;
+        if (i + 1U < state->repl_module_count) {
+            memmove(state->repl_modules + i, state->repl_modules + i + 1U,
+                    (state->repl_module_count - i - 1U) *
+                        sizeof(*state->repl_modules));
+        }
+        state->repl_module_count--;
+        pmodule_release(module);
+        return;
+    }
+}
+
+static int module_has_persistent_functions(const pmodule *module) {
+    size_t i;
+    if (module == NULL) return 0;
+    for (i = 1U; i < module->count; i++) {
+        const pproto *proto = module->protos[i];
+        if (!proto->is_method && !proto->conditional &&
+            proto->name->length != 0U && ps_data(proto->name)[0] != '{' &&
+            strstr(ps_data(proto->name), "::") == NULL) return 1;
+    }
+    return 0;
 }
 
 static int validate_repl_functions(pphp_state *state, const pmodule *module) {
@@ -269,11 +322,11 @@ static int validate_repl_functions(pphp_state *state, const pmodule *module) {
         const pproto *proto = module->protos[i];
         if (proto->is_method || proto->conditional ||
             proto->name->length == 0U ||
-            proto->name->data[0] == '{' ||
-            strstr(proto->name->data, "::") != NULL) continue;
+            ps_data(proto->name)[0] == '{' ||
+            strstr(ps_data(proto->name), "::") != NULL) continue;
         if (pphp_find_function(state, proto->name, NULL) != NULL) {
             pphp_runtime_error(state, 0U, "function %.*s is already defined",
-                               (int)proto->name->length, proto->name->data);
+                               (int)proto->name->length, ps_data(proto->name));
             return 0;
         }
     }
@@ -499,7 +552,7 @@ static int class_name_equal(const pstring *name, const char *other, size_t lengt
     size_t i;
     if (name->length != length) return 0;
     for (i = 0U; i < length; i++) {
-        unsigned char a = (unsigned char)name->data[i];
+        unsigned char a = (unsigned char)ps_data(name)[i];
         unsigned char b = (unsigned char)other[i];
         if (a >= 'A' && a <= 'Z') a = (unsigned char)(a + ('a' - 'A'));
         if (b >= 'A' && b <= 'Z') b = (unsigned char)(b + ('a' - 'A'));
@@ -523,7 +576,7 @@ int pphp_register_class(pphp_state *state, pclass *class_entry) {
     pclass **classes;
     size_t capacity;
     if (state == NULL || class_entry == NULL ||
-        pphp_find_class(state, class_entry->name->data, class_entry->name->length) != NULL) {
+        pphp_find_class(state, ps_data(class_entry->name), class_entry->name->length) != NULL) {
         return 0;
     }
     if (state->class_count == state->class_capacity) {
@@ -545,11 +598,18 @@ void pphp_clear_classes(pphp_state *state) {
         state->oom_exception = NULL;
     }
     if (state->building_class != NULL) {
-        pclass_destroy(state->building_class);
+        pclass_release_values(state->building_class);
+    }
+    for (i = 0U; i < state->class_count; i++) {
+        pclass_release_values(state->classes[i]);
+    }
+    (void)pphp_gc_collect(state);
+    if (state->building_class != NULL) {
+        pclass_release(state->building_class);
         state->building_class = NULL;
     }
     for (i = state->class_count; i > 0U; i--) {
-        pclass_destroy(state->classes[i - 1U]);
+        pclass_release(state->classes[i - 1U]);
     }
     pphp_free(state->classes);
     state->classes = NULL;
@@ -557,22 +617,58 @@ void pphp_clear_classes(pphp_state *state) {
     state->class_capacity = 0U;
 }
 
+static int value_keeps_class_graph(pvalue value) {
+    return value.type == PT_ARRAY || value.type == PT_OBJECT ||
+           value.type == PT_CLOSURE;
+}
+
+static int table_keeps_class_graph(const parray *table) {
+    size_t i;
+    if (table == NULL) return 0;
+    for (i = 0U; i < table->used; i++) {
+        if (table->entries[i].key.type != PT_NULL &&
+            value_keeps_class_graph(table->entries[i].value)) return 1;
+    }
+    return 0;
+}
+
+static int state_has_live_user_class_graph(const pphp_state *state) {
+    size_t i;
+    for (i = 0U; i < state->class_count; i++) {
+        const pclass *class_entry = state->classes[i];
+        size_t property;
+        if (class_entry->persistent) continue;
+        if (class_entry->runtime_refs != 0U ||
+            table_keeps_class_graph(class_entry->static_properties) ||
+            table_keeps_class_graph(class_entry->constants)) return 1;
+        for (property = 0U; property < class_entry->property_count;
+             property++) {
+            if (value_keeps_class_graph(
+                    class_entry->properties[property].default_value)) return 1;
+        }
+    }
+    return 0;
+}
+
 void pphp_clear_user_classes(pphp_state *state) {
     size_t read_index;
     if (state == NULL) return;
+    if (state_has_live_user_class_graph(state)) return;
     if (state->oom_exception != NULL &&
         !state->oom_exception->class_entry->persistent) {
         pv_release(pv_heap(PT_OBJECT, &state->oom_exception->header));
         state->oom_exception = NULL;
     }
     if (state->building_class != NULL && !state->building_class->persistent) {
-        pclass_destroy(state->building_class);
+        pclass_release(state->building_class);
         state->building_class = NULL;
     }
-    for (read_index = state->class_count; read_index > 0U; read_index--) {
-        pclass *class_entry = state->classes[read_index - 1U];
-        if (!class_entry->persistent) {
-            pclass_destroy(class_entry);
+    do {
+        size_t removed = 0U;
+        for (read_index = state->class_count; read_index > 0U; read_index--) {
+            pclass *class_entry = state->classes[read_index - 1U];
+            if (class_entry->persistent || class_entry->refcnt != 1U) continue;
+            pclass_release(class_entry);
             if (read_index < state->class_count) {
                 memmove(state->classes + read_index - 1U,
                         state->classes + read_index,
@@ -580,8 +676,10 @@ void pphp_clear_user_classes(pphp_state *state) {
                             sizeof(*state->classes));
             }
             state->class_count--;
+            removed++;
         }
-    }
+        if (removed == 0U) break;
+    } while (state->class_count != 0U);
 }
 
 void pphp_set_output(pphp_state *state, pphp_output_fn output, void *context) {
@@ -652,6 +750,7 @@ int pphp_exec_source_mode(pphp_state *state, const char *source, size_t length,
     pmodule module;
     pc_codegen_error codegen_error;
     int result;
+    int retained;
     pmodule *execution_module = &module;
     if (state == NULL || source == NULL) {
         return PPHP_E_RUNTIME;
@@ -680,18 +779,36 @@ int pphp_exec_source_mode(pphp_state *state, const char *source, size_t length,
         return PPHP_E_PARSE;
     }
     pc_arena_destroy(&arena);
-    state->repl_mode = 1;
-    if (!validate_repl_functions(state, &module)) {
+    state->repl_mode = repl;
+    retained = repl || module_has_persistent_functions(&module);
+    if (retained && !validate_repl_functions(state, &module)) {
         pmodule_destroy(&module);
         return PPHP_E_RUNTIME;
     }
-    if (!retain_module(state, &module, &execution_module)) {
+    if (retained && !retain_module(state, &module, &execution_module)) {
         pmodule_destroy(&module);
         pphp_runtime_error(state, 0U,
-                           "out of memory retaining source module");
+                           "out of memory retaining function definitions");
+        return PPHP_E_RUNTIME;
+    }
+    if (!retained && !move_module(&module, &execution_module)) {
+        pmodule_destroy(&module);
+        pphp_runtime_error(state, 0U,
+                           "out of memory preparing source module");
         return PPHP_E_RUNTIME;
     }
     result = pphp_vm_execute(state, execution_module);
+    if (!repl) {
+        state->module = NULL;
+        if (result != PPHP_OK) {
+            pphp_remove_module_functions(state, execution_module);
+            if (retained) release_retained_module(state, execution_module);
+        } else if (!retained) {
+            pmodule_release(execution_module);
+        }
+        pphp_clear_user_classes(state);
+        if (result != PPHP_OK && !retained) pmodule_release(execution_module);
+    }
     return result;
 #else
     (void)length;
@@ -721,6 +838,7 @@ static int exec_pbc(pphp_state *state, const void *pbc, size_t length,
     pmodule module;
     pmodule *execution_module = &module;
     int result;
+    int retained;
     if (state == NULL) {
         pphp_free(owned_backing);
         return PPHP_E_RUNTIME;
@@ -731,7 +849,7 @@ static int exec_pbc(pphp_state *state, const void *pbc, size_t length,
     state->exit_requested = 0;
     state->exit_status = 0;
     state->chunk_name = "<pbc>";
-    state->repl_mode = 1;
+    state->repl_mode = 0;
     result = pphp_pbc_load(pbc, length, &module);
     if (result != PPHP_OK) {
         pphp_free(owned_backing);
@@ -743,16 +861,32 @@ static int exec_pbc(pphp_state *state, const void *pbc, size_t length,
     }
     module.backing = owned_backing;
     module.owns_backing = owned_backing != NULL;
-    if (!validate_repl_functions(state, &module)) {
+    retained = module_has_persistent_functions(&module);
+    if (retained && !validate_repl_functions(state, &module)) {
         pmodule_destroy(&module);
         return PPHP_E_RUNTIME;
     }
-    if (!retain_module(state, &module, &execution_module)) {
+    if (retained && !retain_module(state, &module, &execution_module)) {
         pmodule_destroy(&module);
-        pphp_runtime_error(state, 0U, "out of memory retaining PBC module");
+        pphp_runtime_error(state, 0U,
+                           "out of memory retaining function definitions");
+        return PPHP_E_RUNTIME;
+    }
+    if (!retained && !move_module(&module, &execution_module)) {
+        pmodule_destroy(&module);
+        pphp_runtime_error(state, 0U, "out of memory preparing PBC module");
         return PPHP_E_RUNTIME;
     }
     result = pphp_vm_execute(state, execution_module);
+    state->module = NULL;
+    if (result != PPHP_OK) {
+        pphp_remove_module_functions(state, execution_module);
+        if (retained) release_retained_module(state, execution_module);
+    } else if (!retained) {
+        pmodule_release(execution_module);
+    }
+    pphp_clear_user_classes(state);
+    if (result != PPHP_OK && !retained) pmodule_release(execution_module);
     return result;
 }
 

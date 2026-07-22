@@ -6,6 +6,7 @@
 #include "pclass.h"
 #include "closure.h"
 #include "gc.h"
+#include "pbc.h"
 
 #include <string.h>
 
@@ -60,14 +61,14 @@ int pv_is_truthy(pvalue value) {
         case PT_STRING: {
             const pstring *string = (const pstring *)value.as.gc;
             return string != NULL && string->length != 0U &&
-                   !(string->length == 1U && string->data[0] == '0');
+                   !(string->length == 1U && ps_data(string)[0] == '0');
         }
         case PT_ARRAY:
             return value.as.gc != NULL && ((const parray *)value.as.gc)->size != 0U;
         case PT_ROSTRING: {
             const pstring *string = (const pstring *)value.as.gc;
             return string != NULL && string->length != 0U &&
-                   !(string->length == 1U && string->data[0] == '0');
+                   !(string->length == 1U && ps_data(string)[0] == '0');
         }
         default:
             return value.as.gc != NULL;
@@ -76,11 +77,14 @@ int pv_is_truthy(pvalue value) {
 
 void pv_retain(pvalue value) {
     pheader *header;
-    if (value.type < PT_STRING || value.type == PT_ROSTRING ||
-        value.as.gc == NULL || value.as.gc->type == PT_ROSTRING) {
+    if (value.type < PT_STRING || value.as.gc == NULL) {
         return;
     }
     header = value.as.gc;
+    if (value.type == PT_ROSTRING || header->type == PT_ROSTRING) {
+        pmodule_retain(ps_owner((pstring *)header));
+        return;
+    }
     if (header->refcnt != UINT16_MAX) {
         header->refcnt++;
     }
@@ -88,11 +92,14 @@ void pv_retain(pvalue value) {
 
 void pv_release(pvalue value) {
     pheader *header;
-    if (value.type < PT_STRING || value.type == PT_ROSTRING ||
-        value.as.gc == NULL || value.as.gc->type == PT_ROSTRING) {
+    if (value.type < PT_STRING || value.as.gc == NULL) {
         return;
     }
     header = value.as.gc;
+    if (value.type == PT_ROSTRING || header->type == PT_ROSTRING) {
+        pmodule_release(ps_owner((pstring *)header));
+        return;
+    }
     if (header->refcnt == UINT16_MAX || header->refcnt == 0U) {
         return;
     }

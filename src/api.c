@@ -12,7 +12,7 @@ static int name_equal_ci(const pstring *name, const char *other) {
     size_t i;
     if (name->length != length) return 0;
     for (i = 0U; i < length; i++) {
-        unsigned char left = (unsigned char)name->data[i];
+        unsigned char left = (unsigned char)ps_data(name)[i];
         unsigned char right = (unsigned char)other[i];
         if (left >= 'A' && left <= 'Z') left = (unsigned char)(left + 32U);
         if (right >= 'A' && right <= 'Z') right = (unsigned char)(right + 32U);
@@ -26,7 +26,7 @@ static pnative_function *find_native(pphp_state *state,
     size_t i;
     if (state == NULL || name == NULL) return NULL;
     for (i = 0U; i < state->native_function_count; i++) {
-        if (name_equal_ci(name, state->native_functions[i].name->data)) {
+        if (name_equal_ci(name, ps_data(state->native_functions[i].name))) {
             return &state->native_functions[i];
         }
     }
@@ -147,7 +147,7 @@ int pphp_call_native_function(pphp_state *state, const pstring *name,
          count > (size_t)entry->maximum_arguments)) {
         pphp_runtime_error(state, 0U,
                            "%.*s() expects between %d and %d arguments",
-                           (int)name->length, name->data,
+                           (int)name->length, ps_data(name),
                            entry->minimum_arguments,
                            entry->maximum_arguments);
         return -1;
@@ -211,7 +211,7 @@ const char *pphp_arg_str(pphp_ctx *context, int index, size_t *length) {
     }
     context->temporaries[context->temporary_count++] = string;
     if (length != NULL) *length = string->length;
-    return string->data;
+    return ps_data(string);
 }
 
 pobject *pphp_this(pphp_ctx *context) {

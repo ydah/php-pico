@@ -59,8 +59,9 @@ void pphp_close(pphp_state *state);
 int pphp_exec_source(pphp_state *state, const char *source, size_t length,
                      const char *chunk_name);
 /*
- * The PBC image is executed in place and must remain readable until state is
- * closed. File-backed frontends transfer their buffers to the state instead.
+ * The PBC image is executed in place. The caller must keep it readable and
+ * unchanged until the state is closed; php-pico never writes to the image.
+ * File-backed frontends transfer ownership of their buffers to the state.
  */
 int pphp_exec_pbc(pphp_state *state, const void *pbc, size_t length);
 void pphp_tick(pphp_state *state);

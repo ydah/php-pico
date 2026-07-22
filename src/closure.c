@@ -2,6 +2,7 @@
 
 #include "pphp/pphp.h"
 #include "gc.h"
+#include "pclass.h"
 
 pclosure *pclosure_new(const pproto *proto, const pmodule *module,
                        struct pclass *called_scope,
@@ -21,6 +22,9 @@ pclosure *pclosure_new(const pproto *proto, const pmodule *module,
     closure->called_scope = called_scope;
     closure->called_class = called_class;
     closure->capture_count = (uint8_t)capture_count;
+    pmodule_retain((pmodule *)module);
+    pclass_retain_runtime(called_scope);
+    pclass_retain_runtime(called_class);
     for (i = 0U; i < capture_count; i++) {
         closure->captures[i] = captures[i];
         pv_retain(captures[i]);
@@ -35,5 +39,8 @@ void pclosure_destroy(pclosure *closure) {
     for (i = 0U; i < closure->capture_count; i++) {
         pv_release(closure->captures[i]);
     }
+    pmodule_release((pmodule *)closure->module);
+    pclass_release_runtime(closure->called_scope);
+    pclass_release_runtime(closure->called_class);
     pphp_free(closure);
 }

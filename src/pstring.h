@@ -6,6 +6,8 @@
 
 #include "value.h"
 
+struct pmodule;
+
 enum { PSTRING_INTERNED = 1U << 0 };
 
 typedef struct pstring {
@@ -13,8 +15,26 @@ typedef struct pstring {
     uint16_t length;
     uint16_t reserved;
     uint32_t hash;
-    const char *data;
 } pstring;
+
+typedef struct pro_string {
+    pstring base;
+    const char *data;
+    struct pmodule *owner;
+} pro_string;
+
+static inline const char *ps_data(const pstring *string) {
+    if (string == NULL) return NULL;
+    if (string->header.type == PT_ROSTRING) {
+        return ((const pro_string *)string)->data;
+    }
+    return (const char *)(string + 1);
+}
+
+static inline struct pmodule *ps_owner(const pstring *string) {
+    return string != NULL && string->header.type == PT_ROSTRING
+               ? ((const pro_string *)string)->owner : NULL;
+}
 
 uint32_t ps_hash_bytes(const char *bytes, size_t length);
 pstring *ps_new(const char *bytes, size_t length);

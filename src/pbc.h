@@ -43,12 +43,14 @@ typedef struct pmodule {
     pproto **protos;
     size_t count;
     size_t capacity;
-    pstring *ro_strings;
+    pro_string *ro_strings;
     size_t ro_string_count;
     const uint8_t *image;
     size_t image_length;
     void *backing;
+    uint16_t refcnt;
     uint8_t owns_backing;
+    uint8_t heap_allocated;
 } pmodule;
 
 pproto *pproto_new(const char *name, size_t length);
@@ -65,6 +67,8 @@ int pproto_add_catch(pproto *proto, pcatch entry);
 
 int pmodule_init(pmodule *module);
 void pmodule_destroy(pmodule *module);
+void pmodule_retain(pmodule *module);
+void pmodule_release(pmodule *module);
 int pmodule_add(pmodule *module, pproto *proto);
 const pproto *pmodule_find(const pmodule *module, const pstring *name);
 

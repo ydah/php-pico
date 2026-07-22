@@ -106,7 +106,7 @@ static int token_equal(pc_token token, const pstring *string) {
     if (string->length != token.length) return 0;
     for (i = 0U; i < token.length; i++) {
         unsigned char left = (unsigned char)token.start[i];
-        unsigned char right = (unsigned char)string->data[i];
+        unsigned char right = (unsigned char)ps_data(string)[i];
         if (left >= 'A' && left <= 'Z') left = (unsigned char)(left + ('a' - 'A'));
         if (right >= 'A' && right <= 'Z') right = (unsigned char)(right + ('a' - 'A'));
         if (left != right) return 0;
@@ -3076,9 +3076,9 @@ static int method_proto_index(const pmodule *module, pc_token class_name,
     for (i = 1U; i < module->count && i <= UINT16_MAX; i++) {
         const pstring *name = module->protos[i]->name;
         if (name->length == length &&
-            memcmp(name->data, class_name.start, class_name.length) == 0 &&
-            memcmp(name->data + class_name.length, "::", 2U) == 0 &&
-            memcmp(name->data + class_name.length + 2U, method_name.start,
+            memcmp(ps_data(name), class_name.start, class_name.length) == 0 &&
+            memcmp(ps_data(name) + class_name.length, "::", 2U) == 0 &&
+            memcmp(ps_data(name) + class_name.length + 2U, method_name.start,
                    method_name.length) == 0) {
             *index = (uint16_t)i;
             return 1;

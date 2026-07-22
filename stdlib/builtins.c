@@ -88,7 +88,7 @@ static int call_reflection_builtin(pphp_state *state, const pstring *name,
         if (count != 1U || arguments[0].type != PT_STRING) {
             pphp_runtime_error(state, 0U,
                                "%.*s() expects one string name",
-                               (int)name->length, name->data);
+                               (int)name->length, ps_data(name));
             return -1;
         }
         found = pa_get(state->constants, arguments[0], &value);
@@ -100,7 +100,7 @@ static int call_reflection_builtin(pphp_state *state, const pstring *name,
         if (!found) {
             pphp_runtime_error(state, 0U, "undefined constant %.*s",
                                (int)((const pstring *)arguments[0].as.gc)->length,
-                               ((const pstring *)arguments[0].as.gc)->data);
+                               ps_data((const pstring *)arguments[0].as.gc));
             return -1;
         }
         *result = value;
@@ -126,7 +126,7 @@ static int call_reflection_builtin(pphp_state *state, const pstring *name,
             return -1;
         }
         subject = (const pstring *)arguments[0].as.gc;
-        *result = pv_bool(pphp_find_class(state, subject->data,
+        *result = pv_bool(pphp_find_class(state, ps_data(subject),
                                           subject->length) != NULL);
         return 1;
     }
@@ -142,11 +142,11 @@ static int call_reflection_builtin(pphp_state *state, const pstring *name,
             class_entry = ((pobject *)arguments[0].as.gc)->class_entry;
         } else if (arguments[0].type == PT_STRING) {
             subject = (const pstring *)arguments[0].as.gc;
-            class_entry = pphp_find_class(state, subject->data, subject->length);
+            class_entry = pphp_find_class(state, ps_data(subject), subject->length);
         }
         method_name = (const pstring *)arguments[1].as.gc;
         *result = pv_bool(class_entry != NULL &&
-                          pclass_find_method(class_entry, method_name->data,
+                          pclass_find_method(class_entry, ps_data(method_name),
                                              method_name->length) != NULL);
         return 1;
     }
@@ -158,7 +158,7 @@ static int call_reflection_builtin(pphp_state *state, const pstring *name,
             return -1;
         }
         class_name = ((pobject *)arguments[0].as.gc)->class_entry->name;
-        copy = ps_new(class_name->data, class_name->length);
+        copy = ps_new(ps_data(class_name), class_name->length);
         if (copy == NULL) {
             pphp_runtime_error(state, 0U, "out of memory returning class name");
             return -1;
@@ -217,7 +217,7 @@ static void dump_value_depth(pphp_state *state, pvalue value, unsigned depth) {
             pphp_output(state, "string(", 7U);
             output_integer(state, (pphp_int)string->length);
             pphp_output(state, ") \"", 3U);
-            pphp_output(state, string->data, string->length);
+            pphp_output(state, ps_data(string), string->length);
             pphp_output(state, "\"\n", 2U);
             break;
         }
@@ -239,7 +239,7 @@ static void dump_value_depth(pphp_state *state, pvalue value, unsigned depth) {
                 } else {
                     const pstring *string = (const pstring *)key.as.gc;
                     pphp_output(state, "\"", 1U);
-                    pphp_output(state, string->data, string->length);
+                    pphp_output(state, ps_data(string), string->length);
                     pphp_output(state, "\"", 1U);
                 }
                 pphp_output(state, "]=>\n", 4U);
@@ -282,21 +282,21 @@ static int integer_from_string(const pstring *string, unsigned base,
     uint64_t limit;
     int digits = 0;
     if (base < 2U || base > 36U) return 0;
-    while (i < string->length && (string->data[i] == ' ' ||
-           string->data[i] == '\t' || string->data[i] == '\n' ||
-           string->data[i] == '\r')) i++;
-    if (i < string->length && (string->data[i] == '+' || string->data[i] == '-')) {
-        sign = string->data[i++] == '-' ? -1 : 1;
+    while (i < string->length && (ps_data(string)[i] == ' ' ||
+           ps_data(string)[i] == '\t' || ps_data(string)[i] == '\n' ||
+           ps_data(string)[i] == '\r')) i++;
+    if (i < string->length && (ps_data(string)[i] == '+' || ps_data(string)[i] == '-')) {
+        sign = ps_data(string)[i++] == '-' ? -1 : 1;
     }
     limit = (uint64_t)PPHP_INT_MAXIMUM + (sign < 0 ? 1U : 0U);
-    if (i + 1U < string->length && string->data[i] == '0') {
-        char prefix = string->data[i + 1U];
+    if (i + 1U < string->length && ps_data(string)[i] == '0') {
+        char prefix = ps_data(string)[i + 1U];
         if ((base == 16U && (prefix == 'x' || prefix == 'X')) ||
             (base == 2U && (prefix == 'b' || prefix == 'B'))) i += 2U;
     }
     while (i < string->length) {
         unsigned digit;
-        unsigned char c = (unsigned char)string->data[i++];
+        unsigned char c = (unsigned char)ps_data(string)[i++];
         if (c >= '0' && c <= '9') digit = (unsigned)(c - '0');
         else if (c >= 'a' && c <= 'z') digit = (unsigned)(c - 'a') + 10U;
         else if (c >= 'A' && c <= 'Z') digit = (unsigned)(c - 'A') + 10U;
@@ -467,13 +467,13 @@ static int call_type_builtin(pphp_state *state, const pstring *name,
                 class_entry = ((pobject *)target.as.gc)->class_entry;
             } else if (matches && target.type == PT_STRING) {
                 pstring *class_name = (pstring *)target.as.gc;
-                class_entry = pphp_find_class(state, class_name->data,
+                class_entry = pphp_find_class(state, ps_data(class_name),
                                                class_name->length);
             }
             if (class_entry != NULL) {
                 pstring *method_name = (pstring *)method.as.gc;
                 method_entry = pclass_find_method(class_entry,
-                                                  method_name->data,
+                                                  ps_data(method_name),
                                                   method_name->length);
             }
             matches = method_entry != NULL &&

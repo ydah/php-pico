@@ -13,7 +13,7 @@ static int name_is(const pstring *name, const char *expected) {
 
 static int fail_arguments(pphp_state *state, const pstring *name) {
     pphp_runtime_error(state, 0U, "%.*s() received invalid arguments",
-                       (int)name->length, name->data);
+                       (int)name->length, ps_data(name));
     return -1;
 }
 

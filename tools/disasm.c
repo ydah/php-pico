@@ -98,7 +98,8 @@ static void print_constant(FILE *stream, const pproto *proto, uint16_t index) {
 #endif
         case PT_STRING: {
             const pstring *string = (const pstring *)proto->constants[index].as.gc;
-            fprintf(stream, " ; \"%.*s\"", (int)string->length, string->data);
+            fprintf(stream, " ; \"%.*s\"", (int)string->length,
+                    ps_data(string));
             break;
         }
         default:
@@ -109,7 +110,8 @@ static void print_constant(FILE *stream, const pproto *proto, uint16_t index) {
 static int disassemble_proto(FILE *stream, const pproto *proto, size_t index) {
     size_t pc = 0U;
     fprintf(stream, "proto #%zu %.*s params=%u required=%u locals=%u max_stack=%u\n",
-            index, (int)proto->name->length, proto->name->data, proto->n_params,
+            index, (int)proto->name->length, ps_data(proto->name),
+            proto->n_params,
             proto->n_required, proto->n_locals, proto->max_stack);
     while (pc < proto->code_length) {
         size_t instruction = pc;
@@ -291,7 +293,8 @@ static int disassemble_proto(FILE *stream, const pproto *proto, size_t index) {
                        proto->constants[entry->class_constant].type == PT_STRING) {
                 const pstring *name = (const pstring *)
                     proto->constants[entry->class_constant].as.gc;
-                fprintf(stream, "catch %.*s", (int)name->length, name->data);
+                fprintf(stream, "catch %.*s", (int)name->length,
+                        ps_data(name));
             } else {
                 fputs("catch <invalid>", stream);
             }

@@ -32,7 +32,7 @@ else
 LDLIBS :=
 endif
 
-CORE_SOURCES := src/alloc.c src/value.c src/pstring.c src/symbol.c src/parray.c src/resource.c src/pclass.c src/closure.c
+CORE_SOURCES := src/alloc.c src/value.c src/pstring.c src/symbol.c src/parray.c src/resource.c src/module.c src/pclass.c src/closure.c
 COMPILER_SOURCES := compiler/lexer.c compiler/ast.c compiler/parser.c
 FLOAT_SOURCES := $(if $(filter 1,$(PPHP_ENABLE_FLOAT)),src/float_format.c)
 RUNTIME_COMMON_SOURCES := $(CORE_SOURCES) src/api.c src/exception.c src/gc.c src/value_ops.c src/pbc.c src/state.c src/vm.c stdlib/builtins.c stdlib/strings.c stdlib/arrays.c stdlib/formatting.c stdlib/json.c stdlib/system.c stdlib/files.c pgems/pgems.c fs/fs_posix.c hal/posix/hal_posix.c

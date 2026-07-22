@@ -31,7 +31,6 @@ pstring *ps_new(const char *bytes, size_t length) {
     string->reserved = 0U;
     string->hash = ps_hash_bytes(bytes == NULL ? "" : bytes, length);
     storage = (char *)(string + 1);
-    string->data = storage;
     if (length != 0U) {
         memcpy(storage, bytes, length);
     }
@@ -54,14 +53,14 @@ int ps_equal(const pstring *left, const pstring *right) {
         left->hash != right->hash) {
         return 0;
     }
-    return memcmp(left->data, right->data, left->length) == 0;
+    return memcmp(ps_data(left), ps_data(right), left->length) == 0;
 }
 
 int ps_equal_bytes(const pstring *string, const char *bytes, size_t length) {
     if (string == NULL || bytes == NULL || string->length != length) {
         return 0;
     }
-    return memcmp(string->data, bytes, length) == 0;
+    return memcmp(ps_data(string), bytes, length) == 0;
 }
 
 void ps_destroy(pstring *string) {

@@ -20,7 +20,7 @@ static int name_is(const pstring *name, const char *expected) {
 
 static int invalid_arguments(pphp_state *state, const pstring *name) {
     pphp_runtime_error(state, 0U, "%.*s() received invalid arguments",
-                       (int)name->length, name->data);
+                       (int)name->length, ps_data(name));
     return -1;
 }
 
@@ -28,7 +28,7 @@ static const char *path_argument(const pvalue *arguments, size_t count,
                                  size_t index) {
     if (index >= count || arguments[index].type != PT_STRING ||
         arguments[index].as.gc == NULL) return NULL;
-    return ((const pstring *)arguments[index].as.gc)->data;
+    return ps_data((const pstring *)arguments[index].as.gc);
 }
 
 static pfile_resource *file_argument(pvalue value) {
@@ -124,7 +124,7 @@ static int call_whole_file(pphp_state *state, const pstring *name,
             *result = pv_bool(0);
             return 1;
         }
-        written = pphp_fs_write(file, data->data, data->length);
+        written = pphp_fs_write(file, ps_data(data), data->length);
         if (!pphp_fs_close(file) || written != (int64_t)data->length) {
             ps_destroy(data);
             *result = pv_bool(0);
@@ -282,7 +282,7 @@ static int call_stream(pphp_state *state, const pstring *name,
             if (count != 2U) return invalid_arguments(state, name);
             data = pv_to_string(arguments[1]);
             if (data == NULL) return invalid_arguments(state, name);
-            written = pphp_fs_write(resource->file, data->data, data->length);
+            written = pphp_fs_write(resource->file, ps_data(data), data->length);
             ps_destroy(data);
             *result = written < 0 ? pv_bool(0) : pv_int((pphp_int)written);
             return 1;
@@ -398,8 +398,9 @@ static int call_scandir(pphp_state *state, const pstring *name,
             pvalue current = values->entries[i].value;
             size_t insert = i;
             while (insert > 0U &&
-                   strcmp(((pstring *)values->entries[insert - 1U].value.as.gc)->data,
-                          ((pstring *)current.as.gc)->data) > 0) {
+                   strcmp(ps_data((pstring *)values->entries[
+                                      insert - 1U].value.as.gc),
+                          ps_data((pstring *)current.as.gc)) > 0) {
                 values->entries[insert].value =
                     values->entries[insert - 1U].value;
                 insert--;

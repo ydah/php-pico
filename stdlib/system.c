@@ -26,7 +26,7 @@ static int name_is(const pstring *name, const char *expected) {
 
 static int invalid_arguments(pphp_state *state, const pstring *name) {
     pphp_runtime_error(state, 0U, "%.*s() received invalid arguments",
-                       (int)name->length, name->data);
+                       (int)name->length, ps_data(name));
     return -1;
 }
 
@@ -186,9 +186,9 @@ static int call_date(pphp_state *state, const pstring *name,
         return -1;
     }
     for (i = 0U; i < format->length; i++) {
-        char specifier = format->data[i];
+        char specifier = ps_data(format)[i];
         if (specifier == '\\' && i + 1U < format->length) {
-            specifier = format->data[++i];
+            specifier = ps_data(format)[++i];
             if (!append_bytes(output, capacity, &output_length, &specifier, 1U))
                 goto too_long;
         } else if (specifier == 'Y') {
@@ -378,7 +378,7 @@ static int call_system(pphp_state *state, const pstring *name,
         if (count != 1U) return invalid_arguments(state, name);
         message = pv_to_string(arguments[0]);
         if (message == NULL) return invalid_arguments(state, name);
-        hal_console_write(message->data, message->length);
+        hal_console_write(ps_data(message), message->length);
         hal_console_write("\n", 1U);
         ps_destroy(message);
         *result = pv_bool(1);
@@ -392,7 +392,7 @@ static int call_system(pphp_state *state, const pstring *name,
         } else if (count == 1U) {
             pstring *message = pv_to_string(arguments[0]);
             if (message == NULL) return invalid_arguments(state, name);
-            pphp_output(state, message->data, message->length);
+            pphp_output(state, ps_data(message), message->length);
             ps_destroy(message);
         }
         state->exit_requested = 1;

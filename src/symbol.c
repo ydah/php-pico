@@ -34,7 +34,7 @@ static int resize_table(psymbol_table *table, size_t capacity) {
     for (i = 0U; i < table->capacity; i++) {
         pstring *string = table->entries[i];
         if (string != NULL) {
-            size_t slot = find_slot(entries, capacity, string->data,
+            size_t slot = find_slot(entries, capacity, ps_data(string),
                                     string->length, string->hash);
             entries[slot] = string;
         }
@@ -105,4 +105,3 @@ pstring *psymbol_intern(psymbol_table *table, const char *bytes, size_t length) 
     table->count++;
     return string;
 }
-

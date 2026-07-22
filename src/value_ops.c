@@ -377,7 +377,7 @@ int pv_to_numeric(pvalue value, int require_complete, pphp_numeric *numeric) {
             return 1;
         case PT_STRING: {
             const pstring *string = (const pstring *)value.as.gc;
-            return string_numeric(string->data, string->length,
+            return string_numeric(ps_data(string), string->length,
                                   require_complete, numeric);
         }
         default:
@@ -428,7 +428,7 @@ pstring *pv_to_string(pvalue value) {
             return length < 0 ? NULL : ps_new(buffer, (size_t)length);
 #endif
         case PT_STRING:
-            return ps_new(((const pstring *)value.as.gc)->data,
+            return ps_new(ps_data((const pstring *)value.as.gc),
                           ((const pstring *)value.as.gc)->length);
         case PT_ARRAY:
             return ps_new("Array", 5U);
@@ -477,8 +477,8 @@ int pv_binary_operation(pv_operation operation, pvalue left, pvalue right,
             *error = "out of memory during string concatenation";
             return 0;
         }
-        memcpy(bytes, left_string->data, left_string->length);
-        memcpy(bytes + left_string->length, right_string->data, right_string->length);
+        memcpy(bytes, ps_data(left_string), left_string->length);
+        memcpy(bytes + left_string->length, ps_data(right_string), right_string->length);
         joined = ps_new(bytes, (size_t)left_string->length + right_string->length);
         pphp_free(bytes);
         ps_destroy(left_string);
@@ -800,7 +800,7 @@ int pv_compare(pvalue left, pvalue right, int strict, int *result,
         const pstring *ls = (const pstring *)left.as.gc;
         const pstring *rs = (const pstring *)right.as.gc;
         size_t shortest = ls->length < rs->length ? ls->length : rs->length;
-        int compared = memcmp(ls->data, rs->data, shortest);
+        int compared = memcmp(ps_data(ls), ps_data(rs), shortest);
         *result = compared != 0 ? (compared > 0 ? 1 : -1)
                                 : ((ls->length > rs->length) - (ls->length < rs->length));
         return 1;

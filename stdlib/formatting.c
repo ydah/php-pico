@@ -197,45 +197,52 @@ static int append_formatted(pphp_state *state, const pstring *format,
         pphp_numeric numeric;
         pphp_int integer_value = 0;
         int integer_conversion;
-        if (format->data[position] != '%') {
-            while (position < format->length && format->data[position] != '%') {
+        if (ps_data(format)[position] != '%') {
+            while (position < format->length &&
+                   ps_data(format)[position] != '%') {
                 position++;
             }
-            if (!buffer_append(buffer, format->data + start, position - start)) {
+            if (!buffer_append(buffer, ps_data(format) + start,
+                               position - start)) {
                 return 0;
             }
             continue;
         }
         position++;
-        if (position < format->length && format->data[position] == '%') {
+        if (position < format->length && ps_data(format)[position] == '%') {
             if (!buffer_character(buffer, '%')) return 0;
             position++;
             continue;
         }
         while (position < format->length &&
-               (format->data[position] == '-' || format->data[position] == '0')) {
-            if (format->data[position] == '-') left_align = 1;
+               (ps_data(format)[position] == '-' ||
+                ps_data(format)[position] == '0')) {
+            if (ps_data(format)[position] == '-') left_align = 1;
             else zero_pad = 1;
             position++;
         }
-        while (position < format->length && format->data[position] >= '0' &&
-               format->data[position] <= '9') {
-            width = width * 10U + (unsigned)(format->data[position] - '0');
+        while (position < format->length &&
+               ps_data(format)[position] >= '0' &&
+               ps_data(format)[position] <= '9') {
+            width = width * 10U +
+                    (unsigned)(ps_data(format)[position] - '0');
             if (width > PPHP_STR_MAX) return 0;
             position++;
         }
-        if (position < format->length && format->data[position] == '.') {
+        if (position < format->length && ps_data(format)[position] == '.') {
             precision = 0;
             position++;
-            while (position < format->length && format->data[position] >= '0' &&
-                   format->data[position] <= '9') {
-                precision = precision * 10 + (format->data[position] - '0');
+            while (position < format->length &&
+                   ps_data(format)[position] >= '0' &&
+                   ps_data(format)[position] <= '9') {
+                precision = precision * 10 +
+                            (ps_data(format)[position] - '0');
                 if (precision > 64) return 0;
                 position++;
             }
         }
         if (position >= format->length || argument >= count) return 0;
-        conversion = format->data[position++];
+        conversion = ps_data(format)[position++];
         if (conversion == 's') {
             pstring *string = pv_to_string(arguments[argument++]);
             size_t output_length;
@@ -251,7 +258,7 @@ static int append_formatted(pphp_state *state, const pstring *format,
                     return 0;
                 }
             }
-            if (!buffer_append(buffer, string->data, output_length)) {
+            if (!buffer_append(buffer, ps_data(string), output_length)) {
                 ps_destroy(string);
                 return 0;
             }
@@ -364,7 +371,7 @@ static int append_print_value(format_buffer *buffer, pvalue value,
 #endif
         case PT_STRING: {
             const pstring *string = (const pstring *)value.as.gc;
-            return buffer_append(buffer, string->data, string->length);
+            return buffer_append(buffer, ps_data(string), string->length);
         }
         case PT_ARRAY: {
             const parray *array = (const parray *)value.as.gc;
@@ -392,7 +399,8 @@ static int append_print_value(format_buffer *buffer, pvalue value,
                     }
                 } else {
                     const pstring *string = (const pstring *)key.as.gc;
-                    if (!buffer_append(buffer, string->data, string->length)) return 0;
+                    if (!buffer_append(buffer, ps_data(string),
+                                       string->length)) return 0;
                 }
                 if (!buffer_append(buffer, "] => ", 5U) ||
                     !append_print_value(buffer, item, depth + 1U) ||
@@ -422,7 +430,7 @@ int pphp_call_formatting_builtin(pphp_state *state, const pstring *name,
         pstring *string;
         if (count == 0U) {
             pphp_runtime_error(state, 0U, "%.*s() expects a format string",
-                               (int)name->length, name->data);
+                               (int)name->length, ps_data(name));
             return -1;
         }
         format = pv_to_string(arguments[0]);

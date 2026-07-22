@@ -168,7 +168,7 @@ void pphp_exception_capture_trace(pphp_state *state, pobject *object) {
                                state->chunk_name == NULL ? "<source>" : state->chunk_name,
                                (unsigned long)frame->line,
                                (int)frame->proto->name->length,
-                               frame->proto->name->data);
+                               ps_data(frame->proto->name));
         if (written < 0) break;
         if ((size_t)written >= sizeof(buffer) - length) {
             length = sizeof(buffer) - 1U;
