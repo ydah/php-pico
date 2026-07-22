@@ -64,11 +64,13 @@ static int wait_for_recovery(void) {
 
 static void auto_start(void) {
     int result = PPHP_OK;
+    if (pphp_fs_exists("/home/boot.pbc")) {
+        result = pphp_p2sh_run_file(runtime, "/home/boot.pbc");
 #if PPHP_ENABLE_COMPILER
-    if (pphp_fs_exists("/home/boot.php")) {
+    } else if (pphp_fs_exists("/home/boot.php")) {
         result = pphp_p2sh_run_file(runtime, "/home/boot.php");
-    }
 #endif
+    }
     if (result != PPHP_OK) return;
     if (pphp_fs_exists("/home/app.pbc")) {
         (void)pphp_p2sh_run_file(runtime, "/home/app.pbc");

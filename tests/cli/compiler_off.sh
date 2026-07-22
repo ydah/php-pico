@@ -32,12 +32,48 @@ fi
 test ! -s "$temporary/no_fallback.out"
 grep -q 'required file .* could not be opened' "$temporary/no_fallback.err"
 
+printf '%s\n' "<?php require '$temporary/fallback.php'; echo 'unreachable';" \
+    > "$temporary/source_include.php"
+"$compiler" -c "$temporary/source_include.php" \
+    -o "$temporary/source_include.pbc"
+if "$runtime" "$temporary/source_include.pbc" \
+    > "$temporary/source_include.out" 2> "$temporary/source_include.err"; then
+    echo "compiler-off runtime unexpectedly compiled an explicit PHP include" >&2
+    exit 1
+fi
+test ! -s "$temporary/source_include.out"
+grep -q 'source compiler is disabled; include requires PBC' \
+    "$temporary/source_include.err"
+
 if "$runtime" "$temporary/app.php" > /dev/null 2> "$temporary/source.err"; then
     echo "compiler-off runtime unexpectedly executed PHP source" >&2
     exit 1
 fi
 grep -q 'source compiler is disabled; execute PBC instead' \
     "$temporary/source.err"
+
+if "$runtime" --shell > /dev/null 2> "$temporary/shell.err"; then
+    echo "compiler-off runtime unexpectedly started P2Sh" >&2
+    exit 1
+fi
+grep -q 'shell is unavailable because the source compiler is disabled' \
+    "$temporary/shell.err"
+
+if "$runtime" --tokens "$temporary/app.php" \
+    > /dev/null 2> "$temporary/tokens.err"; then
+    echo "compiler-off runtime unexpectedly tokenized PHP source" >&2
+    exit 1
+fi
+grep -q 'source inspection is unavailable because the source compiler is disabled' \
+    "$temporary/tokens.err"
+
+if "$runtime" --ast "$temporary/app.php" \
+    > /dev/null 2> "$temporary/ast.err"; then
+    echo "compiler-off runtime unexpectedly parsed a PHP AST" >&2
+    exit 1
+fi
+grep -q 'source inspection is unavailable because the source compiler is disabled' \
+    "$temporary/ast.err"
 
 if "$runtime" -r 'echo 1;' > /dev/null 2> "$temporary/inline.err"; then
     echo "compiler-off runtime unexpectedly accepted inline PHP" >&2

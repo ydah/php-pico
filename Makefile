@@ -1,6 +1,15 @@
 CC ?= cc
-CPPFLAGS := -Iinclude -Isrc -Icompiler -Istdlib -Itools -Ishell -Ipgems -DPPHP_HOST=1
-PBC_CPPFLAGS := $(filter-out -Icompiler -Ishell,$(CPPFLAGS)) -DPPHP_ENABLE_COMPILER=0
+PPHP_ENABLE_COMPILER ?= 1
+BASE_CPPFLAGS := -Iinclude -Isrc -Istdlib -Itools -Ipgems -DPPHP_HOST=1
+COMPILER_CPPFLAGS := $(BASE_CPPFLAGS) -Icompiler -Ishell -DPPHP_ENABLE_COMPILER=1
+PBC_CPPFLAGS := $(BASE_CPPFLAGS) -DPPHP_ENABLE_COMPILER=0
+ifeq ($(PPHP_ENABLE_COMPILER),1)
+CPPFLAGS := $(COMPILER_CPPFLAGS)
+else ifeq ($(PPHP_ENABLE_COMPILER),0)
+CPPFLAGS := $(PBC_CPPFLAGS)
+else
+$(error PPHP_ENABLE_COMPILER must be 0 or 1)
+endif
 CFLAGS := -std=c99 -Wall -Wextra -Werror -Wpedantic -Wconversion -Wshadow -O2
 LDFLAGS :=
 LDLIBS := -lm
@@ -8,8 +17,13 @@ LDLIBS := -lm
 CORE_SOURCES := src/alloc.c src/value.c src/pstring.c src/symbol.c src/parray.c src/resource.c src/pclass.c src/closure.c
 COMPILER_SOURCES := compiler/lexer.c compiler/ast.c compiler/parser.c
 RUNTIME_SOURCES := $(CORE_SOURCES) src/api.c src/exception.c src/gc.c src/value_ops.c src/pbc.c src/state.c src/vm.c stdlib/builtins.c stdlib/strings.c stdlib/arrays.c stdlib/formatting.c stdlib/json.c stdlib/system.c stdlib/files.c pgems/pgems.c fs/fs_posix.c hal/posix/hal_posix.c
-HOST_SOURCES := $(RUNTIME_SOURCES) $(COMPILER_SOURCES) compiler/codegen.c tools/disasm.c shell/p2sh.c shell/p2sh_device.c ports/host/main.c
+COMPILER_HOST_SOURCES := $(RUNTIME_SOURCES) $(COMPILER_SOURCES) compiler/codegen.c tools/disasm.c shell/p2sh.c shell/p2sh_device.c ports/host/main.c
 PBC_HOST_SOURCES := $(RUNTIME_SOURCES) tools/disasm.c ports/host/main.c
+ifeq ($(PPHP_ENABLE_COMPILER),1)
+HOST_SOURCES := $(COMPILER_HOST_SOURCES)
+else
+HOST_SOURCES := $(PBC_HOST_SOURCES)
+endif
 COMPILER_OFF_TEST_SOURCES := $(RUNTIME_SOURCES) tests/unit/test_compiler_off.c
 TEST_SOURCES := $(CORE_SOURCES) src/gc.c tests/unit/test_core.c
 LEXER_TEST_SOURCES := compiler/lexer.c tests/unit/test_lexer.c
@@ -17,7 +31,9 @@ PARSER_TEST_SOURCES := src/alloc.c compiler/lexer.c compiler/ast.c compiler/pars
 VM_TEST_SOURCES := $(RUNTIME_SOURCES) $(COMPILER_SOURCES) compiler/codegen.c tests/unit/test_vm.c
 HOST_BINARY := build/host/php-pico
 PBC_HOST_BINARY := build/host/php-pico-pbc
+CONFIGURED_PBC_HOST_BINARY := build/host/php-pico-config-off
 COMPILER_OFF_TEST_BINARY := build/host/test_compiler_off
+COMPILER_OFF_DEVICE_OBJECT := build/host/p2sh_device_compiler_off.o
 RP2040_HOST_BINARY := build/host/php-pico-rp2040
 TEST_BINARY := build/host/test_core
 LEXER_TEST_BINARY := build/host/test_lexer
@@ -29,7 +45,9 @@ ASAN_PARSER_BINARY := build/host/test_parser_asan
 ASAN_VM_BINARY := build/host/test_vm_asan
 ASAN_LEAKS := $(if $(filter Darwin,$(shell uname -s)),0,1)
 
-.PHONY: all host host-pbc host-rp2040 rp2040 test test-unit test-compiler-off test-phpt test-target test-asan test-diff bench size clean
+.PHONY: all FORCE host host-pbc host-rp2040 rp2040 test test-unit test-compiler-off test-phpt test-target test-asan test-diff bench size clean
+
+FORCE:
 
 all: host
 
@@ -43,7 +61,7 @@ rp2040:
 	cmake -S ports/rp2040 -B build/rp2040 -DPICO_BOARD=pico
 	cmake --build build/rp2040 --parallel 2
 
-$(HOST_BINARY): $(HOST_SOURCES)
+$(HOST_BINARY): FORCE $(HOST_SOURCES)
 	@mkdir -p $(@D)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(HOST_SOURCES) $(LDFLAGS) $(LDLIBS) -o $@
 
@@ -52,10 +70,17 @@ $(PBC_HOST_BINARY): $(PBC_HOST_SOURCES)
 	$(CC) $(PBC_CPPFLAGS) $(CFLAGS) \
 		$(PBC_HOST_SOURCES) $(LDFLAGS) $(LDLIBS) -o $@
 
+$(CONFIGURED_PBC_HOST_BINARY): FORCE
+	$(MAKE) PPHP_ENABLE_COMPILER=0 HOST_BINARY=$@ host
+
 $(COMPILER_OFF_TEST_BINARY): $(COMPILER_OFF_TEST_SOURCES)
 	@mkdir -p $(@D)
 	$(CC) $(PBC_CPPFLAGS) $(CFLAGS) \
 		$(COMPILER_OFF_TEST_SOURCES) $(LDFLAGS) $(LDLIBS) -o $@
+
+$(COMPILER_OFF_DEVICE_OBJECT): shell/p2sh_device.c
+	@mkdir -p $(@D)
+	$(CC) $(PBC_CPPFLAGS) $(CFLAGS) -c $< -o $@
 
 $(RP2040_HOST_BINARY): $(HOST_SOURCES)
 	@mkdir -p $(@D)
@@ -86,9 +111,9 @@ test-unit: $(TEST_BINARY) $(LEXER_TEST_BINARY) $(PARSER_TEST_BINARY) $(VM_TEST_B
 	$(HOST_BINARY) --version
 	sh tests/cli/smoke.sh $(HOST_BINARY)
 
-test-compiler-off: $(HOST_BINARY) $(PBC_HOST_BINARY) $(COMPILER_OFF_TEST_BINARY)
+test-compiler-off: $(HOST_BINARY) $(CONFIGURED_PBC_HOST_BINARY) $(COMPILER_OFF_TEST_BINARY) $(COMPILER_OFF_DEVICE_OBJECT)
 	$(COMPILER_OFF_TEST_BINARY)
-	sh tests/cli/compiler_off.sh $(HOST_BINARY) $(PBC_HOST_BINARY)
+	sh tests/cli/compiler_off.sh $(HOST_BINARY) $(CONFIGURED_PBC_HOST_BINARY)
 
 test-phpt: $(HOST_BINARY)
 	sh tools/phpt_run.sh --binary $(HOST_BINARY) tests/phpt
