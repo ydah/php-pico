@@ -59,6 +59,8 @@ TEST(honors_dynamic_width_precision_and_zero_precision) {
     ASSERT_EQ(12, pphp_snprintf(buffer, sizeof(buffer), "[%*d][%.0u]",
                                 -8, 12, 0U));
     ASSERT_STR("[12      ][]", buffer);
+    ASSERT_EQ(4, pphp_snprintf(buffer, sizeof(buffer), "%i|%q", 3));
+    ASSERT_STR("3|%q", buffer);
 }
 
 TEST(truncates_without_changing_logical_length) {

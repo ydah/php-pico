@@ -1,5 +1,4 @@
 #include <stdarg.h>
-#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <limits.h>
@@ -13,8 +12,6 @@ typedef struct pphp_format_output {
 } pphp_format_output;
 
 int stdio_putchar(int byte);
-int stdio_put_string(const char *string, int length, bool newline,
-                     bool translate_crlf);
 
 static void format_byte(pphp_format_output *output, char byte) {
     if (output->console) {
@@ -27,29 +24,20 @@ static void format_byte(pphp_format_output *output, char byte) {
 }
 
 static void format_repeat(pphp_format_output *output, char byte, size_t count) {
-    if (output->console) {
-        while (count-- != 0U) format_byte(output, byte);
-        return;
-    }
-    size_t available = output->capacity > output->length + 1U
-        ? output->capacity - output->length - 1U : 0U;
-    size_t copied = count < available ? count : available;
-    if (copied != 0U) memset(output->buffer + output->length, byte, copied);
-    output->length += count;
+    while (count-- != 0U) format_byte(output, byte);
 }
 
 static void format_bytes(pphp_format_output *output, const char *bytes,
                          size_t length) {
-    if (output->console) {
-        (void)stdio_put_string(bytes, (int)length, false, true);
-        output->length += length;
-        return;
-    }
-    size_t available = output->capacity > output->length + 1U
-        ? output->capacity - output->length - 1U : 0U;
-    size_t copied = length < available ? length : available;
-    if (copied != 0U) memcpy(output->buffer + output->length, bytes, copied);
-    output->length += length;
+    while (length-- != 0U) format_byte(output, *bytes++);
+}
+
+static void format_field(pphp_format_output *output, const char *bytes,
+                         size_t length, size_t width, int left_align) {
+    size_t padding = width > length ? width - length : 0U;
+    if (!left_align) format_repeat(output, ' ', padding);
+    format_bytes(output, bytes, length);
+    if (left_align) format_repeat(output, ' ', padding);
 }
 
 static void format_unsigned(pphp_format_output *output, unsigned long value,
@@ -57,14 +45,15 @@ static void format_unsigned(pphp_format_output *output, unsigned long value,
                             size_t width, int precision, int zero_pad,
                             int left_align) {
     char digits[sizeof(unsigned long) * CHAR_BIT];
-    const char *alphabet = uppercase
-        ? "0123456789ABCDEF" : "0123456789abcdef";
     size_t count = 0U;
     size_t zeroes;
     size_t padding;
     if (value != 0UL || precision != 0) {
         do {
-            digits[count++] = alphabet[value % base];
+            unsigned digit = (unsigned)(value % base);
+            digits[count++] = (char)(digit < 10U
+                ? (unsigned)'0' + digit
+                : (unsigned)(uppercase ? 'A' : 'a') + digit - 10U);
             value /= base;
         } while (value != 0UL);
     }
@@ -151,22 +140,15 @@ static int format_variadic(pphp_format_output *output, const char *format,
         if (conversion == 's') {
             const char *string = va_arg(arguments, const char *);
             size_t string_length;
-            size_t padding;
             if (string == NULL) string = "(null)";
             string_length = strlen(string);
             if (precision >= 0 && (size_t)precision < string_length) {
                 string_length = (size_t)precision;
             }
-            padding = width > string_length ? width - string_length : 0U;
-            if (!left_align) format_repeat(output, ' ', padding);
-            format_bytes(output, string, string_length);
-            if (left_align) format_repeat(output, ' ', padding);
+            format_field(output, string, string_length, width, left_align);
         } else if (conversion == 'c') {
             char byte = (char)va_arg(arguments, int);
-            size_t padding = width > 1U ? width - 1U : 0U;
-            if (!left_align) format_repeat(output, ' ', padding);
-            format_byte(output, byte);
-            if (left_align) format_repeat(output, ' ', padding);
+            format_field(output, &byte, 1U, width, left_align);
         } else if (conversion == 'd' || conversion == 'i') {
             long value = length == 0 ? (long)va_arg(arguments, int)
                        : length == 1 ? (long)va_arg(arguments, ptrdiff_t)
