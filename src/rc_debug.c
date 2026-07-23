@@ -88,9 +88,14 @@ static void add_module(rc_scan *scan, const pmodule *module) {
 }
 
 static void observe_value(rc_scan *scan, pvalue value) {
-    if (value.type == PT_ROSTRING && value.as.gc != NULL) {
+    if ((value.type == PT_STRING || value.type == PT_ROSTRING) &&
+        value.as.gc != NULL && value.as.gc->type == PT_ROSTRING) {
         add_module(scan, ps_owner((const pstring *)value.as.gc));
     }
+}
+
+static void gather_native_value(void *context, pvalue value) {
+    observe_value((rc_scan *)context, value);
 }
 
 static void gather_header_owners(rc_scan *scan, pheader *header) {
@@ -112,6 +117,9 @@ static void gather_header_owners(rc_scan *scan, pheader *header) {
             add_class(scan, object->class_entry);
             for (i = 0U; i < object->class_entry->property_count; i++) {
                 observe_value(scan, object->slots[i]);
+            }
+            if (object->native_rc_visitor != NULL) {
+                object->native_rc_visitor(object, gather_native_value, scan);
             }
             break;
         }
@@ -227,9 +235,21 @@ static int gather_reachable_metadata(rc_scan *scan) {
 }
 
 static size_t value_edge(const pheader *target, pvalue value) {
-    if (value.type < PT_STRING || value.type == PT_ROSTRING ||
-        value.as.gc == NULL) return 0U;
+    if (value.type < PT_STRING || value.as.gc == NULL ||
+        value.type == PT_ROSTRING || value.as.gc->type == PT_ROSTRING) {
+        return 0U;
+    }
     return value.as.gc == target ? 1U : 0U;
+}
+
+typedef struct native_edge_count {
+    const pheader *target;
+    size_t expected;
+} native_edge_count;
+
+static void count_native_value(void *context, pvalue value) {
+    native_edge_count *count = context;
+    count->expected += value_edge(count->target, value);
 }
 
 static size_t raw_edge(const pheader *target, const void *owner) {
@@ -275,8 +295,14 @@ static size_t count_tracked_container_edges(const rc_scan *scan,
                 break;
             case PT_OBJECT: {
                 const pobject *object = (const pobject *)header;
+                native_edge_count native = {target, 0U};
                 for (j = 0U; j < object->class_entry->property_count; j++) {
                     expected += value_edge(target, object->slots[j]);
+                }
+                if (object->native_rc_visitor != NULL) {
+                    object->native_rc_visitor(object, count_native_value,
+                                              &native);
+                    expected += native.expected;
                 }
                 break;
             }

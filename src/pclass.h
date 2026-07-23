@@ -74,6 +74,9 @@ struct pobject {
     struct pobject *gc_next;
     void *native_data;
     void (*native_finalizer)(void *);
+#if PPHP_RC_DEBUG
+    pphp_native_rc_visit_fn native_rc_visitor;
+#endif
     pvalue slots[];
 };
 

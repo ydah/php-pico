@@ -753,6 +753,9 @@ pobject *pobject_new(pphp_state *state, pclass *class_entry) {
     }
     object->native_data = NULL;
     object->native_finalizer = NULL;
+#if PPHP_RC_DEBUG
+    object->native_rc_visitor = NULL;
+#endif
     for (i = 0U; i < class_entry->property_count; i++) {
         object->slots[i] = class_entry->properties[i].default_value;
         pv_retain(object->slots[i]);

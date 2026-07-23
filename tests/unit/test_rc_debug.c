@@ -64,11 +64,8 @@ static int install_cycle_and_iterator(pphp_state *state) {
     return 1;
 }
 
-static int compile_pbc_image(const char *path, uint8_t **image,
-                             size_t *image_length) {
-    static const char source[] =
-        "function from_pbc(string $value='xip'): string { return $value; }"
-        " $pbc_value=from_pbc();";
+static int compile_pbc_image(const char *path, const char *source,
+                             uint8_t **image, size_t *image_length) {
     pc_arena arena;
     pc_parser parser;
     pc_codegen_error error;
@@ -79,7 +76,7 @@ static int compile_pbc_image(const char *path, uint8_t **image,
     size_t read_count;
     int status;
     pc_arena_init(&arena, 4096U);
-    pc_parser_init(&parser, &arena, source, sizeof(source) - 1U, 0);
+    pc_parser_init(&parser, &arena, source, strlen(source), 0);
     program = pc_parse_program(&parser);
     CHECK(program != NULL);
     CHECK(pc_codegen_program(program, &module, &error));
@@ -105,19 +102,37 @@ static int compile_pbc_image(const char *path, uint8_t **image,
 static int run_checks(void) {
     static const char source[] =
         "$base=['a'=>[1,2,3]];"
+        "function irq_named($value){ return $value; }"
         "class RcBox { public string $value='v'; public static $shared=[4];"
         " public const LABEL='label';"
         " public function closure(){ return fn()=> $this->value; } }"
+        "class IrqReceiver { public function method($value){ return $value; }"
+        " public function __invoke($value){ return $value; } }"
         "$box=new RcBox(); $closure=$box->closure();"
+        "$pin=new GPIO(5); $receiver=new IrqReceiver();"
         "$file=fopen('/tmp/php-pico-rc-debug-resource.tmp','w+');"
         "for($i=0;$i<10000;$i++){ $copy=$base; $copy[]=$i; }";
-    const char pbc_path[] = "/tmp/php-pico-rc-debug-test.pbc";
+    static const char *const callback_sources[] = {
+        "$pin->irq('irq_named', 1);",
+        "$pin->irq([$receiver, 'method'], 1);",
+        "$pin->irq($receiver, 1);",
+        "$pin->irq(function($value){ return $value; }, 1);"
+    };
+    static const char pbc_callback_source[] =
+        "$pin->irq('irq_named', 1);";
+    static const char pbc_global_source[] =
+        "$GLOBALS['xip_only']='xip-global';";
+    const char pbc_callback_path[] =
+        "/tmp/php-pico-rc-debug-callback.pbc";
+    const char pbc_global_path[] = "/tmp/php-pico-rc-debug-global.pbc";
     pphp_state *state;
     pstring *probe;
     pvalue probe_value;
     pphp_rc_check_result mismatch;
-    uint8_t *image = NULL;
-    size_t image_length = 0U;
+    uint8_t *callback_image = NULL;
+    size_t callback_image_length = 0U;
+    uint8_t *global_image = NULL;
+    size_t global_image_length = 0U;
     size_t first_checked;
     size_t repeated_checked;
     size_t i;
@@ -130,6 +145,13 @@ static int run_checks(void) {
     CHECK(first_checked != 0U);
     CHECK(pphp_exec_source_mode(state, source, sizeof(source) - 1U,
                                 "rc-debug", 1) == PPHP_OK);
+    for (i = 0U; i < sizeof(callback_sources) / sizeof(callback_sources[0]);
+         i++) {
+        CHECK(pphp_exec_source_mode(state, callback_sources[i],
+                                    strlen(callback_sources[i]),
+                                    "rc-callback", 1) == PPHP_OK);
+        CHECK(rc_ok(state, NULL));
+    }
     CHECK(install_cycle_and_iterator(state));
 
     probe = ps_new_cstr("probe");
@@ -154,8 +176,14 @@ static int run_checks(void) {
     probe->header.refcnt--;
     CHECK(rc_ok(state, NULL));
 
-    CHECK(compile_pbc_image(pbc_path, &image, &image_length));
-    CHECK(pphp_exec_pbc(state, image, image_length) == PPHP_OK);
+    CHECK(compile_pbc_image(pbc_callback_path, pbc_callback_source,
+                            &callback_image, &callback_image_length));
+    CHECK(pphp_exec_pbc(state, callback_image, callback_image_length) ==
+          PPHP_OK);
+    CHECK(rc_ok(state, NULL));
+    CHECK(compile_pbc_image(pbc_global_path, pbc_global_source,
+                            &global_image, &global_image_length));
+    CHECK(pphp_exec_pbc(state, global_image, global_image_length) == PPHP_OK);
     CHECK(rc_ok(state, NULL));
 
     while (filler_count < sizeof(fillers) / sizeof(fillers[0])) {
@@ -170,8 +198,10 @@ static int run_checks(void) {
     CHECK(rc_ok(state, NULL));
 
     pphp_close(state);
-    pphp_free(image);
-    (void)remove(pbc_path);
+    pphp_free(callback_image);
+    pphp_free(global_image);
+    (void)remove(pbc_callback_path);
+    (void)remove(pbc_global_path);
     (void)remove("/tmp/php-pico-rc-debug-resource.tmp");
     return 1;
 }

@@ -299,3 +299,10 @@ pobject *pphp_obj_new_with(pphp_ctx *context, pclass *class_entry,
 void *pphp_obj_data(pobject *object) {
     return object == NULL ? NULL : object->native_data;
 }
+
+#if PPHP_RC_DEBUG
+void pphp_obj_set_rc_visitor(pobject *object,
+                             pphp_native_rc_visit_fn visitor) {
+    if (object != NULL) object->native_rc_visitor = visitor;
+}
+#endif

@@ -72,6 +72,14 @@ static void gpio_finalize(void *opaque) {
     if (data != NULL) pv_release(data->callback);
 }
 
+#if PPHP_RC_DEBUG
+static void gpio_rc_visit(const pobject *object, pphp_rc_observe_fn observe,
+                          void *context) {
+    const gpio_data *data = object->native_data;
+    if (data != NULL) observe(context, data->callback);
+}
+#endif
+
 static int gpio_construct(pphp_ctx *context) {
     gpio_data *data;
     pphp_int pin;
@@ -89,6 +97,9 @@ static int gpio_construct(pphp_ctx *context) {
     data->pin.pin = (uint8_t)pin;
     data->pin.flags = (uint8_t)flags;
     data->callback = pv_null();
+#if PPHP_RC_DEBUG
+    pphp_obj_set_rc_visitor(pphp_this(context), gpio_rc_visit);
+#endif
     mode = (flags & 2) != 0 ? 2U : 1U;
     pull = (uint8_t)(flags & (8 | 16));
     return hal_failed(context, "GPIO initialization",

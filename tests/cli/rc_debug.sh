@@ -13,6 +13,11 @@ case "$output" in
         ;;
 esac
 
+if nm "$disabled" | grep -q 'pphp_obj_set_rc_visitor'; then
+    echo "native RC visitor API leaked into PPHP_RC_DEBUG=0 binary" >&2
+    exit 1
+fi
+
 if strings "$disabled" | grep -q 'rccheck:'; then
     echo "rccheck strings leaked into PPHP_RC_DEBUG=0 binary" >&2
     exit 1
