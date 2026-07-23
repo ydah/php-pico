@@ -6,6 +6,7 @@
 #include "codegen.h"
 #include "parser.h"
 #include "pbc.h"
+#include "pclass.h"
 #include "opcode.h"
 #include "vm.h"
 
@@ -1719,6 +1720,81 @@ TEST(first_failed_execution_preserves_exception_runtime) {
     pphp_close(state);
     ASSERT_EQ(0, pphp_pool_get_stats().used);
 }
+
+TEST(exception_runtime_initialization_is_transactional) {
+    size_t pool_size;
+    int saw_failure = 0;
+    int saw_success = 0;
+    int recovered_after_pressure = 0;
+
+    for (pool_size = 2048U; pool_size <= sizeof(pbc_oom_pool);
+         pool_size += 8U) {
+        pphp_state *state = pphp_open(pbc_oom_pool, pool_size);
+        size_t class_checkpoint;
+        int initialized;
+        int clean = 1;
+        if (state == NULL) continue;
+        class_checkpoint = state->class_count;
+        initialized = pphp_register_exception_classes(state);
+        if (!initialized) {
+            saw_failure = 1;
+            clean = state->class_count == class_checkpoint &&
+                    state->oom_exception == NULL &&
+                    pphp_find_class(state, "Throwable", 9U) == NULL;
+            if (!pphp_register_exception_classes(state)) {
+                clean = clean && state->class_count == class_checkpoint &&
+                        state->oom_exception == NULL &&
+                        pphp_find_class(state, "Throwable", 9U) == NULL;
+            }
+        } else {
+            saw_success = 1;
+        }
+        pphp_close(state);
+        ASSERT_TRUE(clean);
+        ASSERT_EQ(0, pphp_pool_get_stats().used);
+        if (initialized) break;
+    }
+    ASSERT_TRUE(saw_failure);
+    ASSERT_TRUE(saw_success);
+
+    for (pool_size = 1024U; pool_size < sizeof(pbc_oom_pool);
+         pool_size += 256U) {
+        pphp_state *state = pphp_open(pbc_oom_pool, sizeof(pbc_oom_pool));
+        size_t class_checkpoint;
+        void *pressure;
+        int initialized;
+        int clean = 1;
+        if (state == NULL) continue;
+        class_checkpoint = state->class_count;
+        pressure = pphp_alloc(pool_size);
+        if (pressure == NULL) {
+            pphp_close(state);
+            ASSERT_EQ(0, pphp_pool_get_stats().used);
+            continue;
+        }
+        initialized = pphp_register_exception_classes(state);
+        if (!initialized) {
+            clean = state->class_count == class_checkpoint &&
+                    state->oom_exception == NULL &&
+                    pphp_find_class(state, "Throwable", 9U) == NULL;
+            pphp_free(pressure);
+            if (pphp_register_exception_classes(state)) {
+                recovered_after_pressure = 1;
+            } else {
+                clean = clean && state->class_count == class_checkpoint &&
+                        state->oom_exception == NULL &&
+                        pphp_find_class(state, "Throwable", 9U) == NULL;
+            }
+        } else {
+            pphp_free(pressure);
+        }
+        pphp_close(state);
+        ASSERT_TRUE(clean);
+        ASSERT_EQ(0, pphp_pool_get_stats().used);
+        if (recovered_after_pressure) break;
+    }
+    ASSERT_TRUE(recovered_after_pressure);
+}
 #endif
 
 TEST(arrays_use_copy_on_write_and_normalized_keys) {
@@ -2676,6 +2752,7 @@ int main(void) {
         {"PBC type context OOM", pbc_type_context_reports_allocation_failure},
         {"failed definition rollback", failed_forward_variance_rolls_back_definitions},
         {"first failure exception roots", first_failed_execution_preserves_exception_runtime},
+        {"transactional exception initialization", exception_runtime_initialization_is_transactional},
 #endif
         {"array COW runtime", arrays_use_copy_on_write_and_normalized_keys},
         {"language conformance", language_conformance_covers_casts_lvalues_nullsafe_and_interpolation},

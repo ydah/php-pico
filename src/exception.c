@@ -1,5 +1,6 @@
 #include "pclass.h"
 
+#include "gc.h"
 #include "state.h"
 
 #include <stdio.h>
@@ -41,38 +42,66 @@ static int add_exception_properties(pclass *class_entry) {
            add_string_property(class_entry, "trace", 5U);
 }
 
+static void rollback_exception_runtime(pphp_state *state,
+                                       size_t class_checkpoint,
+                                       pobject *oom_checkpoint) {
+    size_t class_end = state->class_count;
+    size_t i;
+    if (state->oom_exception != oom_checkpoint) {
+        if (state->oom_exception != NULL) {
+            pv_release(pv_heap(PT_OBJECT, &state->oom_exception->header));
+        }
+        state->oom_exception = oom_checkpoint;
+    }
+    for (i = class_checkpoint; i < class_end; i++) {
+        pclass_release_values(state->classes[i]);
+    }
+    (void)pphp_gc_collect(state);
+    for (i = class_end; i > class_checkpoint; i--) {
+        pclass_release(state->classes[i - 1U]);
+        state->classes[i - 1U] = NULL;
+    }
+    state->class_count = class_checkpoint;
+}
+
 int pphp_register_exception_classes(pphp_state *state) {
+    size_t class_checkpoint = state->class_count;
+    pobject *oom_checkpoint = state->oom_exception;
     pclass *throwable;
     pclass *exception;
     pclass *runtime;
     pclass *error;
     pclass *arithmetic;
     throwable = register_builtin_class(state, "Throwable", NULL, PC_INTERFACE);
+    if (throwable == NULL) goto failed;
     exception = register_builtin_class(state, "Exception", throwable, 0U);
-    if (throwable == NULL || exception == NULL ||
-        !add_exception_properties(exception)) return 0;
+    if (exception == NULL || !add_exception_properties(exception)) goto failed;
     runtime = register_builtin_class(state, "RuntimeException", exception, 0U);
     if (runtime == NULL ||
         register_builtin_class(state, "InvalidArgumentException", runtime, 0U) == NULL) {
-        return 0;
+        goto failed;
     }
     error = register_builtin_class(state, "Error", throwable, 0U);
-    if (error == NULL || !add_exception_properties(error)) return 0;
+    if (error == NULL || !add_exception_properties(error)) goto failed;
     if (register_builtin_class(state, "TypeError", error, 0U) == NULL ||
         register_builtin_class(state, "ValueError", error, 0U) == NULL ||
         register_builtin_class(state, "ArgumentCountError", error, 0U) == NULL ||
         register_builtin_class(state, "UnhandledMatchError", error, 0U) == NULL ||
         register_builtin_class(state, "OutOfMemoryError", error, 0U) == NULL) {
-        return 0;
+        goto failed;
     }
     arithmetic = register_builtin_class(state, "ArithmeticError", error, 0U);
     if (arithmetic == NULL ||
         register_builtin_class(state, "DivisionByZeroError", arithmetic, 0U) == NULL) {
-        return 0;
+        goto failed;
     }
     state->oom_exception = pphp_exception_new(state, "OutOfMemoryError",
                                               "Out of memory");
-    return state->oom_exception != NULL;
+    if (state->oom_exception == NULL) goto failed;
+    return 1;
+failed:
+    rollback_exception_runtime(state, class_checkpoint, oom_checkpoint);
+    return 0;
 }
 
 pobject *pphp_exception_new(pphp_state *state, const char *class_name,
