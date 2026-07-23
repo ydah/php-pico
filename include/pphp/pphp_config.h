@@ -27,6 +27,10 @@
 #define PPHP_ENABLE_COMPILER 1
 #endif
 
+#if PPHP_ENABLE_COMPILER != 0 && PPHP_ENABLE_COMPILER != 1
+#error "PPHP_ENABLE_COMPILER must be 0 or 1"
+#endif
+
 #ifndef PPHP_ENABLE_CYCLE_GC
 #define PPHP_ENABLE_CYCLE_GC 1
 #endif

@@ -69,6 +69,10 @@ PBC_HOST_BINARY := build/host/php-pico-pbc
 CONFIGURED_PBC_HOST_BINARY := build/host/php-pico-config-off
 COMPILER_OFF_TEST_BINARY := build/host/test_compiler_off
 COMPILER_OFF_DEVICE_OBJECT := build/host/p2sh_device_compiler_off.o
+COMPILER_CONFIG_ON_OBJECT := build/host/test_compiler_config_on.o
+COMPILER_CONFIG_OFF_OBJECT := build/host/test_compiler_config_off.o
+COMPILER_CONFIG_INVALID_OBJECT := build/host/test_compiler_config_invalid.o
+COMPILER_CONFIG_INVALID_LOG := build/host/test_compiler_config_invalid.log
 NO_FLOAT_HOST_BINARY := build/host/php-pico-no-float
 NO_FLOAT_PBC_HOST_BINARY := build/host/php-pico-no-float-pbc
 NO_FLOAT_UBSAN_BINARY := build/host/php-pico-no-float-ubsan
@@ -130,7 +134,7 @@ ASAN_PARSER_BINARY := build/host/test_parser_asan
 ASAN_VM_BINARY := build/host/test_vm_asan
 ASAN_LEAKS := $(if $(filter Darwin,$(shell uname -s)),0,1)
 
-.PHONY: all FORCE host host-pbc host-rp2040 rp2040 test test-unit test-compiler-off test-no-float test-no-float-ubsan test-float-format test-rp-integer-boundary test-warnings test-warnings-config test-typecheck test-typecheck-config test-rc-debug test-rc-debug-config check-phpt-suite test-phpt-runner test-phpt test-target test-asan test-diff bench size clean
+.PHONY: all FORCE host host-pbc host-rp2040 rp2040 test test-unit test-compiler-config test-compiler-off test-no-float test-no-float-ubsan test-float-format test-rp-integer-boundary test-warnings test-warnings-config test-typecheck test-typecheck-config test-rc-debug test-rc-debug-config check-phpt-suite test-phpt-runner test-phpt test-target test-asan test-diff bench size clean
 
 FORCE:
 
@@ -460,7 +464,33 @@ endif
 	$(HOST_BINARY) --version
 	sh tests/cli/smoke.sh $(HOST_BINARY)
 
-test-compiler-off: $(HOST_BINARY) $(CONFIGURED_PBC_HOST_BINARY) $(COMPILER_OFF_TEST_BINARY) $(COMPILER_OFF_DEVICE_OBJECT)
+test-compiler-config: FORCE tests/unit/test_compiler_config.c
+	@mkdir -p build/host
+	$(CC) -Iinclude -DPPHP_ENABLE_COMPILER=1 $(CFLAGS) -c \
+		tests/unit/test_compiler_config.c -o $(COMPILER_CONFIG_ON_OBJECT)
+	$(CC) -Iinclude -DPPHP_ENABLE_COMPILER=0 $(CFLAGS) -c \
+		tests/unit/test_compiler_config.c -o $(COMPILER_CONFIG_OFF_OBJECT)
+	@if $(CC) -Iinclude -DPPHP_ENABLE_COMPILER=2 $(CFLAGS) -c \
+		tests/unit/test_compiler_config.c \
+		-o $(COMPILER_CONFIG_INVALID_OBJECT) \
+		>$(COMPILER_CONFIG_INVALID_LOG) 2>&1; then \
+		echo 'PPHP_ENABLE_COMPILER=2 unexpectedly compiled' >&2; \
+		exit 1; \
+	fi
+	@grep -q 'PPHP_ENABLE_COMPILER must be 0 or 1' \
+		$(COMPILER_CONFIG_INVALID_LOG)
+	@$(MAKE) -f Makefile PPHP_ENABLE_COMPILER=1 -n host >/dev/null
+	@$(MAKE) -f Makefile PPHP_ENABLE_COMPILER=0 -n host >/dev/null
+	@if $(MAKE) -f Makefile PPHP_ENABLE_COMPILER= -n host >/dev/null 2>&1; then \
+		echo 'empty PPHP_ENABLE_COMPILER unexpectedly succeeded' >&2; \
+		exit 1; \
+	fi
+	@if $(MAKE) -f Makefile PPHP_ENABLE_COMPILER=2 -n host >/dev/null 2>&1; then \
+		echo 'PPHP_ENABLE_COMPILER=2 unexpectedly succeeded' >&2; \
+		exit 1; \
+	fi
+
+test-compiler-off: test-compiler-config $(HOST_BINARY) $(CONFIGURED_PBC_HOST_BINARY) $(COMPILER_OFF_TEST_BINARY) $(COMPILER_OFF_DEVICE_OBJECT)
 	$(COMPILER_OFF_TEST_BINARY)
 	sh tests/cli/compiler_off.sh $(HOST_BINARY) $(CONFIGURED_PBC_HOST_BINARY)
 
