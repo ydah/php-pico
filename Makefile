@@ -83,6 +83,8 @@ FLOAT_REFERENCE_BINARY := build/host/php-pico-default-float
 RP2040_HOST_BINARY := build/host/php-pico-rp2040
 RP2040_UBSAN_BINARY := build/host/php-pico-rp2040-ubsan
 FLOAT_FORMAT_TEST_BINARY := build/host/test_float_format
+FLOAT_POWER_TEST_BINARY := build/host/test_float_power
+MINI_PRINTF_TEST_BINARY := build/host/test_mini_printf
 WARNINGS_ON_HOST_BINARY := build/host/php-pico-warnings-on
 WARNINGS_OFF_HOST_BINARY := build/host/php-pico-warnings-off
 WARNINGS_ON_PBC_BINARY := build/host/php-pico-warnings-pbc-on
@@ -133,6 +135,11 @@ ASAN_LEXER_BINARY := build/host/test_lexer_asan
 ASAN_PARSER_BINARY := build/host/test_parser_asan
 ASAN_VM_BINARY := build/host/test_vm_asan
 ASAN_LEAKS := $(if $(filter Darwin,$(shell uname -s)),0,1)
+ifeq ($(shell uname -s),Darwin)
+FLOAT_POWER_GC_FLAG := -Wl,-dead_strip
+else
+FLOAT_POWER_GC_FLAG := -Wl,--gc-sections
+endif
 
 .PHONY: all FORCE host host-pbc host-rp2040 rp2040 test test-unit test-compiler-config test-compiler-off test-no-float test-no-float-ubsan test-float-format test-rp-integer-boundary test-warnings test-warnings-config test-typecheck test-typecheck-config test-rc-debug test-rc-debug-config check-phpt-suite test-phpt-runner test-phpt test-target test-asan test-diff bench size clean
 
@@ -243,6 +250,17 @@ $(FLOAT_FORMAT_TEST_BINARY): FORCE src/float_format.c tests/unit/test_float_form
 	$(CC) $(BASE_CPPFLAGS) -DPPHP_INT64=0 -DPPHP_USE_DOUBLE=0 \
 		-DPPHP_DEVICE_FLOAT_FORMAT=1 $(CFLAGS) src/float_format.c \
 		tests/unit/test_float_format.c $(LDFLAGS) $(LDLIBS) -o $@
+
+$(MINI_PRINTF_TEST_BINARY): FORCE src/mini_printf.c tests/unit/test_mini_printf.c
+	@mkdir -p $(@D)
+	$(CC) $(BASE_CPPFLAGS) $(CFLAGS) src/mini_printf.c \
+		tests/unit/test_mini_printf.c $(LDFLAGS) -o $@
+
+$(FLOAT_POWER_TEST_BINARY): FORCE src/value_ops.c tests/unit/test_float_power.c
+	@mkdir -p $(@D)
+	$(CC) $(BASE_CPPFLAGS) -DPPHP_INT64=0 -DPPHP_USE_DOUBLE=0 \
+		$(CFLAGS) -ffunction-sections src/value_ops.c \
+		tests/unit/test_float_power.c $(LDFLAGS) $(FLOAT_POWER_GC_FLAG) -lm -o $@
 
 $(WARNINGS_ON_HOST_BINARY): FORCE $(COMPILER_HOST_SOURCES)
 	@mkdir -p $(@D)
@@ -446,10 +464,10 @@ $(VM_TEST_BINARY): FORCE $(VM_TEST_SOURCES)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(VM_TEST_SOURCES) $(LDFLAGS) $(LDLIBS) -o $@
 
 ifeq ($(PPHP_ENABLE_FLOAT),1)
-TEST_UNIT_DEPENDENCIES := $(TEST_BINARY) $(LEXER_TEST_BINARY) $(PARSER_TEST_BINARY) $(VM_TEST_BINARY) $(FLOAT_FORMAT_TEST_BINARY) $(HOST_BINARY)
+TEST_UNIT_DEPENDENCIES := $(TEST_BINARY) $(LEXER_TEST_BINARY) $(PARSER_TEST_BINARY) $(VM_TEST_BINARY) $(FLOAT_FORMAT_TEST_BINARY) $(MINI_PRINTF_TEST_BINARY) $(HOST_BINARY)
 TEST_DEPENDENCIES := test-unit test-compiler-off test-no-float test-float-format test-warnings test-typecheck test-rc-debug test-phpt-runner test-phpt
 else
-TEST_UNIT_DEPENDENCIES := $(TEST_BINARY) $(LEXER_TEST_BINARY) $(PARSER_TEST_BINARY) $(HOST_BINARY)
+TEST_UNIT_DEPENDENCIES := $(TEST_BINARY) $(LEXER_TEST_BINARY) $(PARSER_TEST_BINARY) $(MINI_PRINTF_TEST_BINARY) $(HOST_BINARY)
 TEST_DEPENDENCIES := test-unit test-compiler-off test-no-float test-warnings test-typecheck test-rc-debug test-phpt-runner
 endif
 
@@ -461,6 +479,7 @@ ifeq ($(PPHP_ENABLE_FLOAT),1)
 	$(VM_TEST_BINARY)
 	$(FLOAT_FORMAT_TEST_BINARY)
 endif
+	$(MINI_PRINTF_TEST_BINARY)
 	$(HOST_BINARY) --version
 	sh tests/cli/smoke.sh $(HOST_BINARY)
 
@@ -502,8 +521,9 @@ test-no-float-ubsan: $(NO_FLOAT_HOST_BINARY) $(NO_FLOAT_UBSAN_BINARY) $(NO_FLOAT
 	sh tests/cli/no_float_overflow.sh $(NO_FLOAT_UBSAN_BINARY)
 	sh tests/cli/no_float_int64.sh $(NO_FLOAT_INT64_BINARY) $(NO_FLOAT_INT64_PBC_BINARY)
 
-test-float-format: $(RP2040_HOST_BINARY) $(FLOAT_FORMAT_TEST_BINARY) test-rp-integer-boundary
+test-float-format: $(RP2040_HOST_BINARY) $(FLOAT_FORMAT_TEST_BINARY) $(FLOAT_POWER_TEST_BINARY) test-rp-integer-boundary
 	$(FLOAT_FORMAT_TEST_BINARY)
+	$(FLOAT_POWER_TEST_BINARY)
 	sh tests/cli/float_format_device.sh $(RP2040_HOST_BINARY)
 
 test-rp-integer-boundary: $(RP2040_UBSAN_BINARY) $(FLOAT_INT64_BINARY)

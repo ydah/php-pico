@@ -55,6 +55,7 @@ set(PPHP_SOURCES
   ${PPHP_ROOT}/src/exception.c
   ${PPHP_ROOT}/src/gc.c
   ${PPHP_ROOT}/src/rc_debug.c
+  ${PPHP_ROOT}/src/mini_printf.c
   ${PPHP_ROOT}/src/value_ops.c
   ${PPHP_ROOT}/src/pbc.c
   ${PPHP_ROOT}/src/state.c
@@ -92,11 +93,15 @@ set_source_files_properties(
   ${PPHP_SOURCES}
   PROPERTIES COMPILE_OPTIONS "-Wall;-Wextra;-Werror;-Wpedantic;-Wconversion;-Wshadow"
 )
-
 set_source_files_properties(
   ${PPHP_ROOT}/third_party/littlefs/lfs.c
   ${PPHP_ROOT}/third_party/littlefs/lfs_util.c
   PROPERTIES COMPILE_OPTIONS "-Wall;-Wextra;-Wno-conversion;-Wno-shadow;-Wno-unused-function"
+)
+set_source_files_properties(
+  ${PPHP_ROOT}/src/mini_printf.c
+  PROPERTIES COMPILE_OPTIONS
+    "-Wall;-Wextra;-Werror;-Wpedantic;-Wconversion;-Wshadow;$<$<CONFIG:Release>:-Oz;-fno-lto>"
 )
 
 # Keep Pico SDK sources outside LTO: GNU ld --wrap is used by the SDK for
@@ -113,7 +118,9 @@ if(PPHP_RP2040_LTO)
   endif()
 endif()
 if(PPHP_RP2040_LTO_ENABLED)
-  set_property(SOURCE ${PPHP_SOURCES} APPEND PROPERTY
+  set(PPHP_LTO_SOURCES ${PPHP_SOURCES})
+  list(REMOVE_ITEM PPHP_LTO_SOURCES ${PPHP_ROOT}/src/mini_printf.c)
+  set_property(SOURCE ${PPHP_LTO_SOURCES} APPEND PROPERTY
     COMPILE_OPTIONS "$<$<CONFIG:Release>:-Os;-flto;-fipa-pta>"
   )
 endif()
@@ -164,16 +171,23 @@ target_link_libraries(php-pico
   hardware_uart
   hardware_watchdog
 )
+target_compile_definitions(php-pico PRIVATE
+  PICO_STDIO_SHORT_CIRCUIT_CLIB_FUNCS=0
+  snprintf=pphp_snprintf
+  vsnprintf=pphp_vsnprintf
+)
 if(PPHP_ENABLE_FLOAT)
   target_link_libraries(php-pico m)
   pico_minimize_runtime(php-pico INCLUDE
-    DEFAULT_ALARM_POOL PRINTF PRINTF_MINIMAL FLOAT
+    DEFAULT_ALARM_POOL PRINTF_MINIMAL FLOAT
   )
 else()
   pico_minimize_runtime(php-pico INCLUDE
-    DEFAULT_ALARM_POOL PRINTF PRINTF_MINIMAL
+    DEFAULT_ALARM_POOL PRINTF_MINIMAL
   )
 endif()
+add_library(pico_printf_pphp INTERFACE)
+pico_set_printf_implementation(php-pico pphp)
 pico_enable_stdio_usb(php-pico 1)
 pico_enable_stdio_uart(php-pico 1)
 pico_add_extra_outputs(php-pico)

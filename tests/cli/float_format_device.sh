@@ -39,6 +39,21 @@ float(0)
 float(0)'
 test "$power" = "$expected_power"
 
+power_boundaries=$(
+    "$binary" -r \
+        "\$below = 1.0 - 1.0 / 16777216.0; var_dump(pow(-0.0, 8388609), pow(-0.0, -8388609), pow(-INF, 8388609), pow(-INF, -8388609), pow(-0.0, 16777216), pow(-INF, -16777216), pow(-1.0000001192092896, 8388609), pow(\$below, 16777216), pow(\$below, -16777216));"
+)
+expected_power_boundaries='float(-0)
+float(-inf)
+float(-inf)
+float(-0)
+float(0)
+float(0)
+float(-2.7182819843292)
+float(0.3678794503212)
+float(2.7182819843292)'
+test "$power_boundaries" = "$expected_power_boundaries"
+
 integers=$(
     "$binary" -r \
         "echo sprintf('%08d|%u|%08x|%o', -42, -1, 255, 8), ':'; print_r([-2147483648 => 2147483647]); echo ':', json_encode([-2147483648 => 2147483647]);"

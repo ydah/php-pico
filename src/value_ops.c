@@ -175,6 +175,226 @@ pphp_float pphp_integer_digits_to_float(const char *digits, size_t length,
 #endif
 }
 
+#if !PPHP_USE_DOUBLE
+/*
+ * ====================================================
+ * Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.
+ *
+ * Developed at SunPro, a Sun Microsystems, Inc. business.
+ * Permission to use, copy, modify, and distribute this software is freely
+ * granted, provided that this notice is preserved.
+ * ====================================================
+ *
+ * Float-only core derived from FreeBSD msun's e_powf.c (Sun fdlibm).
+ * The split high/low terms keep y*log2(x) accurate without binary64.
+ */
+static float pphp_float_power_positive(float x, float y) {
+    static const float bp[2] = {1.0f, 1.5f};
+    static const float dp_h[2] = {0.0f, 5.84960938e-01f};
+    static const float dp_l[2] = {0.0f, 1.56322085e-06f};
+    const float half = 0.5f;
+    const float third = 3.33333343e-01f;
+    const float quarter = 0.25f;
+    const float ivln2 = 1.4426950216e+00f;
+    const float ivln2_h = 1.4426879883e+00f;
+    const float ivln2_l = 7.0526075433e-06f;
+    const float cp = 9.6179670095e-01f;
+    const float cp_h = 9.6191406250e-01f;
+    const float cp_l = -1.1736857402e-04f;
+    const float lg2 = 6.9314718246e-01f;
+    const float lg2_h = 6.93145752e-01f;
+    const float lg2_l = 1.42860654e-06f;
+    const float ovt = 4.2995665694e-08f;
+    const float l1 = 6.0000002384e-01f;
+    const float l2 = 4.2857143283e-01f;
+    const float l3 = 3.3333334327e-01f;
+    const float l4 = 2.7272811532e-01f;
+    const float l5 = 2.3066075146e-01f;
+    const float l6 = 2.0697501302e-01f;
+    const float p1 = 1.6666667163e-01f;
+    const float p2 = -2.7777778450e-03f;
+    const float p3 = 6.6137559770e-05f;
+    const float p4 = -1.6533901999e-06f;
+    const float p5 = 4.1381369442e-08f;
+    uint32_t x_bits;
+    uint32_t y_bits;
+    uint32_t word;
+    int exponent_adjustment;
+    int interval;
+    float t1;
+    float t2;
+    float high;
+    float low;
+    float z;
+    memcpy(&x_bits, &x, sizeof(x_bits));
+    memcpy(&y_bits, &y, sizeof(y_bits));
+
+    if ((y_bits & UINT32_C(0x7fffffff)) > UINT32_C(0x4d000000) ||
+        ((y_bits & UINT32_C(0x7fffffff)) >= UINT32_C(0x4b800000) &&
+         x_bits >= UINT32_C(0x3f7ffff6) &&
+         x_bits <= UINT32_C(0x3f800007))) {
+        if ((y_bits & UINT32_C(0x7fffffff)) > UINT32_C(0x4d000000)) {
+            if (x_bits < UINT32_C(0x3f7ffff6)) {
+                return (y_bits & UINT32_C(0x80000000)) != 0U
+                           ? integer_float_infinity() : 0.0f;
+            }
+            if (x_bits > UINT32_C(0x3f800007)) {
+                return (y_bits & UINT32_C(0x80000000)) == 0U
+                           ? integer_float_infinity() : 0.0f;
+            }
+        }
+        {
+            float difference = x - 1.0f;
+            float correction = difference * difference *
+                (half - difference * (third - difference * quarter));
+            float first = ivln2_h * difference;
+            float second = difference * ivln2_l - correction * ivln2;
+            t1 = first + second;
+            memcpy(&word, &t1, sizeof(word));
+            word &= UINT32_C(0xfffff000);
+            memcpy(&t1, &word, sizeof(t1));
+            t2 = second - (t1 - first);
+        }
+    } else {
+        uint32_t normalized_bits = x_bits;
+        uint32_t fraction;
+        float normalized = x;
+        float s;
+        float s_high;
+        float s_low;
+        float t_high;
+        float t_low;
+        float polynomial;
+        float squared;
+        float first;
+        float second;
+        exponent_adjustment = 0;
+        if (normalized_bits < UINT32_C(0x00800000)) {
+            normalized *= 16777216.0f;
+            exponent_adjustment -= 24;
+            memcpy(&normalized_bits, &normalized, sizeof(normalized_bits));
+        }
+        exponent_adjustment += (int)(normalized_bits >> 23U) - 127;
+        fraction = normalized_bits & UINT32_C(0x007fffff);
+        normalized_bits = fraction | UINT32_C(0x3f800000);
+        if (fraction <= UINT32_C(0x1cc471)) {
+            interval = 0;
+        } else if (fraction < UINT32_C(0x5db3d7)) {
+            interval = 1;
+        } else {
+            interval = 0;
+            exponent_adjustment++;
+            normalized_bits -= UINT32_C(0x00800000);
+        }
+        memcpy(&normalized, &normalized_bits, sizeof(normalized));
+        first = normalized - bp[interval];
+        second = 1.0f / (normalized + bp[interval]);
+        s = first * second;
+        s_high = s;
+        memcpy(&word, &s_high, sizeof(word));
+        word &= UINT32_C(0xfffff000);
+        memcpy(&s_high, &word, sizeof(s_high));
+        word = ((normalized_bits >> 1U) & UINT32_C(0xfffff000)) |
+               UINT32_C(0x20000000);
+        word += UINT32_C(0x00400000) + ((uint32_t)interval << 21U);
+        memcpy(&t_high, &word, sizeof(t_high));
+        t_low = normalized - (t_high - bp[interval]);
+        s_low = second * ((first - s_high * t_high) - s_high * t_low);
+        squared = s * s;
+        polynomial = squared * squared *
+            (l1 + squared * (l2 + squared * (l3 + squared *
+             (l4 + squared * (l5 + squared * l6)))));
+        polynomial += s_low * (s_high + s);
+        squared = s_high * s_high;
+        t_high = 3.0f + squared + polynomial;
+        memcpy(&word, &t_high, sizeof(word));
+        word &= UINT32_C(0xfffff000);
+        memcpy(&t_high, &word, sizeof(t_high));
+        t_low = polynomial - ((t_high - 3.0f) - squared);
+        first = s_high * t_high;
+        second = s_low * t_high + t_low * s;
+        high = first + second;
+        memcpy(&word, &high, sizeof(word));
+        word &= UINT32_C(0xfffff000);
+        memcpy(&high, &word, sizeof(high));
+        low = second - (high - first);
+        {
+            float z_high = cp_h * high;
+            float z_low = cp_l * high + low * cp + dp_l[interval];
+            float adjustment = (float)exponent_adjustment;
+            t1 = ((z_high + z_low) + dp_h[interval]) + adjustment;
+            memcpy(&word, &t1, sizeof(word));
+            word &= UINT32_C(0xfffff000);
+            memcpy(&t1, &word, sizeof(t1));
+            t2 = z_low - (((t1 - adjustment) - dp_h[interval]) - z_high);
+        }
+    }
+
+    memcpy(&word, &y, sizeof(word));
+    word &= UINT32_C(0xfffff000);
+    memcpy(&high, &word, sizeof(high));
+    low = (y - high) * t1 + y * t2;
+    high *= t1;
+    z = low + high;
+    memcpy(&word, &z, sizeof(word));
+    if ((int32_t)word > INT32_C(0x43000000) ||
+        (word == UINT32_C(0x43000000) && low + ovt > z - high)) {
+        return integer_float_infinity();
+    }
+    if ((word & UINT32_C(0x7fffffff)) > UINT32_C(0x43160000) ||
+        (word == UINT32_C(0xc3160000) && low <= z - high)) {
+        return 0.0f;
+    }
+
+    exponent_adjustment = 0;
+    {
+        uint32_t absolute_word = word & UINT32_C(0x7fffffff);
+        int binary_exponent = (int)(absolute_word >> 23U) - 127;
+        if (absolute_word > UINT32_C(0x3f000000)) {
+            uint32_t rounded =
+                word + (UINT32_C(0x00800000) >>
+                        (unsigned)(binary_exponent + 1));
+            binary_exponent =
+                (int)((rounded & UINT32_C(0x7fffffff)) >> 23U) - 127;
+            word = rounded & ~(UINT32_C(0x007fffff) >>
+                               (unsigned)binary_exponent);
+            memcpy(&z, &word, sizeof(z));
+            exponent_adjustment = (int)(
+                ((rounded & UINT32_C(0x007fffff)) |
+                 UINT32_C(0x00800000)) >>
+                (unsigned)(23 - binary_exponent));
+            if ((int32_t)rounded < 0) exponent_adjustment = -exponent_adjustment;
+            high -= z;
+        }
+    }
+    z = low + high;
+    memcpy(&word, &z, sizeof(word));
+    word &= UINT32_C(0xffff8000);
+    memcpy(&z, &word, sizeof(z));
+    {
+        float first = z * lg2_h;
+        float second = (low - (z - high)) * lg2 + z * lg2_l;
+        float sum = first + second;
+        float tail = second - (sum - first);
+        float squared = sum * sum;
+        float approximation = sum - squared *
+            (p1 + squared * (p2 + squared * (p3 + squared *
+             (p4 + squared * p5))));
+        float correction =
+            (sum * approximation) / (approximation - 2.0f) -
+            (tail + sum * tail);
+        z = 1.0f - (correction - sum);
+    }
+    memcpy(&word, &z, sizeof(word));
+    word += (uint32_t)exponent_adjustment << 23U;
+    if (((int32_t)word >> 23) <= 0) {
+        return PPHP_FLOAT_MATH(ldexp)(z, exponent_adjustment);
+    }
+    memcpy(&z, &word, sizeof(z));
+    return z;
+}
+#endif
+
 pphp_float pphp_float_power(pphp_float base, pphp_float exponent) {
 #if PPHP_USE_DOUBLE
     return PPHP_FLOAT_MATH(pow)(base, exponent);
@@ -210,7 +430,7 @@ pphp_float pphp_float_power(pphp_float base, pphp_float exponent) {
 
     exponent_field = absolute_exponent_bits >> 23U;
     if (exponent_field >= 127U && exponent_field < 255U) {
-        if (exponent_field >= 150U) {
+        if (exponent_field > 150U) {
             exponent_is_integer = 1;
         } else {
             unsigned shift = 150U - exponent_field;
@@ -261,22 +481,7 @@ pphp_float pphp_float_power(pphp_float base, pphp_float exponent) {
         return result;
     }
     memcpy(&absolute_base, &absolute_base_bits, sizeof(absolute_base));
-    if (exponent_is_integer && exponent >= -32.0f && exponent <= 32.0f) {
-        int integer_exponent = (int)exponent;
-        unsigned magnitude = (unsigned)(integer_exponent < 0
-                                            ? -integer_exponent
-                                            : integer_exponent);
-        float factor = absolute_base;
-        result = 1.0f;
-        while (magnitude != 0U) {
-            if ((magnitude & 1U) != 0U) result *= factor;
-            magnitude >>= 1U;
-            if (magnitude != 0U) factor *= factor;
-        }
-        if (integer_exponent < 0) result = 1.0f / result;
-    } else {
-        result = expf(logf(absolute_base) * exponent);
-    }
+    result = pphp_float_power_positive(absolute_base, exponent);
     return ((base_bits & UINT32_C(0x80000000)) != 0U && exponent_is_odd)
                ? -result : result;
 #endif
