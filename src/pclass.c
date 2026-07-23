@@ -1,5 +1,6 @@
 #include "pclass.h"
 
+#include "alloc.h"
 #include "gc.h"
 #include "pphp/pphp.h"
 #include "state.h"
@@ -734,6 +735,9 @@ pobject *pobject_new(pphp_state *state, pclass *class_entry) {
     object->header.refcnt = 1U;
     object->header.type = PT_OBJECT;
     object->header.flags = 0U;
+#if PPHP_RC_DEBUG
+    pphp_alloc_track(object);
+#endif
     object->class_entry = class_entry;
     pclass_retain_runtime(class_entry);
     object->owner_state = state == NULL || state->root_state == NULL

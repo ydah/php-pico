@@ -1,5 +1,6 @@
 #include "resource.h"
 
+#include "alloc.h"
 #include "pphp/pphp.h"
 
 static void iterator_destroy(presource *resource) {
@@ -16,6 +17,9 @@ parray_iterator *pa_iterator_new(parray *array) {
     iterator->resource.header.refcnt = 1U;
     iterator->resource.header.type = PT_RESOURCE;
     iterator->resource.header.flags = 0U;
+#if PPHP_RC_DEBUG
+    pphp_alloc_track(iterator);
+#endif
     iterator->resource.destroy = iterator_destroy;
     iterator->resource.kind = PRESOURCE_ITERATOR;
     iterator->array = array;

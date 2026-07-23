@@ -48,6 +48,23 @@ typedef struct pphp_pool_stats {
     size_t fragments;
 } pphp_pool_stats;
 
+#if PPHP_RC_DEBUG
+enum {
+    PPHP_RC_CHECK_OK = 0,
+    PPHP_RC_CHECK_MISMATCH = 1,
+    PPHP_RC_CHECK_NOMEM = 2,
+    PPHP_RC_CHECK_INVALID = 3
+};
+
+typedef struct pphp_rc_check_result {
+    int status;
+    size_t checked;
+    const pheader *target;
+    uint16_t actual;
+    size_t expected;
+} pphp_rc_check_result;
+#endif
+
 void pphp_pool_init(void *buffer, size_t size);
 void *pphp_alloc(size_t size);
 void *pphp_realloc(void *ptr, size_t size);
@@ -70,6 +87,9 @@ const char *pphp_last_error(const pphp_state *state);
 uint32_t pphp_last_error_line(const pphp_state *state);
 int pphp_exit_requested(const pphp_state *state);
 int pphp_exit_status(const pphp_state *state);
+#if PPHP_RC_DEBUG
+int pphp_rc_check(pphp_state *state, pphp_rc_check_result *result);
+#endif
 
 void pphp_def_func(pphp_state *state, const char *name, pphp_cfunc function,
                    int minimum_arguments, int maximum_arguments);

@@ -6,6 +6,11 @@
 #define ALIGNMENT 8U
 #define ALIGN_MASK (ALIGNMENT - 1U)
 #define BLOCK_USED 1U
+#if PPHP_RC_DEBUG
+/* Allocation sizes are 8-byte aligned, leaving bit 1 available without
+ * increasing the per-block header used by release firmware. */
+#define BLOCK_TRACKED 2U
+#endif
 #define BLOCK_SIZE_MASK (~(uint32_t)ALIGN_MASK)
 #define FL_COUNT 24U
 #define SL_COUNT 4U
@@ -244,6 +249,9 @@ void *pphp_realloc(void *ptr, size_t size) {
     block_header *block;
     size_t old_size;
     void *replacement;
+#if PPHP_RC_DEBUG
+    int tracked;
+#endif
 
     if (ptr == NULL) {
         return pphp_alloc(size);
@@ -257,14 +265,46 @@ void *pphp_realloc(void *ptr, size_t size) {
     if (size <= old_size) {
         return ptr;
     }
+#if PPHP_RC_DEBUG
+    tracked = (block->size_flags & BLOCK_TRACKED) != 0U;
+#endif
     replacement = pphp_alloc(size);
     if (replacement == NULL) {
         return NULL;
     }
     memcpy(replacement, ptr, old_size);
+#if PPHP_RC_DEBUG
+    if (tracked) pphp_alloc_track(replacement);
+#endif
     pphp_free(ptr);
     return replacement;
 }
+
+#if PPHP_RC_DEBUG
+void pphp_alloc_track(void *ptr) {
+    block_header *block;
+    if (ptr == NULL || !pool.initialized) return;
+    block = (block_header *)((uint8_t *)ptr - sizeof(*block));
+    if ((uint8_t *)block < pool.begin || (uint8_t *)block >= pool.end ||
+        !block_is_used(block) || block_size(block) == 0U) return;
+    block->size_flags |= BLOCK_TRACKED;
+}
+
+int pphp_alloc_visit_tracked(pphp_tracked_visit_fn visit, void *context) {
+    block_header *block;
+    if (!pool.initialized || visit == NULL) return 0;
+    block = (block_header *)pool.begin;
+    while (block_size(block) != 0U) {
+        if (block_is_used(block) &&
+            (block->size_flags & BLOCK_TRACKED) != 0U &&
+            !visit((pheader *)((uint8_t *)block + sizeof(*block)), context)) {
+            return 0;
+        }
+        block = next_block(block);
+    }
+    return 1;
+}
+#endif
 
 pphp_pool_stats pphp_pool_get_stats(void) {
     pphp_pool_stats stats = {0U, 0U, 0U, 0U, 0U};
@@ -314,4 +354,3 @@ int pphp_pool_check(void) {
     }
     return 0;
 }
-

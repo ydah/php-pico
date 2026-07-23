@@ -1,5 +1,6 @@
 #include "closure.h"
 
+#include "alloc.h"
 #include "pphp/pphp.h"
 #include "gc.h"
 #include "pclass.h"
@@ -17,6 +18,9 @@ pclosure *pclosure_new(const pproto *proto, const pmodule *module,
     closure->header.refcnt = 1U;
     closure->header.type = PT_CLOSURE;
     closure->header.flags = 0U;
+#if PPHP_RC_DEBUG
+    pphp_alloc_track(closure);
+#endif
     closure->proto = proto;
     closure->module = module;
     closure->called_scope = called_scope;

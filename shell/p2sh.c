@@ -478,6 +478,22 @@ int pphp_host_shell(pphp_state *state, FILE *input, FILE *output,
                     "total=%zu used=%zu free=%zu largest=%zu fragments=%zu\n",
                     stats.total, stats.used, stats.free, stats.largest_free,
                     stats.fragments);
+#if PPHP_RC_DEBUG
+        } else if (strcmp(command, "rccheck") == 0) {
+            pphp_rc_check_result check;
+            if (pphp_rc_check(state, &check)) {
+                fprintf(output, "rccheck: OK checked=%zu\n", check.checked);
+            } else if (check.status == PPHP_RC_CHECK_MISMATCH) {
+                fprintf(output,
+                        "rccheck: mismatch target=%p actual=%u expected=%zu "
+                        "checked=%zu\n",
+                        (const void *)check.target, (unsigned)check.actual,
+                        check.expected, check.checked);
+            } else {
+                fprintf(output, "rccheck: error status=%d checked=%zu\n",
+                        check.status, check.checked);
+            }
+#endif
         } else if (strcmp(command, "reboot") == 0) {
             hal_reset();
         } else if (strcmp(command, "php") == 0) {

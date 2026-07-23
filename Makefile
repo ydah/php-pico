@@ -3,6 +3,7 @@ PPHP_ENABLE_COMPILER ?= 1
 PPHP_ENABLE_FLOAT ?= 1
 PPHP_WARNINGS ?= 1
 PPHP_TYPECHECK ?= 0
+PPHP_RC_DEBUG ?= 0
 ifeq ($(strip $(PPHP_ENABLE_FLOAT)),)
 $(error PPHP_ENABLE_FLOAT must be 0 or 1)
 endif
@@ -21,7 +22,13 @@ endif
 ifneq ($(filter $(PPHP_TYPECHECK),0 1),$(PPHP_TYPECHECK))
 $(error PPHP_TYPECHECK must be 0 or 1)
 endif
-BASE_CPPFLAGS := -Iinclude -Isrc -Istdlib -Itools -Ipgems -DPPHP_HOST=1 -DPPHP_ENABLE_FLOAT=$(PPHP_ENABLE_FLOAT) -DPPHP_WARNINGS=$(PPHP_WARNINGS) -DPPHP_TYPECHECK=$(PPHP_TYPECHECK)
+ifeq ($(strip $(PPHP_RC_DEBUG)),)
+$(error PPHP_RC_DEBUG must be 0 or 1)
+endif
+ifneq ($(filter $(PPHP_RC_DEBUG),0 1),$(PPHP_RC_DEBUG))
+$(error PPHP_RC_DEBUG must be 0 or 1)
+endif
+BASE_CPPFLAGS := -Iinclude -Isrc -Istdlib -Itools -Ipgems -DPPHP_HOST=1 -DPPHP_ENABLE_FLOAT=$(PPHP_ENABLE_FLOAT) -DPPHP_WARNINGS=$(PPHP_WARNINGS) -DPPHP_TYPECHECK=$(PPHP_TYPECHECK) -DPPHP_RC_DEBUG=$(PPHP_RC_DEBUG)
 COMPILER_CPPFLAGS := $(BASE_CPPFLAGS) -Icompiler -Ishell -DPPHP_ENABLE_COMPILER=1
 PBC_CPPFLAGS := $(BASE_CPPFLAGS) -DPPHP_ENABLE_COMPILER=0
 ifeq ($(PPHP_ENABLE_COMPILER),1)
@@ -42,7 +49,7 @@ endif
 CORE_SOURCES := src/alloc.c src/value.c src/pstring.c src/symbol.c src/parray.c src/resource.c src/module.c src/pclass.c src/closure.c
 COMPILER_SOURCES := compiler/lexer.c compiler/ast.c compiler/parser.c
 FLOAT_SOURCES := $(if $(filter 1,$(PPHP_ENABLE_FLOAT)),src/float_format.c)
-RUNTIME_COMMON_SOURCES := $(CORE_SOURCES) src/api.c src/exception.c src/gc.c src/value_ops.c src/pbc.c src/state.c src/vm.c stdlib/builtins.c stdlib/strings.c stdlib/arrays.c stdlib/formatting.c stdlib/json.c stdlib/system.c stdlib/files.c pgems/pgems.c fs/fs_posix.c hal/posix/hal_posix.c
+RUNTIME_COMMON_SOURCES := $(CORE_SOURCES) src/api.c src/exception.c src/gc.c src/rc_debug.c src/value_ops.c src/pbc.c src/state.c src/vm.c stdlib/builtins.c stdlib/strings.c stdlib/arrays.c stdlib/formatting.c stdlib/json.c stdlib/system.c stdlib/files.c pgems/pgems.c fs/fs_posix.c hal/posix/hal_posix.c
 RUNTIME_SOURCES := $(RUNTIME_COMMON_SOURCES) $(FLOAT_SOURCES)
 COMPILER_HOST_SOURCES := $(RUNTIME_SOURCES) $(COMPILER_SOURCES) compiler/codegen.c tools/disasm.c shell/p2sh.c shell/p2sh_device.c ports/host/main.c
 PBC_HOST_SOURCES := $(RUNTIME_SOURCES) tools/disasm.c ports/host/main.c
@@ -56,6 +63,7 @@ TEST_SOURCES := $(CORE_SOURCES) src/gc.c tests/unit/test_core.c
 LEXER_TEST_SOURCES := compiler/lexer.c tests/unit/test_lexer.c
 PARSER_TEST_SOURCES := src/alloc.c compiler/lexer.c compiler/ast.c compiler/parser.c tests/unit/test_parser.c
 VM_TEST_SOURCES := $(RUNTIME_SOURCES) $(COMPILER_SOURCES) compiler/codegen.c tests/unit/test_vm.c
+RC_DEBUG_TEST_SOURCES := $(RUNTIME_SOURCES) $(COMPILER_SOURCES) compiler/codegen.c tests/unit/test_rc_debug.c
 HOST_BINARY := build/host/php-pico
 PBC_HOST_BINARY := build/host/php-pico-pbc
 CONFIGURED_PBC_HOST_BINARY := build/host/php-pico-config-off
@@ -99,6 +107,18 @@ TYPECHECK_CONFIG_ON_OBJECT := build/host/test_typecheck_config_on.o
 TYPECHECK_CONFIG_OFF_OBJECT := build/host/test_typecheck_config_off.o
 TYPECHECK_CONFIG_INVALID_OBJECT := build/host/test_typecheck_config_invalid.o
 TYPECHECK_CONFIG_INVALID_LOG := build/host/test_typecheck_config_invalid.log
+RC_DEBUG_ON_HOST_BINARY := build/host/php-pico-rc-debug-on
+RC_DEBUG_OFF_HOST_BINARY := build/host/php-pico-rc-debug-off
+RC_DEBUG_NO_FLOAT_BINARY := build/host/php-pico-rc-debug-no-float
+RC_DEBUG_COMPILER_OFF_BINARY := build/host/php-pico-rc-debug-compiler-off
+RC_DEBUG_TEST_BINARY := build/host/test_rc_debug
+RC_DEBUG_UBSAN_BINARY := build/host/test_rc_debug_ubsan
+RC_DEBUG_ASAN_BINARY := build/host/test_rc_debug_asan
+RC_DEBUG_TYPECHECK_BINARY := build/host/test_rc_debug_typecheck
+RC_DEBUG_CONFIG_ON_OBJECT := build/host/test_rc_debug_config_on.o
+RC_DEBUG_CONFIG_OFF_OBJECT := build/host/test_rc_debug_config_off.o
+RC_DEBUG_CONFIG_INVALID_OBJECT := build/host/test_rc_debug_config_invalid.o
+RC_DEBUG_CONFIG_INVALID_LOG := build/host/test_rc_debug_config_invalid.log
 TEST_BINARY := build/host/test_core
 LEXER_TEST_BINARY := build/host/test_lexer
 PARSER_TEST_BINARY := build/host/test_parser
@@ -109,7 +129,7 @@ ASAN_PARSER_BINARY := build/host/test_parser_asan
 ASAN_VM_BINARY := build/host/test_vm_asan
 ASAN_LEAKS := $(if $(filter Darwin,$(shell uname -s)),0,1)
 
-.PHONY: all FORCE host host-pbc host-rp2040 rp2040 test test-unit test-compiler-off test-no-float test-no-float-ubsan test-float-format test-rp-integer-boundary test-warnings test-warnings-config test-typecheck test-typecheck-config test-phpt test-target test-asan test-diff bench size clean
+.PHONY: all FORCE host host-pbc host-rp2040 rp2040 test test-unit test-compiler-off test-no-float test-no-float-ubsan test-float-format test-rp-integer-boundary test-warnings test-warnings-config test-typecheck test-typecheck-config test-rc-debug test-rc-debug-config test-phpt test-target test-asan test-diff bench size clean
 
 FORCE:
 
@@ -352,6 +372,58 @@ $(TYPECHECK_VM_ASAN_BINARY): FORCE $(VM_TEST_SOURCES)
 		-fsanitize=address,undefined $(VM_TEST_SOURCES) \
 		-fsanitize=address,undefined $(LDLIBS) -o $@
 
+$(RC_DEBUG_ON_HOST_BINARY): FORCE $(COMPILER_HOST_SOURCES)
+	@mkdir -p $(@D)
+	$(CC) $(filter-out -DPPHP_RC_DEBUG=%,$(COMPILER_CPPFLAGS)) \
+		-DPPHP_RC_DEBUG=1 $(CFLAGS) $(COMPILER_HOST_SOURCES) \
+		$(LDFLAGS) $(LDLIBS) -o $@
+
+$(RC_DEBUG_OFF_HOST_BINARY): FORCE $(COMPILER_HOST_SOURCES)
+	@mkdir -p $(@D)
+	$(CC) $(filter-out -DPPHP_RC_DEBUG=%,$(COMPILER_CPPFLAGS)) \
+		-DPPHP_RC_DEBUG=0 $(CFLAGS) $(COMPILER_HOST_SOURCES) \
+		$(LDFLAGS) $(LDLIBS) -o $@
+
+$(RC_DEBUG_NO_FLOAT_BINARY): FORCE $(RUNTIME_COMMON_SOURCES) $(COMPILER_SOURCES) compiler/codegen.c tools/disasm.c shell/p2sh.c shell/p2sh_device.c ports/host/main.c
+	@mkdir -p $(@D)
+	$(CC) $(filter-out -DPPHP_ENABLE_FLOAT=% -DPPHP_RC_DEBUG=%,$(COMPILER_CPPFLAGS)) \
+		-DPPHP_ENABLE_FLOAT=0 -DPPHP_RC_DEBUG=1 $(CFLAGS) \
+		$(RUNTIME_COMMON_SOURCES) $(COMPILER_SOURCES) compiler/codegen.c \
+		tools/disasm.c shell/p2sh.c shell/p2sh_device.c ports/host/main.c \
+		$(LDFLAGS) -o $@
+
+$(RC_DEBUG_COMPILER_OFF_BINARY): FORCE $(PBC_HOST_SOURCES)
+	@mkdir -p $(@D)
+	$(CC) $(filter-out -DPPHP_RC_DEBUG=%,$(PBC_CPPFLAGS)) \
+		-DPPHP_RC_DEBUG=1 $(CFLAGS) $(PBC_HOST_SOURCES) \
+		$(LDFLAGS) $(LDLIBS) -o $@
+
+$(RC_DEBUG_TEST_BINARY): FORCE $(RC_DEBUG_TEST_SOURCES)
+	@mkdir -p $(@D)
+	$(CC) $(filter-out -DPPHP_RC_DEBUG=%,$(COMPILER_CPPFLAGS)) \
+		-DPPHP_RC_DEBUG=1 $(CFLAGS) $(RC_DEBUG_TEST_SOURCES) \
+		$(LDFLAGS) $(LDLIBS) -o $@
+
+$(RC_DEBUG_UBSAN_BINARY): FORCE $(RC_DEBUG_TEST_SOURCES)
+	@mkdir -p $(@D)
+	$(CC) $(filter-out -DPPHP_RC_DEBUG=%,$(COMPILER_CPPFLAGS)) \
+		-DPPHP_RC_DEBUG=1 $(CFLAGS) -O1 -g -fno-omit-frame-pointer \
+		-fsanitize=undefined $(RC_DEBUG_TEST_SOURCES) \
+		-fsanitize=undefined $(LDLIBS) -o $@
+
+$(RC_DEBUG_ASAN_BINARY): FORCE $(RC_DEBUG_TEST_SOURCES)
+	@mkdir -p $(@D)
+	$(CC) $(filter-out -DPPHP_RC_DEBUG=%,$(COMPILER_CPPFLAGS)) \
+		-DPPHP_RC_DEBUG=1 $(CFLAGS) -O1 -g -fno-omit-frame-pointer \
+		-fsanitize=address,undefined $(RC_DEBUG_TEST_SOURCES) \
+		-fsanitize=address,undefined $(LDLIBS) -o $@
+
+$(RC_DEBUG_TYPECHECK_BINARY): FORCE $(RC_DEBUG_TEST_SOURCES)
+	@mkdir -p $(@D)
+	$(CC) $(filter-out -DPPHP_RC_DEBUG=% -DPPHP_TYPECHECK=%,$(COMPILER_CPPFLAGS)) \
+		-DPPHP_RC_DEBUG=1 -DPPHP_TYPECHECK=1 $(CFLAGS) \
+		$(RC_DEBUG_TEST_SOURCES) $(LDFLAGS) $(LDLIBS) -o $@
+
 $(TEST_BINARY): FORCE $(TEST_SOURCES)
 	@mkdir -p $(@D)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(TEST_SOURCES) $(LDFLAGS) -o $@
@@ -370,10 +442,10 @@ $(VM_TEST_BINARY): FORCE $(VM_TEST_SOURCES)
 
 ifeq ($(PPHP_ENABLE_FLOAT),1)
 TEST_UNIT_DEPENDENCIES := $(TEST_BINARY) $(LEXER_TEST_BINARY) $(PARSER_TEST_BINARY) $(VM_TEST_BINARY) $(FLOAT_FORMAT_TEST_BINARY) $(HOST_BINARY)
-TEST_DEPENDENCIES := test-unit test-compiler-off test-no-float test-float-format test-warnings test-typecheck test-phpt
+TEST_DEPENDENCIES := test-unit test-compiler-off test-no-float test-float-format test-warnings test-typecheck test-rc-debug test-phpt
 else
 TEST_UNIT_DEPENDENCIES := $(TEST_BINARY) $(LEXER_TEST_BINARY) $(PARSER_TEST_BINARY) $(HOST_BINARY)
-TEST_DEPENDENCIES := test-unit test-compiler-off test-no-float test-warnings test-typecheck
+TEST_DEPENDENCIES := test-unit test-compiler-off test-no-float test-warnings test-typecheck test-rc-debug
 endif
 
 test-unit: $(TEST_UNIT_DEPENDENCIES)
@@ -455,6 +527,34 @@ test-typecheck: test-typecheck-config $(TYPECHECK_ON_HOST_BINARY) $(TYPECHECK_OF
 	$(TYPECHECK_VM_TEST_BINARY)
 	$(TYPECHECK_VM_UBSAN_BINARY)
 	ASAN_OPTIONS=detect_leaks=$(ASAN_LEAKS) $(TYPECHECK_VM_ASAN_BINARY)
+
+test-rc-debug-config: FORCE tests/unit/test_rc_debug_config.c
+	@mkdir -p build/host
+	$(CC) -Iinclude -DPPHP_RC_DEBUG=1 $(CFLAGS) -c \
+		tests/unit/test_rc_debug_config.c -o $(RC_DEBUG_CONFIG_ON_OBJECT)
+	$(CC) -Iinclude -DPPHP_RC_DEBUG=0 $(CFLAGS) -c \
+		tests/unit/test_rc_debug_config.c -o $(RC_DEBUG_CONFIG_OFF_OBJECT)
+	@if $(CC) -Iinclude -DPPHP_RC_DEBUG=2 $(CFLAGS) -c \
+		tests/unit/test_rc_debug_config.c \
+		-o $(RC_DEBUG_CONFIG_INVALID_OBJECT) \
+		>$(RC_DEBUG_CONFIG_INVALID_LOG) 2>&1; then \
+		echo 'PPHP_RC_DEBUG=2 unexpectedly compiled' >&2; \
+		exit 1; \
+	fi
+	@grep -q 'PPHP_RC_DEBUG must be 0 or 1' \
+		$(RC_DEBUG_CONFIG_INVALID_LOG)
+	@if $(MAKE) -f Makefile PPHP_RC_DEBUG=2 -n host >/dev/null 2>&1; then \
+		echo 'make PPHP_RC_DEBUG=2 unexpectedly succeeded' >&2; \
+		exit 1; \
+	fi
+
+test-rc-debug: test-rc-debug-config $(RC_DEBUG_ON_HOST_BINARY) $(RC_DEBUG_OFF_HOST_BINARY) $(RC_DEBUG_NO_FLOAT_BINARY) $(RC_DEBUG_COMPILER_OFF_BINARY) $(RC_DEBUG_TEST_BINARY) $(RC_DEBUG_UBSAN_BINARY) $(RC_DEBUG_ASAN_BINARY) $(RC_DEBUG_TYPECHECK_BINARY)
+	$(RC_DEBUG_TEST_BINARY)
+	$(RC_DEBUG_UBSAN_BINARY)
+	ASAN_OPTIONS=detect_leaks=$(ASAN_LEAKS) $(RC_DEBUG_ASAN_BINARY)
+	$(RC_DEBUG_TYPECHECK_BINARY)
+	sh tests/cli/rc_debug.sh $(RC_DEBUG_ON_HOST_BINARY) \
+		$(RC_DEBUG_OFF_HOST_BINARY)
 
 test-phpt: $(HOST_BINARY)
 	sh tools/phpt_run.sh --binary $(HOST_BINARY) tests/phpt

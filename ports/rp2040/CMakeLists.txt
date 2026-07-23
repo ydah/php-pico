@@ -13,6 +13,7 @@ option(PPHP_ENABLE_COMPILER "Build the PHP source compiler" ON)
 option(PPHP_ENABLE_FLOAT "Build floating-point language support" ON)
 option(PPHP_WARNINGS "Emit PHP-compatible runtime warnings" ON)
 option(PPHP_TYPECHECK "Enforce declared PHP types at runtime" OFF)
+option(PPHP_RC_DEBUG "Enable reference-count consistency checks" OFF)
 option(PPHP_RP2040_LTO "Use release LTO for php-pico sources" ON)
 if(NOT "${PPHP_ENABLE_FLOAT}" MATCHES "^(0|1|ON|OFF|TRUE|FALSE)$")
   message(FATAL_ERROR "PPHP_ENABLE_FLOAT must be ON/OFF or 1/0")
@@ -22,6 +23,9 @@ if(NOT "${PPHP_WARNINGS}" MATCHES "^(0|1|ON|OFF|TRUE|FALSE)$")
 endif()
 if(NOT "${PPHP_TYPECHECK}" MATCHES "^(0|1|ON|OFF|TRUE|FALSE)$")
   message(FATAL_ERROR "PPHP_TYPECHECK must be ON/OFF or 1/0")
+endif()
+if(NOT "${PPHP_RC_DEBUG}" MATCHES "^(0|1|ON|OFF|TRUE|FALSE)$")
+  message(FATAL_ERROR "PPHP_RC_DEBUG must be ON/OFF or 1/0")
 endif()
 # pico-sdk 2.3 headers use C11 static_assert; php-pico sources remain C99.
 set(CMAKE_C_STANDARD 11)
@@ -47,6 +51,7 @@ set(PPHP_SOURCES
   ${PPHP_ROOT}/src/api.c
   ${PPHP_ROOT}/src/exception.c
   ${PPHP_ROOT}/src/gc.c
+  ${PPHP_ROOT}/src/rc_debug.c
   ${PPHP_ROOT}/src/value_ops.c
   ${PPHP_ROOT}/src/pbc.c
   ${PPHP_ROOT}/src/state.c
@@ -130,6 +135,7 @@ target_compile_definitions(php-pico PRIVATE
   PPHP_ENABLE_FLOAT=$<BOOL:${PPHP_ENABLE_FLOAT}>
   PPHP_WARNINGS=$<BOOL:${PPHP_WARNINGS}>
   PPHP_TYPECHECK=$<BOOL:${PPHP_TYPECHECK}>
+  PPHP_RC_DEBUG=$<BOOL:${PPHP_RC_DEBUG}>
 )
 target_compile_options(php-pico PRIVATE
   -Os -fmerge-all-constants -ffunction-sections -fdata-sections

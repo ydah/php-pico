@@ -2,6 +2,8 @@
 
 #include "files.h"
 
+#include "alloc.h"
+
 #include "parray.h"
 #include "pphp/fs.h"
 #include "resource.h"
@@ -225,6 +227,9 @@ static int call_stream(pphp_state *state, const pstring *name,
         resource->resource.header.refcnt = 1U;
         resource->resource.header.type = PT_RESOURCE;
         resource->resource.header.flags = 0U;
+#if PPHP_RC_DEBUG
+        pphp_alloc_track(resource);
+#endif
         resource->resource.destroy = file_destroy;
         resource->resource.kind = PRESOURCE_FILE;
         resource->file = file;

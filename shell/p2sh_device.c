@@ -438,6 +438,30 @@ int pphp_p2sh_execute(pphp_state *state, char *line) {
                              (unsigned long)stats.largest_free,
                              (unsigned long)stats.fragments);
         if (count > 0) write_bytes(message, (size_t)count);
+#if PPHP_RC_DEBUG
+    } else if (strcmp(command, "rccheck") == 0) {
+        pphp_rc_check_result check;
+        char message[160];
+        int count;
+        if (pphp_rc_check(state, &check)) {
+            count = snprintf(message, sizeof(message),
+                             "rccheck: OK checked=%lu\r\n",
+                             (unsigned long)check.checked);
+        } else if (check.status == PPHP_RC_CHECK_MISMATCH) {
+            count = snprintf(message, sizeof(message),
+                             "rccheck: mismatch target=%08lx actual=%u "
+                             "expected=%lu checked=%lu\r\n",
+                             (unsigned long)(uintptr_t)check.target,
+                             (unsigned)check.actual,
+                             (unsigned long)check.expected,
+                             (unsigned long)check.checked);
+        } else {
+            count = snprintf(message, sizeof(message),
+                             "rccheck: error status=%d checked=%lu\r\n",
+                             check.status, (unsigned long)check.checked);
+        }
+        if (count > 0) write_bytes(message, (size_t)count);
+#endif
     } else if (strcmp(command, "reboot") == 0) {
         hal_reset();
     } else if (strcmp(command, "php") == 0) {

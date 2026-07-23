@@ -51,6 +51,14 @@
 #error "PPHP_TYPECHECK must be 0 or 1"
 #endif
 
+#ifndef PPHP_RC_DEBUG
+#define PPHP_RC_DEBUG 0
+#endif
+
+#if PPHP_RC_DEBUG != 0 && PPHP_RC_DEBUG != 1
+#error "PPHP_RC_DEBUG must be 0 or 1"
+#endif
+
 #ifndef PPHP_VIS_CHECK
 #define PPHP_VIS_CHECK 1
 #endif

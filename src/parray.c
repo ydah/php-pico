@@ -1,5 +1,6 @@
 #include "parray.h"
 
+#include "alloc.h"
 #include "gc.h"
 
 #include "pphp/pphp.h"
@@ -197,6 +198,9 @@ parray *pa_new(size_t capacity_hint) {
     array->header.refcnt = 1U;
     array->header.type = PT_ARRAY;
     array->header.flags = PARRAY_PACKED;
+#if PPHP_RC_DEBUG
+    pphp_alloc_track(array);
+#endif
     if (capacity_hint != 0U && !ensure_entries(array, capacity_hint)) {
         pphp_free(array);
         return NULL;

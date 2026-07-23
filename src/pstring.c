@@ -1,5 +1,6 @@
 #include "pstring.h"
 
+#include "alloc.h"
 #include "pphp/pphp.h"
 
 #include <string.h>
@@ -30,6 +31,9 @@ pstring *ps_new(const char *bytes, size_t length) {
     string->length = (uint16_t)length;
     string->reserved = 0U;
     string->hash = ps_hash_bytes(bytes == NULL ? "" : bytes, length);
+#if PPHP_RC_DEBUG
+    pphp_alloc_track(string);
+#endif
     storage = (char *)(string + 1);
     if (length != 0U) {
         memcpy(storage, bytes, length);
