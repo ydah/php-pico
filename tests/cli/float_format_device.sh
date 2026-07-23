@@ -54,6 +54,17 @@ float(0.3678794503212)
 float(2.7182819843292)'
 test "$power_boundaries" = "$expected_power_boundaries"
 
+literal_rounding=$(
+    "$binary" -r \
+        'echo (1e-32 === json_decode("1e-32") ? 1 : 0), ":", (1e32 === json_decode("1e32") ? 1 : 0), ":", (1.234567e-20 === json_decode("1.234567e-20") ? 1 : 0), ":", (1.17549435e-38 === json_decode("1.17549435e-38") ? 1 : 0), ":", (1e-45 === json_decode("1e-45") ? 1 : 0), ":", (1e-46 === json_decode("1e-46") ? 1 : 0), ":", (1e39 === json_decode("1e39") ? 1 : 0), ":", (1_0e-3_2 === json_decode("10e-32") ? 1 : 0), ":", (3.4028235e38 === json_decode("3.4028235e38") ? 1 : 0), ":"; var_dump(3.40282356779733661637539395458142568447e38, 3.40282356779733661637539395458142568448e38, 0e99999999999999999999999999, 1e99999999999999999999999999, 1e-99999999999999999999999999);'
+)
+expected_literal_rounding='1:1:1:1:1:1:1:1:1:float(3.4028234663853e+38)
+float(inf)
+float(0)
+float(inf)
+float(0)'
+test "$literal_rounding" = "$expected_literal_rounding"
+
 integers=$(
     "$binary" -r \
         "echo sprintf('%08d|%u|%08x|%o', -42, -1, 255, 8), ':'; print_r([-2147483648 => 2147483647]); echo ':', json_encode([-2147483648 => 2147483647]);"

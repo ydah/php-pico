@@ -59,6 +59,7 @@ int pphp_numeric_to_integer(const pphp_numeric *numeric, int exact,
 #if PPHP_ENABLE_FLOAT
 pphp_float pphp_integer_digits_to_float(const char *digits, size_t length,
                                         unsigned base);
+pphp_float pphp_decimal_to_float(const char *text, size_t length);
 pphp_float pphp_float_power(pphp_float base, pphp_float exponent);
 #endif
 

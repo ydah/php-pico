@@ -368,44 +368,7 @@ static pphp_float parse_integer_float_token(pc_token token) {
 }
 
 static pphp_float parse_float_token(pc_token token) {
-    size_t i = 0U;
-    pphp_float value = 0;
-    pphp_float fraction = (pphp_float)0.1;
-    int after_dot = 0;
-    int exponent = 0;
-    int exponent_sign = 1;
-    while (i < token.length && token.start[i] != 'e' && token.start[i] != 'E') {
-        char c = token.start[i++];
-        if (c == '_') {
-            continue;
-        }
-        if (c == '.') {
-            after_dot = 1;
-            continue;
-        }
-        if (after_dot) {
-            value += (pphp_float)(c - '0') * fraction;
-            fraction *= (pphp_float)0.1;
-        } else {
-            value = value * (pphp_float)10 + (pphp_float)(c - '0');
-        }
-    }
-    if (i < token.length) {
-        i++;
-        if (i < token.length && (token.start[i] == '+' || token.start[i] == '-')) {
-            exponent_sign = token.start[i++] == '-' ? -1 : 1;
-        }
-        while (i < token.length) {
-            char c = token.start[i++];
-            if (c != '_') {
-                exponent = exponent * 10 + (c - '0');
-            }
-        }
-    }
-    while (exponent-- > 0) {
-        value *= exponent_sign > 0 ? (pphp_float)10 : (pphp_float)0.1;
-    }
-    return value;
+    return pphp_decimal_to_float(token.start, token.length);
 }
 #endif
 

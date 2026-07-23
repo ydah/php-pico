@@ -175,6 +175,222 @@ pphp_float pphp_integer_digits_to_float(const char *digits, size_t length,
 #endif
 }
 
+#if PPHP_USE_DOUBLE
+pphp_float pphp_decimal_to_float(const char *text, size_t length) {
+    size_t i = 0U;
+    pphp_float value = 0;
+    pphp_float fraction = (pphp_float)0.1;
+    int after_dot = 0;
+    int negative = 0;
+    int exponent = 0;
+    int exponent_sign = 1;
+    if (i < length && (text[i] == '+' || text[i] == '-')) {
+        negative = text[i++] == '-';
+    }
+    while (i < length && text[i] != 'e' && text[i] != 'E') {
+        char byte = text[i++];
+        if (byte == '_') continue;
+        if (byte == '.') {
+            after_dot = 1;
+        } else if (after_dot) {
+            value += (pphp_float)(byte - '0') * fraction;
+            fraction *= (pphp_float)0.1;
+        } else {
+            value = value * (pphp_float)10 + (pphp_float)(byte - '0');
+        }
+    }
+    if (i < length) {
+        i++;
+        if (i < length && (text[i] == '+' || text[i] == '-')) {
+            exponent_sign = text[i++] == '-' ? -1 : 1;
+        }
+        while (i < length) {
+            char byte = text[i++];
+            if (byte != '_' && exponent < 10000) {
+                exponent = exponent * 10 + (byte - '0');
+                if (exponent > 10000) exponent = 10000;
+            }
+        }
+    }
+    if (exponent != 0 && value != (pphp_float)0) {
+        value *= pphp_float_power(
+            (pphp_float)10, (pphp_float)(exponent_sign * exponent));
+    }
+    return negative ? -value : value;
+}
+#else
+#define PPHP_DECIMAL_SIGNIFICANT_LIMIT 150U
+#define PPHP_DECIMAL_MIDPOINT_DIGITS 120U
+
+typedef struct pphp_decimal_midpoint {
+    uint8_t digits[PPHP_DECIMAL_MIDPOINT_DIGITS];
+    size_t used;
+} pphp_decimal_midpoint;
+
+static void decimal_midpoint_init(pphp_decimal_midpoint *midpoint,
+                                  uint32_t value) {
+    midpoint->used = 0U;
+    do {
+        uint32_t quotient = value / 10U;
+        midpoint->digits[midpoint->used++] =
+            (uint8_t)(value - quotient * 10U);
+        value = quotient;
+    } while (value != 0U);
+}
+
+static void decimal_midpoint_multiply(pphp_decimal_midpoint *midpoint,
+                                      unsigned factor) {
+    unsigned carry = 0U;
+    size_t i;
+    for (i = 0U; i < midpoint->used; i++) {
+        unsigned product = (unsigned)midpoint->digits[i] * factor + carry;
+        unsigned quotient = product / 10U;
+        midpoint->digits[i] = (uint8_t)(product - quotient * 10U);
+        carry = quotient;
+    }
+    while (carry != 0U) {
+        unsigned quotient = carry / 10U;
+        midpoint->digits[midpoint->used++] =
+            (uint8_t)(carry - quotient * 10U);
+        carry = quotient;
+    }
+}
+
+static int saturated_decimal_add(int value, int addend) {
+    if (addend > 0 && value > INT_MAX - addend) return INT_MAX;
+    if (addend < 0 && value < INT_MIN - addend) return INT_MIN;
+    return value + addend;
+}
+
+static int decimal_compare_midpoint(const uint8_t *digits,
+                                    size_t digit_count, int magnitude,
+                                    int sticky, uint32_t lower) {
+    pphp_decimal_midpoint midpoint;
+    uint32_t exponent_field = lower >> 23U;
+    uint32_t significand =
+        (lower & UINT32_C(0x007fffff)) |
+        (exponent_field != 0U ? UINT32_C(0x00800000) : 0U);
+    int binary_exponent =
+        (exponent_field != 0U ? (int)exponent_field - 1 : 0) - 150;
+    int scale = binary_exponent < 0 ? -binary_exponent : 0;
+    int midpoint_magnitude;
+    size_t position;
+    decimal_midpoint_init(&midpoint, significand * 2U + 1U);
+    while (binary_exponent < 0) {
+        decimal_midpoint_multiply(&midpoint, 5U);
+        binary_exponent++;
+    }
+    while (binary_exponent > 0) {
+        decimal_midpoint_multiply(&midpoint, 2U);
+        binary_exponent--;
+    }
+    midpoint_magnitude = (int)midpoint.used - scale - 1;
+    if (magnitude != midpoint_magnitude) {
+        return magnitude > midpoint_magnitude ? 1 : -1;
+    }
+    for (position = 0U;
+         position < digit_count || position < midpoint.used; position++) {
+        unsigned left = position < digit_count ? digits[position] : 0U;
+        unsigned right = position < midpoint.used
+            ? midpoint.digits[midpoint.used - position - 1U] : 0U;
+        if (left != right) return left > right ? 1 : -1;
+    }
+    return sticky ? 1 : 0;
+}
+
+pphp_float pphp_decimal_to_float(const char *text, size_t length) {
+    uint8_t digits[PPHP_DECIMAL_SIGNIFICANT_LIMIT];
+    size_t i = 0U;
+    size_t digit_count = 0U;
+    int after_dot = 0;
+    int significant = 0;
+    int sticky = 0;
+    int negative = 0;
+    int explicit_exponent = 0;
+    int exponent_sign = 1;
+    int magnitude = 0;
+    uint32_t lower = 0U;
+    uint32_t upper = UINT32_C(0x7f800000);
+    uint32_t result_bits;
+    float result;
+    if (i < length && (text[i] == '+' || text[i] == '-')) {
+        negative = text[i++] == '-';
+    }
+    while (i < length && text[i] != 'e' && text[i] != 'E') {
+        char byte = text[i++];
+        unsigned digit;
+        if (byte == '_') continue;
+        if (byte == '.') {
+            after_dot = 1;
+            continue;
+        }
+        digit = (unsigned)(byte - '0');
+        if (!significant) {
+            if (after_dot) {
+                magnitude = saturated_decimal_add(magnitude, -1);
+            }
+            if (digit == 0U) continue;
+            significant = 1;
+        } else if (!after_dot) {
+            magnitude = saturated_decimal_add(magnitude, 1);
+        }
+        if (digit_count < PPHP_DECIMAL_SIGNIFICANT_LIMIT) {
+            digits[digit_count++] = (uint8_t)digit;
+        } else {
+            if (digit != 0U) sticky = 1;
+        }
+    }
+    if (!significant) {
+        result_bits = negative ? UINT32_C(0x80000000) : 0U;
+        memcpy(&result, &result_bits, sizeof(result));
+        return (pphp_float)result;
+    }
+    if (i < length) {
+        i++;
+        if (i < length && (text[i] == '+' || text[i] == '-')) {
+            exponent_sign = text[i++] == '-' ? -1 : 1;
+        }
+        while (i < length) {
+            char byte = text[i++];
+            if (byte != '_' && explicit_exponent < INT_MAX) {
+                int digit = byte - '0';
+                if (explicit_exponent > (INT_MAX - digit) / 10) {
+                    explicit_exponent = INT_MAX;
+                } else {
+                    explicit_exponent = explicit_exponent * 10 + digit;
+                }
+            }
+        }
+    }
+    magnitude = saturated_decimal_add(
+        magnitude, exponent_sign * explicit_exponent);
+    if (magnitude > 38) {
+        result_bits = UINT32_C(0x7f800000);
+        goto signed_result;
+    }
+    if (magnitude < -46) {
+        result_bits = 0U;
+        goto signed_result;
+    }
+    while (lower < upper) {
+        uint32_t middle = lower + (upper - lower) / 2U;
+        int comparison = decimal_compare_midpoint(
+            digits, digit_count, magnitude, sticky, middle);
+        if (comparison < 0 ||
+            (comparison == 0 && (middle & 1U) == 0U)) {
+            upper = middle;
+        } else {
+            lower = middle + 1U;
+        }
+    }
+    result_bits = lower;
+signed_result:
+    if (negative) result_bits |= UINT32_C(0x80000000);
+    memcpy(&result, &result_bits, sizeof(result));
+    return (pphp_float)result;
+}
+#endif
+
 #if !PPHP_USE_DOUBLE
 /*
  * ====================================================
@@ -751,27 +967,21 @@ static int floating_string_number(const char *text, size_t length,
                                   pphp_float *number, int *is_integer,
                                   int require_complete, size_t *consumed) {
     size_t i = 0U;
-    int sign = 1;
-    pphp_float value = 0;
-#if PPHP_ENABLE_FLOAT
-    pphp_float scale = 1;
-#endif
+    size_t number_start;
+    size_t number_end;
     int digits = 0;
     int fraction = 0;
-    int exponent = 0;
-#if PPHP_ENABLE_FLOAT
-    int exponent_sign = 1;
-#endif
     *consumed = 0U;
     while (i < length && (text[i] == ' ' || text[i] == '\t' || text[i] == '\n' ||
                           text[i] == '\r')) {
         i++;
     }
+    number_start = i;
     if (i < length && (text[i] == '+' || text[i] == '-')) {
-        sign = text[i++] == '-' ? -1 : 1;
+        i++;
     }
     while (i < length && text[i] >= '0' && text[i] <= '9') {
-        value = value * (pphp_float)10 + (pphp_float)(text[i++] - '0');
+        i++;
         digits++;
     }
     if (i < length && text[i] == '.') {
@@ -779,8 +989,7 @@ static int floating_string_number(const char *text, size_t length,
         fraction = 1;
         i++;
         while (i < length && text[i] >= '0' && text[i] <= '9') {
-            scale *= (pphp_float)0.1;
-            value += (pphp_float)(text[i++] - '0') * scale;
+            i++;
             digits++;
         }
 #else
@@ -795,13 +1004,9 @@ static int floating_string_number(const char *text, size_t length,
         size_t exponent_start = i++;
         int exponent_digits = 0;
         if (i < length && (text[i] == '+' || text[i] == '-')) {
-            exponent_sign = text[i++] == '-' ? -1 : 1;
+            i++;
         }
         while (i < length && text[i] >= '0' && text[i] <= '9') {
-            if (exponent < 10000) {
-                exponent = exponent * 10 + (text[i] - '0');
-                if (exponent > 10000) exponent = 10000;
-            }
             i++;
             exponent_digits++;
         }
@@ -814,6 +1019,7 @@ static int floating_string_number(const char *text, size_t length,
         return 0;
 #endif
     }
+    number_end = i;
     while (i < length &&
            (text[i] == ' ' || text[i] == '\t' || text[i] == '\n' ||
             text[i] == '\r')) {
@@ -821,15 +1027,8 @@ static int floating_string_number(const char *text, size_t length,
     }
     *consumed = i;
     if (require_complete && i != length) return 0;
-    if (exponent != 0) {
-#if PPHP_ENABLE_FLOAT
-        value *= pphp_float_power(
-            (pphp_float)10, (pphp_float)(exponent * exponent_sign));
-#else
-        return 0;
-#endif
-    }
-    *number = sign < 0 ? -value : value;
+    *number = pphp_decimal_to_float(text + number_start,
+                                    number_end - number_start);
     *is_integer = !fraction;
     return 1;
 }
