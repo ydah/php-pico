@@ -300,6 +300,10 @@ void *pphp_obj_data(pobject *object) {
     return object == NULL ? NULL : object->native_data;
 }
 
+const void *pphp_obj_const_data(const pobject *object) {
+    return object == NULL ? NULL : object->native_data;
+}
+
 #if PPHP_RC_DEBUG
 void pphp_obj_set_rc_visitor(pobject *object,
                              pphp_native_rc_visit_fn visitor) {

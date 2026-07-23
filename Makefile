@@ -119,6 +119,7 @@ RC_DEBUG_CONFIG_ON_OBJECT := build/host/test_rc_debug_config_on.o
 RC_DEBUG_CONFIG_OFF_OBJECT := build/host/test_rc_debug_config_off.o
 RC_DEBUG_CONFIG_INVALID_OBJECT := build/host/test_rc_debug_config_invalid.o
 RC_DEBUG_CONFIG_INVALID_LOG := build/host/test_rc_debug_config_invalid.log
+RC_DEBUG_VISITOR_API_OBJECT := build/host/test_rc_debug_visitor_api.o
 TEST_BINARY := build/host/test_core
 LEXER_TEST_BINARY := build/host/test_lexer
 PARSER_TEST_BINARY := build/host/test_parser
@@ -528,7 +529,7 @@ test-typecheck: test-typecheck-config $(TYPECHECK_ON_HOST_BINARY) $(TYPECHECK_OF
 	$(TYPECHECK_VM_UBSAN_BINARY)
 	ASAN_OPTIONS=detect_leaks=$(ASAN_LEAKS) $(TYPECHECK_VM_ASAN_BINARY)
 
-test-rc-debug-config: FORCE tests/unit/test_rc_debug_config.c
+test-rc-debug-config: FORCE tests/unit/test_rc_debug_config.c tests/unit/test_rc_debug_visitor_api.c
 	@mkdir -p build/host
 	$(CC) -Iinclude -DPPHP_RC_DEBUG=1 $(CFLAGS) -c \
 		tests/unit/test_rc_debug_config.c -o $(RC_DEBUG_CONFIG_ON_OBJECT)
@@ -543,6 +544,9 @@ test-rc-debug-config: FORCE tests/unit/test_rc_debug_config.c
 	fi
 	@grep -q 'PPHP_RC_DEBUG must be 0 or 1' \
 		$(RC_DEBUG_CONFIG_INVALID_LOG)
+	$(CC) -Iinclude -DPPHP_RC_DEBUG=1 $(CFLAGS) -c \
+		tests/unit/test_rc_debug_visitor_api.c \
+		-o $(RC_DEBUG_VISITOR_API_OBJECT)
 	@if $(MAKE) -f Makefile PPHP_RC_DEBUG=2 -n host >/dev/null 2>&1; then \
 		echo 'make PPHP_RC_DEBUG=2 unexpectedly succeeded' >&2; \
 		exit 1; \

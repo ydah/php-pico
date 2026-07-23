@@ -75,7 +75,7 @@ static void gpio_finalize(void *opaque) {
 #if PPHP_RC_DEBUG
 static void gpio_rc_visit(const pobject *object, pphp_rc_observe_fn observe,
                           void *context) {
-    const gpio_data *data = object->native_data;
+    const gpio_data *data = pphp_obj_const_data(object);
     if (data != NULL) observe(context, data->callback);
 }
 #endif

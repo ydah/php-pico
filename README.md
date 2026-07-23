@@ -38,8 +38,9 @@ set to `0`.
 Native object data that retains `pvalue` instances must register a
 `pphp_native_rc_visit_fn` with `pphp_obj_set_rc_visitor()` in debug builds. The
 visitor enumerates every owned value exactly once and must not retain, release,
-or mutate values while the checker is running. Opaque native data with no
-owned `pvalue` needs no visitor.
+or mutate values while the checker is running. Use `pphp_obj_const_data()` to
+read the visitor's `const pobject`; opaque native data with no owned `pvalue`
+needs no visitor.
 
 The normal host build uses double-precision floats, while RP2040 uses
 single-precision floats. To produce bytecode whose header and constants are
