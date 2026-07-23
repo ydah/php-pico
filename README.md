@@ -15,6 +15,14 @@ make bench
 make size
 ```
 
+The PHPT-mini suite currently contains 800 deterministic cases across scalar
+and control flow, arrays and COW, strings, functions and closures, classes,
+exceptions, JSON, and other standard-library behavior. Eighteen named cases
+exercise distinct `finally` control-flow paths. Generated cases are kept in
+sync by `python3 tools/generate_phpt_suite.py --check`; `make test-phpt`,
+`make test-target`, and `make test-diff` enforce both that check and a minimum
+of 800 cases.
+
 The executable is `build/host/php-pico`:
 
 ```sh

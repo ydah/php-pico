@@ -243,6 +243,10 @@ def main() -> int:
     parser.add_argument("--target", choices=("host", "serial"), default="host")
     parser.add_argument("--port", help="serial device for --target=serial")
     parser.add_argument("--baud", type=int, default=115200)
+    parser.add_argument(
+        "--minimum", type=int, default=1,
+        help="fail before execution when fewer than this many tests are discovered",
+    )
     args = parse_arguments(parser)
     args.serial = None
     if args.target == "serial":
@@ -257,6 +261,12 @@ def main() -> int:
     paths = discover(args.paths or ["tests/phpt"])
     if not paths:
         print("no PHPT files found", file=sys.stderr)
+        return 2
+    if len(paths) < args.minimum:
+        print(
+            f"PHPT suite has {len(paths)} tests, requires at least {args.minimum}",
+            file=sys.stderr,
+        )
         return 2
     try:
         results = (run_cases(args, paths) if args.mode == "run"

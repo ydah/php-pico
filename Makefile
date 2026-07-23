@@ -130,7 +130,7 @@ ASAN_PARSER_BINARY := build/host/test_parser_asan
 ASAN_VM_BINARY := build/host/test_vm_asan
 ASAN_LEAKS := $(if $(filter Darwin,$(shell uname -s)),0,1)
 
-.PHONY: all FORCE host host-pbc host-rp2040 rp2040 test test-unit test-compiler-off test-no-float test-no-float-ubsan test-float-format test-rp-integer-boundary test-warnings test-warnings-config test-typecheck test-typecheck-config test-rc-debug test-rc-debug-config test-phpt test-target test-asan test-diff bench size clean
+.PHONY: all FORCE host host-pbc host-rp2040 rp2040 test test-unit test-compiler-off test-no-float test-no-float-ubsan test-float-format test-rp-integer-boundary test-warnings test-warnings-config test-typecheck test-typecheck-config test-rc-debug test-rc-debug-config check-phpt-suite test-phpt test-target test-asan test-diff bench size clean
 
 FORCE:
 
@@ -560,12 +560,15 @@ test-rc-debug: test-rc-debug-config $(RC_DEBUG_ON_HOST_BINARY) $(RC_DEBUG_OFF_HO
 	sh tests/cli/rc_debug.sh $(RC_DEBUG_ON_HOST_BINARY) \
 		$(RC_DEBUG_OFF_HOST_BINARY)
 
-test-phpt: $(HOST_BINARY)
-	sh tools/phpt_run.sh --binary $(HOST_BINARY) tests/phpt
+check-phpt-suite:
+	python3 tools/generate_phpt_suite.py --check --minimum 800
 
-test-target:
+test-phpt: check-phpt-suite $(HOST_BINARY)
+	sh tools/phpt_run.sh --minimum 800 --binary $(HOST_BINARY) tests/phpt
+
+test-target: check-phpt-suite
 	@test -n "$(PORT)" || { echo "usage: make test-target PORT=/dev/ttyACM0"; exit 2; }
-	sh tools/phpt_run.sh --target=serial --port "$(PORT)" tests/phpt
+	sh tools/phpt_run.sh --minimum 800 --target=serial --port "$(PORT)" tests/phpt
 
 test: $(TEST_DEPENDENCIES)
 
@@ -584,8 +587,8 @@ test-asan:
 		-fsanitize=address,undefined $(VM_TEST_SOURCES) -fsanitize=address,undefined $(LDLIBS) -o $(ASAN_VM_BINARY)
 	ASAN_OPTIONS=detect_leaks=$(ASAN_LEAKS) $(ASAN_VM_BINARY)
 
-test-diff: test
-	sh tools/difftest.sh --binary $(HOST_BINARY) tests/phpt
+test-diff: test check-phpt-suite
+	sh tools/difftest.sh --minimum 800 --binary $(HOST_BINARY) tests/phpt
 
 bench: host
 	python3 tools/bench.py --binary $(HOST_BINARY)
