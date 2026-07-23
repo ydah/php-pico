@@ -98,6 +98,12 @@ set_source_files_properties(
   ${PPHP_ROOT}/third_party/littlefs/lfs_util.c
   PROPERTIES COMPILE_OPTIONS "-Wall;-Wextra;-Wno-conversion;-Wno-shadow;-Wno-unused-function"
 )
+set_property(SOURCE
+  ${PPHP_ROOT}/third_party/littlefs/lfs.c
+  ${PPHP_ROOT}/third_party/littlefs/lfs_util.c
+  APPEND PROPERTY COMPILE_DEFINITIONS
+    "$<$<CONFIG:Release>:LFS_NO_DEBUG>"
+)
 set_source_files_properties(
   ${PPHP_ROOT}/src/mini_printf.c
   PROPERTIES COMPILE_OPTIONS
