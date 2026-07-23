@@ -13,8 +13,9 @@ case "$output" in
         ;;
 esac
 
-if nm "$disabled" | grep -q 'pphp_obj_set_rc_visitor'; then
-    echo "native RC visitor API leaked into PPHP_RC_DEBUG=0 binary" >&2
+if nm "$disabled" | grep -Eq \
+    'pphp_(obj_const_data|obj_set_rc_visitor|rc_check|alloc_track|alloc_visit_tracked)'; then
+    echo "RC debug API leaked into PPHP_RC_DEBUG=0 binary" >&2
     exit 1
 fi
 

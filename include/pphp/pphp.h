@@ -123,8 +123,8 @@ int pphp_raise(pphp_ctx *context, const char *class_name,
 pobject *pphp_obj_new_with(pphp_ctx *context, pclass *class_entry,
                            size_t extra_bytes, void (*finalizer)(void *));
 void *pphp_obj_data(pobject *object);
-const void *pphp_obj_const_data(const pobject *object);
 #if PPHP_RC_DEBUG
+const void *pphp_obj_const_data(const pobject *object);
 /* Native data that owns pvalues must enumerate each owning edge exactly once.
  * The visitor is called only by pphp_rc_check; it must not retain, release, or
  * mutate the values it passes to observe. */
