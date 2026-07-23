@@ -63,6 +63,17 @@ TEST(honors_dynamic_width_precision_and_zero_precision) {
     ASSERT_STR("3|%q", buffer);
 }
 
+TEST(formats_promoted_short_arguments_used_by_littlefs) {
+    char buffer[96];
+    int length = pphp_snprintf(
+        buffer, sizeof(buffer),
+        "Invalid version v%hu.%hu (0x%hx) %s|%hhd|%hhu|%hX|%ho",
+        2, 7, 0xbeef, "disk", -2, 255, 0xabcd, 8);
+    ASSERT_EQ(strlen("Invalid version v2.7 (0xbeef) disk|-2|255|ABCD|10"),
+              (size_t)length);
+    ASSERT_STR("Invalid version v2.7 (0xbeef) disk|-2|255|ABCD|10", buffer);
+}
+
 TEST(truncates_without_changing_logical_length) {
     char buffer[6];
     ASSERT_EQ(11, pphp_snprintf(buffer, sizeof(buffer), "error:%s", "value"));
@@ -81,6 +92,8 @@ int main(void) {
          formats_device_integer_and_string_closure},
         {"dynamic width and precision",
          honors_dynamic_width_precision_and_zero_precision},
+        {"promoted short arguments",
+         formats_promoted_short_arguments_used_by_littlefs},
         {"bounded truncation", truncates_without_changing_logical_length},
         {"console formatting", console_path_uses_the_same_formatter},
     };

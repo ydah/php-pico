@@ -11,6 +11,15 @@ typedef struct pphp_format_output {
     int console;
 } pphp_format_output;
 
+enum {
+    FORMAT_LENGTH_DEFAULT,
+    FORMAT_LENGTH_SIZE,
+    FORMAT_LENGTH_LONG,
+    FORMAT_LENGTH_SHORT,
+    FORMAT_LENGTH_CHAR,
+    FORMAT_LENGTH_LONG_LONG
+};
+
 int stdio_putchar(int byte);
 
 static void format_byte(pphp_format_output *output, char byte) {
@@ -122,15 +131,22 @@ static int format_variadic(pphp_format_output *output, const char *format,
             if (precision < 0) precision = -1;
         }
         if (*format == 'z') {
-            length = 1;
+            length = FORMAT_LENGTH_SIZE;
             format++;
         } else if (*format == 'l') {
-            length = 2;
+            length = FORMAT_LENGTH_LONG;
             format++;
             if (*format == 'l') {
 #if defined(PPHP_INT64) && PPHP_INT64
-                length = 3;
+                length = FORMAT_LENGTH_LONG_LONG;
 #endif
+                format++;
+            }
+        } else if (*format == 'h') {
+            length = FORMAT_LENGTH_SHORT;
+            format++;
+            if (*format == 'h') {
+                length = FORMAT_LENGTH_CHAR;
                 format++;
             }
         }
@@ -150,9 +166,16 @@ static int format_variadic(pphp_format_output *output, const char *format,
             char byte = (char)va_arg(arguments, int);
             format_field(output, &byte, 1U, width, left_align);
         } else if (conversion == 'd' || conversion == 'i') {
-            long value = length == 0 ? (long)va_arg(arguments, int)
-                       : length == 1 ? (long)va_arg(arguments, ptrdiff_t)
-                                     : va_arg(arguments, long);
+            long value =
+                length == FORMAT_LENGTH_DEFAULT
+                    ? (long)va_arg(arguments, int)
+              : length == FORMAT_LENGTH_SIZE
+                    ? (long)va_arg(arguments, ptrdiff_t)
+              : length == FORMAT_LENGTH_SHORT
+                    ? (long)(short)va_arg(arguments, int)
+              : length == FORMAT_LENGTH_CHAR
+                    ? (long)(signed char)va_arg(arguments, int)
+                    : va_arg(arguments, long);
             int negative = value < 0L;
             unsigned long magnitude = negative
                 ? (unsigned long)(-(value + 1L)) + 1UL
@@ -162,9 +185,15 @@ static int format_variadic(pphp_format_output *output, const char *format,
         } else if (conversion == 'u' || conversion == 'x' ||
                    conversion == 'X' || conversion == 'o') {
             unsigned long value =
-                length == 0 ? (unsigned long)va_arg(arguments, unsigned int)
-              : length == 1 ? (unsigned long)va_arg(arguments, size_t)
-                            : va_arg(arguments, unsigned long);
+                length == FORMAT_LENGTH_DEFAULT
+                    ? (unsigned long)va_arg(arguments, unsigned int)
+              : length == FORMAT_LENGTH_SIZE
+                    ? (unsigned long)va_arg(arguments, size_t)
+              : length == FORMAT_LENGTH_SHORT
+                    ? (unsigned long)(unsigned short)va_arg(arguments, int)
+              : length == FORMAT_LENGTH_CHAR
+                    ? (unsigned long)(unsigned char)va_arg(arguments, int)
+                    : va_arg(arguments, unsigned long);
             unsigned base = conversion == 'o' ? 8U
                           : conversion == 'u' ? 10U : 16U;
             format_unsigned(output, value, base, conversion == 'X', 0,
