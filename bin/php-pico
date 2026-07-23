@@ -1,0 +1,64 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+function php_pico_fail(string $message, int $exitCode = 1): void
+{
+    fwrite(STDERR, "php-pico: {$message}\n");
+    exit($exitCode);
+}
+
+/**
+ * @param list<string> $command
+ */
+function php_pico_run(array $command, string $workingDirectory): int
+{
+    if (!function_exists('proc_open')) {
+        php_pico_fail('proc_open is required to build and run the host executable');
+    }
+
+    $descriptors = [
+        0 => STDIN,
+        1 => STDOUT,
+        2 => STDERR,
+    ];
+    $process = proc_open($command, $descriptors, $pipes, $workingDirectory);
+    if (!is_resource($process)) {
+        php_pico_fail('unable to start ' . $command[0]);
+    }
+
+    return proc_close($process);
+}
+
+if (PHP_OS_FAMILY === 'Windows') {
+    php_pico_fail(
+        'the Composer package supports POSIX hosts; use WSL or a GitHub release'
+    );
+}
+
+$packageRoot = dirname(__DIR__);
+$executable = $packageRoot . '/build/host/php-pico';
+
+if (!is_file($executable) || !is_executable($executable)) {
+    fwrite(STDERR, "php-pico: building the C99 host executable\n");
+    $status = php_pico_run(['make', '-s', 'host'], $packageRoot);
+    if ($status !== 0) {
+        php_pico_fail(
+            'build failed; install make and a C99 compiler, then retry',
+            $status
+        );
+    }
+}
+
+$arguments = array_slice($_SERVER['argv'], 1);
+if (function_exists('pcntl_exec')) {
+    @pcntl_exec($executable, $arguments);
+    php_pico_fail("unable to execute {$executable}");
+}
+
+$status = php_pico_run(
+    array_merge([$executable], $arguments),
+    $packageRoot
+);
+exit($status);

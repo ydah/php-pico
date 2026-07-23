@@ -4,6 +4,27 @@
 POSIX command-line program and as RP2040 firmware with GPIO/I2C/SPI/UART gems,
 littlefs storage, automatic application startup, and the P2Sh serial shell.
 
+## Composer installation
+
+Install the POSIX host CLI globally from Packagist:
+
+```sh
+composer global require ydah/php-pico
+php-pico --version
+```
+
+The first invocation builds the C99 executable in the installed package.
+`make` and a C99 compiler such as GCC or Clang must be available. The Composer
+package supports POSIX hosts; RP2040 UF2 images are distributed through GitHub
+Releases.
+
+For a project-local development tool, use:
+
+```sh
+composer require --dev ydah/php-pico
+vendor/bin/php-pico -r 'echo 6 * 7, PHP_EOL;'
+```
+
 ## Host build
 
 ```sh
