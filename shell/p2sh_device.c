@@ -184,6 +184,23 @@ int pphp_p2sh_run_file(pphp_state *state, const char *path) {
     return result;
 }
 
+static int php_process_status(const pphp_state *state, int result) {
+    if (result == PPHP_OK && pphp_exit_requested(state)) {
+        return (int)((unsigned)pphp_exit_status(state) & 0xffU);
+    }
+    if (result == PPHP_OK) return 0;
+    return result == PPHP_E_PARSE ? 1 : 255;
+}
+
+static int phpt_nonce_valid(const char *nonce) {
+    size_t length = 0U;
+    while (nonce[length] != '\0') {
+        if (!isalnum((unsigned char)nonce[length]) || length >= 32U) return 0;
+        length++;
+    }
+    return length != 0U;
+}
+
 static int compile_file(const char *input_path, const char *output_path) {
 #if PPHP_ENABLE_COMPILER
     char *source;
@@ -467,6 +484,27 @@ int pphp_p2sh_execute(pphp_state *state, char *line) {
     } else if (strcmp(command, "php") == 0) {
         if (resolve_argument(argument, path)) {
             (void)pphp_p2sh_run_file(state, path);
+        }
+    } else if (strcmp(command, "phpt") == 0) {
+        char *nonce = argument;
+        char message[80];
+        int result = PPHP_E_IO;
+        int count;
+        while (*nonce != '\0' && !isspace((unsigned char)*nonce)) nonce++;
+        if (*nonce != '\0') *nonce++ = '\0';
+        nonce = skip_space(nonce);
+        if (!phpt_nonce_valid(nonce)) {
+            write_line("usage: phpt FILE NONCE");
+            return PPHP_P2SH_DONE;
+        }
+        if (resolve_argument(argument, path)) {
+            result = pphp_p2sh_run_file(state, path);
+        }
+        count = snprintf(message, sizeof(message),
+                         "\r\n@@PPHP_PHPT_EXIT:%s:%d@@\r\n", nonce,
+                         php_process_status(state, result));
+        if (count > 0 && (size_t)count < sizeof(message)) {
+            write_bytes(message, (size_t)count);
         }
     } else if (strcmp(command, "phpc") == 0) {
         char input[P2SH_PATH_MAX];

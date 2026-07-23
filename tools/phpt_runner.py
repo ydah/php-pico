@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import html
 import re
+import secrets
 import subprocess
 import sys
 import tempfile
@@ -24,6 +25,8 @@ class CaseResult:
     expected: str
     actual: str
     detail: str = ""
+    expected_exit: int | None = None
+    actual_exit: int | None = None
 
 
 def parse_phpt(path: Path) -> dict[str, str]:
@@ -91,6 +94,7 @@ def serial_read_until(port: object, marker: bytes,
 def execute_serial(port: object, source: str) -> tuple[int, str]:
     payload = source.encode("utf-8")
     remote = "/home/.phpt.php"
+    nonce = secrets.token_hex(8)
     port.reset_input_buffer()
     port.write(f"upload {remote} {len(payload)}\n".encode("ascii"))
     serial_read_until(port, b"READY\r\n")
@@ -98,14 +102,23 @@ def execute_serial(port: object, source: str) -> tuple[int, str]:
     uploaded = serial_read_until(port, b"pico$ ")
     if b"OK\r\n" not in uploaded:
         return 2, normalized(uploaded.decode("utf-8", errors="replace"))
-    port.write(f"php {remote}\n".encode("ascii"))
+    port.write(f"phpt {remote} {nonce}\n".encode("ascii"))
     response = serial_read_until(port, b"pico$ ")
     response = response.removesuffix(b"pico$ ")
     _, separator, response = response.partition(b"\r\n")
     if not separator:
-        response = b""
-    actual = normalized(response.decode("utf-8", errors="replace"))
-    return 0, actual
+        raise ValueError("serial target returned no PHPT command response")
+    trailer = re.compile(
+        rb"\r\n@@PPHP_PHPT_EXIT:" + nonce.encode("ascii")
+        + rb":([+-]?\d+)@@\r\n\Z"
+    )
+    match = trailer.search(response)
+    if match is None:
+        raise ValueError("serial target returned no valid PHPT exit status")
+    actual = normalized(
+        response[:match.start()].decode("utf-8", errors="replace")
+    )
+    return int(match.group(1), 10), actual
 
 
 def execute_pico(args: argparse.Namespace, source: str) -> tuple[int, str]:
@@ -132,6 +145,19 @@ def matches_expectation(sections: dict[str, str], actual: str) -> tuple[bool, st
     raise ValueError("missing --EXPECT-- or --EXPECTF--")
 
 
+def expected_exit_code(sections: dict[str, str]) -> int:
+    raw = sections.get("EXPECT_EXIT", "0").strip()
+    if not re.fullmatch(r"[+-]?\d+", raw):
+        raise ValueError("--EXPECT_EXIT-- must contain one decimal integer")
+    return int(raw, 10)
+
+
+def exit_label(returncode: int) -> str:
+    if returncode < 0:
+        return f"signal {-returncode}"
+    return f"exit {returncode}"
+
+
 def discover(paths: list[str]) -> list[Path]:
     found: list[Path] = []
     for raw in paths:
@@ -150,14 +176,24 @@ def run_cases(args: argparse.Namespace, paths: list[Path]) -> list[CaseResult]:
             sections = parse_phpt(path)
             if "FILE" not in sections:
                 raise ValueError("missing --FILE--")
+            expected_exit = expected_exit_code(sections)
             if skipped(sections, args.php):
                 result = CaseResult(path, "SKIP", "", "")
             else:
                 returncode, actual = execute_pico(args, sections["FILE"])
                 matches, expected = matches_expectation(sections, actual)
-                status = "PASS" if matches else "FAIL"
-                detail = "" if returncode in (0, 1, 255) else f"exit {returncode}"
-                result = CaseResult(path, status, expected, actual, detail)
+                exit_matches = returncode == expected_exit
+                status = "PASS" if matches and exit_matches else "FAIL"
+                detail = ""
+                if not exit_matches:
+                    detail = (
+                        f"expected {exit_label(expected_exit)}, "
+                        f"actual {exit_label(returncode)}"
+                    )
+                result = CaseResult(
+                    path, status, expected, actual, detail,
+                    expected_exit, returncode,
+                )
         except (OSError, UnicodeError, ValueError) as error:
             result = CaseResult(path, "BORK", "", "", str(error))
         results.append(result)
@@ -178,20 +214,32 @@ def diff_cases(args: argparse.Namespace, paths: list[Path]) -> list[CaseResult]:
             sections = parse_phpt(path)
             if "FILE" not in sections:
                 raise ValueError("missing --FILE--")
+            expected_exit_code(sections)
             if skipped(sections, args.php):
                 result = CaseResult(path, "SKIP", "", "")
             else:
-                _, native = execute([args.php], sections["FILE"])
-                _, pico = execute_pico(args, sections["FILE"])
+                native_exit, native = execute([args.php], sections["FILE"])
+                pico_exit, pico = execute_pico(args, sections["FILE"])
                 declared = bool(sections.get("PHP_PICO_DIFF", "").strip())
-                if native == pico:
+                outputs_match = native == pico
+                exits_match = native_exit == pico_exit
+                if outputs_match and exits_match:
                     status = "PASS"
                 elif declared:
                     status = "DIFF"
                 else:
                     status = "FAIL"
-                result = CaseResult(path, status, native, pico,
-                                    sections.get("PHP_PICO_DIFF", "").strip())
+                detail = sections.get("PHP_PICO_DIFF", "").strip()
+                if not exits_match:
+                    exit_detail = (
+                        f"PHP {exit_label(native_exit)}, "
+                        f"php-pico {exit_label(pico_exit)}"
+                    )
+                    detail = f"{detail}; {exit_detail}" if detail else exit_detail
+                result = CaseResult(
+                    path, status, native, pico, detail,
+                    native_exit, pico_exit,
+                )
         except (OSError, UnicodeError, ValueError) as error:
             result = CaseResult(path, "BORK", "", "", str(error))
         results.append(result)
@@ -203,13 +251,17 @@ def write_report(path: Path, results: list[CaseResult]) -> None:
     rows = []
     for result in results:
         rows.append(
-            "<tr class='{}'><td>{}</td><td>{}</td><td><pre>{}</pre></td>"
-            "<td><pre>{}</pre></td><td>{}</td></tr>".format(
+            "<tr class='{}'><td>{}</td><td>{}</td><td><pre>{}</pre><div>{}</div></td>"
+            "<td><pre>{}</pre><div>{}</div></td><td>{}</td></tr>".format(
                 html.escape(result.status.lower()),
                 html.escape(str(result.path)),
                 html.escape(result.status),
                 html.escape(result.expected),
+                ("" if result.expected_exit is None
+                 else html.escape(exit_label(result.expected_exit))),
                 html.escape(result.actual),
+                ("" if result.actual_exit is None
+                 else html.escape(exit_label(result.actual_exit))),
                 html.escape(result.detail),
             )
         )

@@ -130,7 +130,7 @@ ASAN_PARSER_BINARY := build/host/test_parser_asan
 ASAN_VM_BINARY := build/host/test_vm_asan
 ASAN_LEAKS := $(if $(filter Darwin,$(shell uname -s)),0,1)
 
-.PHONY: all FORCE host host-pbc host-rp2040 rp2040 test test-unit test-compiler-off test-no-float test-no-float-ubsan test-float-format test-rp-integer-boundary test-warnings test-warnings-config test-typecheck test-typecheck-config test-rc-debug test-rc-debug-config check-phpt-suite test-phpt test-target test-asan test-diff bench size clean
+.PHONY: all FORCE host host-pbc host-rp2040 rp2040 test test-unit test-compiler-off test-no-float test-no-float-ubsan test-float-format test-rp-integer-boundary test-warnings test-warnings-config test-typecheck test-typecheck-config test-rc-debug test-rc-debug-config check-phpt-suite test-phpt-runner test-phpt test-target test-asan test-diff bench size clean
 
 FORCE:
 
@@ -443,10 +443,10 @@ $(VM_TEST_BINARY): FORCE $(VM_TEST_SOURCES)
 
 ifeq ($(PPHP_ENABLE_FLOAT),1)
 TEST_UNIT_DEPENDENCIES := $(TEST_BINARY) $(LEXER_TEST_BINARY) $(PARSER_TEST_BINARY) $(VM_TEST_BINARY) $(FLOAT_FORMAT_TEST_BINARY) $(HOST_BINARY)
-TEST_DEPENDENCIES := test-unit test-compiler-off test-no-float test-float-format test-warnings test-typecheck test-rc-debug test-phpt
+TEST_DEPENDENCIES := test-unit test-compiler-off test-no-float test-float-format test-warnings test-typecheck test-rc-debug test-phpt-runner test-phpt
 else
 TEST_UNIT_DEPENDENCIES := $(TEST_BINARY) $(LEXER_TEST_BINARY) $(PARSER_TEST_BINARY) $(HOST_BINARY)
-TEST_DEPENDENCIES := test-unit test-compiler-off test-no-float test-warnings test-typecheck test-rc-debug
+TEST_DEPENDENCIES := test-unit test-compiler-off test-no-float test-warnings test-typecheck test-rc-debug test-phpt-runner
 endif
 
 test-unit: $(TEST_UNIT_DEPENDENCIES)
@@ -562,6 +562,9 @@ test-rc-debug: test-rc-debug-config $(RC_DEBUG_ON_HOST_BINARY) $(RC_DEBUG_OFF_HO
 
 check-phpt-suite:
 	python3 tools/generate_phpt_suite.py --check --minimum 800
+
+test-phpt-runner:
+	python3 tests/tools/test_phpt_runner.py
 
 test-phpt: check-phpt-suite $(HOST_BINARY)
 	sh tools/phpt_run.sh --minimum 800 --binary $(HOST_BINARY) tests/phpt
