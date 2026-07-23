@@ -58,7 +58,12 @@ jobs:
           persist-credentials: false
       - run: make host
       - name: Compare with PHP 8.3
-        run: docker run --rm -v "$PWD:/work" -w /work php:8.3-cli sh tools/difftest.sh --binary build/host/php-pico tests/phpt
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work php:8.3-cli sh -c '
+            apt-get update -qq &&
+            apt-get install -y --no-install-recommends python3 >/dev/null &&
+            sh tools/difftest.sh --minimum 800 --binary build/host/php-pico tests/phpt
+          '
 
   rp2040:
     name: RP2040 firmware
