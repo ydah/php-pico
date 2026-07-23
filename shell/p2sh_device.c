@@ -11,15 +11,24 @@
 #include "pphp/hal.h"
 #include "state.h"
 
-#include <ctype.h>
+#include <limits.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
 #define P2SH_PATH_MAX 256U
 
 static char current_directory[P2SH_PATH_MAX];
 static unsigned php_chunk = 1U;
+
+static int ascii_space(unsigned char byte) {
+    return byte == ' ' || (byte >= '\t' && byte <= '\r');
+}
+
+static int ascii_alnum(unsigned char byte) {
+    return (byte >= '0' && byte <= '9') ||
+           (byte >= 'A' && byte <= 'Z') ||
+           (byte >= 'a' && byte <= 'z');
+}
 
 static void write_bytes(const char *bytes, size_t length) {
     hal_console_write(bytes, length);
@@ -35,13 +44,13 @@ static void write_line(const char *text) {
 }
 
 static char *skip_space(char *text) {
-    while (*text != '\0' && isspace((unsigned char)*text)) text++;
+    while (*text != '\0' && ascii_space((unsigned char)*text)) text++;
     return text;
 }
 
 static void trim_end(char *text) {
     size_t length = strlen(text);
-    while (length != 0U && isspace((unsigned char)text[length - 1U])) {
+    while (length != 0U && ascii_space((unsigned char)text[length - 1U])) {
         text[--length] = '\0';
     }
 }
@@ -195,7 +204,7 @@ static int php_process_status(const pphp_state *state, int result) {
 static int phpt_nonce_valid(const char *nonce) {
     size_t length = 0U;
     while (nonce[length] != '\0') {
-        if (!isalnum((unsigned char)nonce[length]) || length >= 32U) return 0;
+        if (!ascii_alnum((unsigned char)nonce[length]) || length >= 32U) return 0;
         length++;
     }
     return length != 0U;
@@ -285,7 +294,9 @@ static void cat_file(const char *path) {
 }
 
 static void echo_command(char *argument) {
-    char *redirect = strchr(argument, '>');
+    char *redirect = argument;
+    while (*redirect != '\0' && *redirect != '>') redirect++;
+    if (*redirect == '\0') redirect = NULL;
     if (redirect == NULL) {
         write_line(argument);
         return;
@@ -323,18 +334,30 @@ static void echo_command(char *argument) {
 static void upload_command(char *argument) {
     char path[P2SH_PATH_MAX];
     char *size_text = argument;
-    char *end;
     unsigned long requested;
     unsigned long received = 0UL;
     uint64_t deadline;
     pphp_file *file;
-    while (*size_text != '\0' && !isspace((unsigned char)*size_text)) {
+    while (*size_text != '\0' && !ascii_space((unsigned char)*size_text)) {
         size_text++;
     }
     if (*size_text != '\0') *size_text++ = '\0';
     size_text = skip_space(size_text);
-    requested = strtoul(size_text, &end, 10);
-    if (*argument == '\0' || *size_text == '\0' || *end != '\0' ||
+    requested = 0UL;
+    {
+        const char *cursor = size_text;
+        while (*cursor >= '0' && *cursor <= '9') {
+            unsigned long digit = (unsigned long)(*cursor - '0');
+            if (requested > (ULONG_MAX - digit) / 10UL) {
+                requested = ULONG_MAX;
+                break;
+            }
+            requested = requested * 10UL + digit;
+            cursor++;
+        }
+        if (*cursor != '\0') requested = ULONG_MAX;
+    }
+    if (*argument == '\0' || *size_text == '\0' ||
         requested > PPHP_FLASH_FS_SIZE || !resolve_argument(argument, path)) {
         write_line("usage: upload FILE SIZE");
         return;
@@ -396,7 +419,7 @@ int pphp_p2sh_execute(pphp_state *state, char *line) {
         return PPHP_P2SH_DONE;
     }
     argument = command;
-    while (*argument != '\0' && !isspace((unsigned char)*argument)) argument++;
+    while (*argument != '\0' && !ascii_space((unsigned char)*argument)) argument++;
     if (*argument != '\0') *argument++ = '\0';
     argument = skip_space(argument);
     if (strcmp(command, "version") == 0) {
@@ -420,7 +443,7 @@ int pphp_p2sh_execute(pphp_state *state, char *line) {
         }
     } else if (strcmp(command, "rm") == 0) {
         int recursive = strncmp(argument, "-r", 2U) == 0 &&
-                        isspace((unsigned char)argument[2]);
+                        ascii_space((unsigned char)argument[2]);
         char *target = recursive ? skip_space(argument + 2U) : argument;
         if (resolve_argument(target, path) &&
             !(recursive ? remove_tree(path, 0U) : pphp_fs_remove(path))) {
@@ -430,7 +453,7 @@ int pphp_p2sh_execute(pphp_state *state, char *line) {
         char source[P2SH_PATH_MAX];
         char target[P2SH_PATH_MAX];
         char *second = argument;
-        while (*second != '\0' && !isspace((unsigned char)*second)) second++;
+        while (*second != '\0' && !ascii_space((unsigned char)*second)) second++;
         if (*second != '\0') *second++ = '\0';
         second = skip_space(second);
         if (!resolve_argument(argument, source) ||
@@ -490,7 +513,7 @@ int pphp_p2sh_execute(pphp_state *state, char *line) {
         char message[80];
         int result = PPHP_E_IO;
         int count;
-        while (*nonce != '\0' && !isspace((unsigned char)*nonce)) nonce++;
+        while (*nonce != '\0' && !ascii_space((unsigned char)*nonce)) nonce++;
         if (*nonce != '\0') *nonce++ = '\0';
         nonce = skip_space(nonce);
         if (!phpt_nonce_valid(nonce)) {
@@ -510,7 +533,7 @@ int pphp_p2sh_execute(pphp_state *state, char *line) {
         char input[P2SH_PATH_MAX];
         char output[P2SH_PATH_MAX];
         char *second = argument;
-        while (*second != '\0' && !isspace((unsigned char)*second)) second++;
+        while (*second != '\0' && !ascii_space((unsigned char)*second)) second++;
         if (*second != '\0') *second++ = '\0';
         second = skip_space(second);
         if (resolve_argument(argument, input) &&

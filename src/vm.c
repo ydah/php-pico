@@ -717,19 +717,19 @@ static void convert_runtime_error(pphp_state *state, size_t throw_pc) {
         (void)snprintf(raised_class, sizeof(raised_class), "%s",
                        state->raised_class);
         class_name = raised_class;
-    } else if (strstr(message, "Division by zero") != NULL ||
-        strstr(message, "Modulo by zero") != NULL) {
+    } else if (ps_contains_cstr(message, "Division by zero") ||
+        ps_contains_cstr(message, "Modulo by zero")) {
         class_name = "DivisionByZeroError";
-    } else if (strstr(message, "out of memory") != NULL ||
-               strstr(message, "Out of memory") != NULL) {
+    } else if (ps_contains_cstr(message, "out of memory") ||
+               ps_contains_cstr(message, "Out of memory")) {
         class_name = "OutOfMemoryError";
-    } else if (strstr(message, "Too few arguments") != NULL ||
-               strstr(message, "Too many arguments") != NULL ||
-               strstr(message, "expects exactly") != NULL ||
-               strstr(message, "expects at most") != NULL) {
+    } else if (ps_contains_cstr(message, "Too few arguments") ||
+               ps_contains_cstr(message, "Too many arguments") ||
+               ps_contains_cstr(message, "expects exactly") ||
+               ps_contains_cstr(message, "expects at most")) {
         class_name = "ArgumentCountError";
-    } else if (strstr(message, "expects") != NULL ||
-               strstr(message, "unsupported operand") != NULL) {
+    } else if (ps_contains_cstr(message, "expects") ||
+               ps_contains_cstr(message, "unsupported operand")) {
         class_name = "TypeError";
     }
     state->error[0] = '\0';

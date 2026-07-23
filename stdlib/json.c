@@ -148,8 +148,8 @@ static int encode_array(json_buffer *buffer, const parray *array, int pretty,
                 }
             } else {
                 char number[32];
-                int length = snprintf(number, sizeof(number), "%lld",
-                                      (long long)key.as.i);
+                int length = pphp_format_integer(number, sizeof(number),
+                                                 key.as.i);
                 if (length < 0 || !encode_string(buffer, number, (size_t)length)) {
                     goto failed;
                 }
@@ -206,7 +206,7 @@ static int encode_value(json_buffer *buffer, pvalue value, int pretty,
         case PT_FALSE: return append(buffer, "false", 5U);
         case PT_TRUE: return append(buffer, "true", 4U);
         case PT_INT:
-            length = snprintf(number, sizeof(number), "%lld", (long long)value.as.i);
+            length = pphp_format_integer(number, sizeof(number), value.as.i);
             return length >= 0 && append(buffer, number, (size_t)length);
 #if PPHP_ENABLE_FLOAT
         case PT_FLOAT:

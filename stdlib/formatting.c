@@ -15,6 +15,14 @@ typedef struct format_buffer {
     size_t capacity;
 } format_buffer;
 
+#if PPHP_INT64
+typedef long long pphp_printf_integer;
+typedef unsigned long long pphp_printf_unsigned;
+#else
+typedef long pphp_printf_integer;
+typedef unsigned long pphp_printf_unsigned;
+#endif
+
 static int name_is(const pstring *name, const char *expected) {
     return ps_equal_bytes(name, expected, strlen(expected));
 }
@@ -57,7 +65,7 @@ static int buffer_character(format_buffer *buffer, char value) {
 }
 
 static int buffer_printf_integer(format_buffer *buffer, const char *format,
-                                 long long value) {
+                                 pphp_printf_integer value) {
     int length = snprintf(NULL, 0U, format, value);
     if (length < 0 || !buffer_reserve(buffer, (size_t)length)) return 0;
     (void)snprintf(buffer->data + buffer->length,
@@ -67,7 +75,7 @@ static int buffer_printf_integer(format_buffer *buffer, const char *format,
 }
 
 static int buffer_printf_unsigned(format_buffer *buffer, const char *format,
-                                  unsigned long long value) {
+                                  pphp_printf_unsigned value) {
     int length = snprintf(NULL, 0U, format, value);
     if (length < 0 || !buffer_reserve(buffer, (size_t)length)) return 0;
     (void)snprintf(buffer->data + buffer->length,
@@ -308,19 +316,25 @@ static int append_formatted(pphp_state *state, const pstring *format,
         }
         if (conversion == 'd') {
             native[native_length++] = 'l';
+#if PPHP_INT64
             native[native_length++] = 'l';
+#endif
             native[native_length++] = 'd';
             native[native_length] = '\0';
             if (!buffer_printf_integer(buffer, native,
-                                       (long long)integer_value)) return 0;
+                                       (pphp_printf_integer)integer_value)) {
+                return 0;
+            }
         } else if (conversion == 'u' || conversion == 'x' ||
                    conversion == 'X' || conversion == 'o') {
             native[native_length++] = 'l';
+#if PPHP_INT64
             native[native_length++] = 'l';
+#endif
             native[native_length++] = conversion;
             native[native_length] = '\0';
             if (!buffer_printf_unsigned(buffer, native,
-                                        (unsigned long long)
+                                        (pphp_printf_unsigned)
                                             unsigned_integer_value(
                                                 integer_value))) {
                 return 0;
@@ -361,7 +375,7 @@ static int append_print_value(format_buffer *buffer, pvalue value,
         case PT_TRUE:
             return buffer_character(buffer, '1');
         case PT_INT:
-            length = snprintf(number, sizeof(number), "%lld", (long long)value.as.i);
+            length = pphp_format_integer(number, sizeof(number), value.as.i);
             return length >= 0 && buffer_append(buffer, number, (size_t)length);
 #if PPHP_ENABLE_FLOAT
         case PT_FLOAT:
@@ -392,8 +406,8 @@ static int append_print_value(format_buffer *buffer, pvalue value,
                 }
                 if (!buffer_character(buffer, '[')) return 0;
                 if (key.type == PT_INT) {
-                    length = snprintf(number, sizeof(number), "%lld",
-                                      (long long)key.as.i);
+                    length = pphp_format_integer(number, sizeof(number),
+                                                 key.as.i);
                     if (length < 0 || !buffer_append(buffer, number, (size_t)length)) {
                         return 0;
                     }

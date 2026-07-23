@@ -20,6 +20,13 @@ case "$binary" in
             rom=$(($1 + $2))
             ram=$(($2 + $3))
         fi
+        nm_tool=${NM_TOOL:-arm-none-eabi-nm}
+        if command -v "$nm_tool" >/dev/null 2>&1 &&
+           "$nm_tool" "$binary" | grep -Eq \
+               '(_ntoa_long_long|printf_none_assert|__wrap_powf|float2double_shim|double2float_shim)'; then
+            echo 'sizecheck: forbidden printf or double runtime linked' >&2
+            exit 1
+        fi
         if [ -f docs/size.csv ]; then
             previous_rom=$(awk -F, -v target="$binary" \
                 '$3 == target && $5 ~ /^[0-9]+$/ { value = $5 } END { print value }' \

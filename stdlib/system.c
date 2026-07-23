@@ -30,6 +30,18 @@ static int invalid_arguments(pphp_state *state, const pstring *name) {
     return -1;
 }
 
+static size_t format_u64_decimal(char *buffer, uint64_t value) {
+    char reversed[20];
+    size_t length = 0U;
+    size_t output = 0U;
+    do {
+        reversed[length++] = (char)('0' + value % UINT64_C(10));
+        value /= UINT64_C(10);
+    } while (value != 0U);
+    while (length != 0U) buffer[output++] = reversed[--length];
+    return output;
+}
+
 static uint32_t next_random(pphp_state *state) {
     uint32_t value = state->random_state;
     if (value == 0U) value = UINT32_C(0x6d2b79f5);
@@ -278,11 +290,22 @@ static int call_clock(pphp_state *state, const pstring *name,
 #endif
         } else {
             char buffer[48];
-            int length = snprintf(buffer, sizeof(buffer), "0.%06llu %llu",
-                                  (unsigned long long)(microseconds % UINT64_C(1000000)),
-                                  (unsigned long long)(microseconds / UINT64_C(1000000)));
-            pstring *string = length < 0 ? NULL
-                                        : ps_new(buffer, (size_t)length);
+            uint32_t fraction =
+                (uint32_t)(microseconds % UINT64_C(1000000));
+            uint32_t divisor = UINT32_C(100000);
+            size_t length = 2U;
+            pstring *string;
+            buffer[0] = '0';
+            buffer[1] = '.';
+            while (divisor != 0U) {
+                buffer[length++] = (char)('0' + fraction / divisor);
+                fraction %= divisor;
+                divisor /= 10U;
+            }
+            buffer[length++] = ' ';
+            length += format_u64_decimal(
+                buffer + length, microseconds / UINT64_C(1000000));
+            string = ps_new(buffer, length);
             if (string == NULL) {
                 pphp_runtime_error(state, 0U,
                                    "out of memory returning microtime");

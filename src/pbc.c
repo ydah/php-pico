@@ -227,6 +227,61 @@ static uint32_t get_u32(const uint8_t *bytes, size_t offset) {
            ((uint32_t)bytes[offset + 3U] << 24U);
 }
 
+#if PPHP_ENABLE_FLOAT && !PPHP_USE_DOUBLE
+static float pbc_binary64_to_float(uint64_t bits) {
+    uint32_t sign = (uint32_t)(bits >> 32U) & UINT32_C(0x80000000);
+    uint32_t source_exponent = (uint32_t)(bits >> 52U) & UINT32_C(0x7ff);
+    uint64_t fraction = bits & UINT64_C(0x000fffffffffffff);
+    uint32_t result_bits;
+    float result;
+    if (source_exponent == UINT32_C(0x7ff)) {
+        if (fraction == 0U) {
+            result_bits = sign | UINT32_C(0x7f800000);
+        } else {
+            uint32_t payload = (uint32_t)(fraction >> 29U);
+            result_bits = sign | UINT32_C(0x7f800000) |
+                          payload | UINT32_C(0x00400000);
+        }
+    } else if (source_exponent == 0U) {
+        result_bits = sign;
+    } else {
+        int exponent = (int)source_exponent - 1023;
+        uint64_t significand = fraction | UINT64_C(0x0010000000000000);
+        unsigned shift = exponent >= -126 ? 29U : (unsigned)(-exponent - 97);
+        uint64_t rounded;
+        if (exponent < -150) {
+            rounded = 0U;
+        } else {
+            uint64_t remainder_mask = (UINT64_C(1) << shift) - 1U;
+            uint64_t remainder = significand & remainder_mask;
+            uint64_t halfway = UINT64_C(1) << (shift - 1U);
+            rounded = significand >> shift;
+            if (remainder > halfway ||
+                (remainder == halfway && (rounded & 1U) != 0U)) {
+                rounded++;
+            }
+        }
+        if (exponent >= -126) {
+            if (rounded == UINT64_C(0x01000000)) {
+                rounded >>= 1U;
+                exponent++;
+            }
+            if (exponent > 127) {
+                result_bits = sign | UINT32_C(0x7f800000);
+            } else {
+                result_bits = sign |
+                    ((uint32_t)(exponent + 127) << 23U) |
+                    ((uint32_t)rounded & UINT32_C(0x007fffff));
+            }
+        } else {
+            result_bits = sign | (uint32_t)rounded;
+        }
+    }
+    memcpy(&result, &result_bits, sizeof(result));
+    return result;
+}
+#endif
+
 static int pbc_range_available(size_t offset, size_t need, size_t length) {
     return offset <= length && need <= length - offset;
 }
@@ -343,62 +398,47 @@ static int pbc_property_type_valid(const pstring *type, int has_parent) {
 #endif
 
 static size_t pbc_instruction_size(const pproto *proto, size_t pc) {
+    /* Two four-bit instruction sizes per byte; zero marks invalid opcodes. */
+    static const uint8_t sizes[(OP_MCALL_DYNAMIC_ARRAY + 2U) / 2U] = {
+        0x11U, 0x11U, 0x01U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U,
+        0x11U, 0x21U, 0x35U, 0x22U, 0x21U, 0x34U, 0x22U, 0x00U,
+        0x11U, 0x11U, 0x11U, 0x11U, 0x11U, 0x11U, 0x11U, 0x00U,
+        0x11U, 0x11U, 0x11U, 0x11U, 0x11U, 0x02U, 0x01U, 0x00U,
+        0x33U, 0x33U, 0x33U, 0x03U, 0x00U, 0x00U, 0x00U, 0x00U,
+        0x24U, 0x11U, 0x32U, 0x21U,
+#if PPHP_TYPECHECK
+        0x01U,
+#else
+        0x00U,
+#endif
+        0x00U, 0x00U, 0x00U,
+        0x13U, 0x11U, 0x11U, 0x41U, 0x11U, 0x11U, 0x01U, 0x00U,
+        0x34U, 0x43U, 0x33U, 0x56U, 0x53U, 0x55U, 0x23U, 0x01U,
+        0x1fU, 0x01U, 0x33U, 0x66U,
+#if PPHP_TYPECHECK
+        0x37U,
+#else
+        0x34U,
+#endif
+        0x31U, 0x00U, 0x00U,
+        0x13U, 0x11U, 0x12U
+    };
     uint8_t opcode;
-    size_t operands = 0U;
+    size_t size;
     if (pc >= proto->code_length) return 0U;
     opcode = proto->code[pc++];
-    switch ((pphp_opcode)opcode) {
-        case OP_LOAD_I8: case OP_LOAD_LOCAL: case OP_LOAD_LOCAL_QUIET:
-        case OP_STORE_LOCAL: case OP_UNSET_LOCAL: case OP_BIND_GLOBAL:
-        case OP_ECHO: case OP_CALL_VALUE: case OP_INCLUDE: case OP_CAST:
-        case OP_NEW_OBJ_DYNAMIC: case OP_MCALL_DYNAMIC:
-            operands = 1U; break;
-        case OP_LOAD_CONST: case OP_LOAD_NAMED_CONST: case OP_DEF_CONST:
-        case OP_DEF_FUNC: case OP_CALL_ARRAY: case OP_MCALL_ARRAY:
-        case OP_NEW_OBJ_ARRAY: case OP_DEF_CCONST: case OP_DEF_INTERFACE:
-        case OP_JMP: case OP_JMP_IF: case OP_JMP_UNLESS:
-        case OP_JMP_IF_KEEP: case OP_JMP_UNLESS_KEEP:
-        case OP_JMP_NOTNULL_KEEP: case OP_JMP_IFNULL_KEEP: case OP_LINE:
-        case OP_NEW_ARRAY: case OP_PROP_GET: case OP_PROP_GET_QUIET:
-        case OP_PROP_SET: case OP_INSTANCEOF:
-            operands = 2U; break;
-        case OP_CALL: case OP_NEW_OBJ: case OP_MCALL: case OP_FE_NEXT:
-        case OP_STATIC_INIT:
-            operands = 3U; break;
-        case OP_SPROP_GET: case OP_SPROP_SET: case OP_CLSCONST:
-        case OP_SCALL_ARRAY: case OP_LOAD_I32:
-            operands = 4U; break;
-        case OP_SCALL: case OP_DEF_CLASS: case OP_DEF_METHOD:
-            operands = 5U; break;
-        case OP_DEF_PROP:
-            operands = PPHP_TYPECHECK ? 6U : 3U; break;
-        case OP_CLOSURE:
-            if (!pbc_range_available(pc, 3U, proto->code_length)) return 0U;
-            operands = 3U + (size_t)proto->code[pc + 2U] * 2U; break;
-        case OP_NOP: case OP_HALT: case OP_POP: case OP_DUP: case OP_SWAP:
-        case OP_LOAD_NULL: case OP_LOAD_TRUE: case OP_LOAD_FALSE:
-        case OP_LOAD_ARGC: case OP_ADD: case OP_SUB: case OP_MUL: case OP_DIV:
-        case OP_MOD: case OP_POW: case OP_NEG: case OP_CONCAT: case OP_BAND:
-        case OP_BOR: case OP_BXOR: case OP_BNOT: case OP_SHL: case OP_SHR:
-        case OP_EQ: case OP_NE: case OP_IDENT: case OP_NIDENT: case OP_LT:
-        case OP_LE: case OP_GT: case OP_GE: case OP_CMP: case OP_NOT:
-        case OP_INSTANCEOF_DYNAMIC: case OP_RET: case OP_RET_NULL:
-        case OP_CALL_VALUE_ARRAY:
-#if PPHP_TYPECHECK
-        case OP_TYPECHECK_ARGS:
-#endif
-        case OP_ARR_PUSH: case OP_ARR_SET: case OP_IDX_GET: case OP_IDX_SET:
-        case OP_IDX_APPEND: case OP_FE_INIT: case OP_FE_FREE:
-        case OP_ARR_EXTEND: case OP_ARR_SEPARATE: case OP_IDX_UNSET:
-        case OP_IDX_GET_QUIET: case OP_NEW_OBJ_DYNAMIC_ARRAY: case OP_THROW:
-        case OP_CLONE: case OP_DEF_END: case OP_PROP_GET_DYNAMIC:
-        case OP_PROP_SET_DYNAMIC: case OP_PROP_GET_DYNAMIC_QUIET:
-        case OP_MCALL_DYNAMIC_ARRAY:
-            break;
-        default: return 0U;
+    if (opcode > OP_MCALL_DYNAMIC_ARRAY) return 0U;
+    size = sizes[opcode >> 1U];
+    size = (opcode & 1U) != 0U ? size >> 4U : size & 15U;
+    if (size == 0U) {
+        return 0U;
     }
-    return pbc_range_available(pc, operands, proto->code_length)
-               ? operands + 1U : 0U;
+    if (size == 15U) {
+        if (!pbc_range_available(pc, 3U, proto->code_length)) return 0U;
+        size = 4U + (size_t)proto->code[pc + 2U] * 2U;
+    }
+    return pbc_range_available(pc, size - 1U, proto->code_length)
+               ? size : 0U;
 }
 
 static int pbc_instruction_boundary(const pproto *proto, size_t target) {
@@ -453,7 +493,20 @@ static int pbc_closure_proto_name(const pproto *proto, size_t index) {
     return value == index;
 }
 
-static int pbc_validate_code(const pmodule *module, size_t proto_index) {
+enum {
+    PBC_REF_FUNCTION = 1,
+    PBC_REF_METHOD = 2,
+    PBC_REF_CLOSURE = 4
+};
+
+static int pbc_reference_proto(pmodule *module, uint16_t target,
+                               uint8_t role) {
+    if (module->protos[target]->role != 0U) return 0;
+    module->protos[target]->role = role;
+    return 1;
+}
+
+static int pbc_validate_code(pmodule *module, size_t proto_index) {
     const pproto *proto = module->protos[proto_index];
     size_t pc = 0U;
     int building_class = 0;
@@ -505,7 +558,9 @@ static int pbc_validate_code(const pmodule *module, size_t proto_index) {
             case OP_DEF_FUNC:
                 if (first >= module->count ||
                     module->protos[first]->is_method ||
-                    !module->protos[first]->conditional) goto invalid;
+                    !module->protos[first]->conditional ||
+                    !pbc_reference_proto(module, first,
+                                         PBC_REF_FUNCTION)) goto invalid;
                 break;
             case OP_CALL: case OP_NEW_OBJ: case OP_MCALL:
                 if (!pbc_string_constant(proto, first) ||
@@ -591,6 +646,7 @@ static int pbc_validate_code(const pmodule *module, size_t proto_index) {
                 if (!building_class || !pbc_string_constant(proto, first) ||
                     target == 0U || target >= module->count ||
                     module->protos[target]->conditional ||
+                    !pbc_reference_proto(module, target, PBC_REF_METHOD) ||
                     !pbc_method_proto_name(module->protos[target],
                                            building_class_name, method_name) ||
                     !pbc_flag_visibility(flags) ||
@@ -643,6 +699,7 @@ static int pbc_validate_code(const pmodule *module, size_t proto_index) {
                 size_t capture;
                 if (first == 0U || first >= module->count ||
                     module->protos[first]->conditional ||
+                    !pbc_reference_proto(module, first, PBC_REF_CLOSURE) ||
                     !pbc_closure_proto_name(module->protos[first], first) ||
                     (size_t)module->protos[first]->n_params + count >
                         module->protos[first]->n_locals) goto invalid;
@@ -705,42 +762,8 @@ invalid:
     return 0;
 }
 
-static int pbc_assign_proto_roles(pmodule *module) {
-    enum {
-        PBC_REF_FUNCTION = 1,
-        PBC_REF_METHOD = 2,
-        PBC_REF_CLOSURE = 4
-    };
-    size_t source;
+static int pbc_finalize_proto_roles(pmodule *module) {
     size_t target;
-    for (target = 0U; target < module->count; target++) {
-        module->protos[target]->role = 0U;
-    }
-    for (source = 0U; source < module->count; source++) {
-        const pproto *proto = module->protos[source];
-        size_t pc = 0U;
-        while (pc < proto->code_length) {
-            uint8_t opcode = proto->code[pc];
-            size_t size = pbc_instruction_size(proto, pc);
-            uint16_t referenced = UINT16_MAX;
-            uint8_t reference_role = 0U;
-            if (opcode == OP_DEF_FUNC || opcode == OP_CLOSURE) {
-                referenced = get_u16(proto->code, pc + 1U);
-                reference_role = opcode == OP_DEF_FUNC
-                    ? PBC_REF_FUNCTION : PBC_REF_CLOSURE;
-            } else if (opcode == OP_DEF_METHOD) {
-                referenced = get_u16(proto->code, pc + 3U);
-                reference_role = PBC_REF_METHOD;
-            }
-            if (reference_role != 0U) {
-                if ((module->protos[referenced]->role & reference_role) != 0U) {
-                    return 0;
-                }
-                module->protos[referenced]->role |= reference_role;
-            }
-            pc += size;
-        }
-    }
     for (target = 0U; target < module->count; target++) {
         uint8_t references = module->protos[target]->role;
         if (target == 0U) {
@@ -1433,11 +1456,17 @@ int pphp_pbc_load(const void *data, size_t length, pmodule *module) {
             } else if (tag == 3U) {
 #if PPHP_ENABLE_FLOAT
                 uint64_t bits;
-                double number;
                 bits = get_u32(bytes, offset + 8U);
                 bits |= (uint64_t)get_u32(bytes, offset + 12U) << 32U;
-                memcpy(&number, &bits, sizeof(number));
-                value = pv_float((pphp_float)number);
+#if PPHP_USE_DOUBLE
+                {
+                    double number;
+                    memcpy(&number, &bits, sizeof(number));
+                    value = pv_float((pphp_float)number);
+                }
+#else
+                value = pv_float((pphp_float)pbc_binary64_to_float(bits));
+#endif
 #else
                 result = PPHP_E_UNSUPPORTED;
                 goto failed_module;
@@ -1569,10 +1598,11 @@ int pphp_pbc_load(const void *data, size_t length, pmodule *module) {
 #endif
         if (!size_align4(&offset) || offset != limit) goto failed_module;
     }
+    for (i = 0U; i < module->count; i++) module->protos[i]->role = 0U;
     for (i = 0U; i < module->count; i++) {
         if (!pbc_validate_code(module, i)) goto failed_module;
     }
-    if (!pbc_assign_proto_roles(module)) goto failed_module;
+    if (!pbc_finalize_proto_roles(module)) goto failed_module;
 #if PPHP_TYPECHECK
     {
         int type_context_status = pbc_validate_type_context(module);

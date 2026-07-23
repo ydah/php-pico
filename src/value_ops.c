@@ -174,6 +174,113 @@ pphp_float pphp_integer_digits_to_float(const char *digits, size_t length,
     }
 #endif
 }
+
+pphp_float pphp_float_power(pphp_float base, pphp_float exponent) {
+#if PPHP_USE_DOUBLE
+    return PPHP_FLOAT_MATH(pow)(base, exponent);
+#else
+    uint32_t base_bits;
+    uint32_t exponent_bits;
+    uint32_t absolute_base_bits;
+    uint32_t absolute_exponent_bits;
+    uint32_t exponent_field;
+    int exponent_is_integer = 0;
+    int exponent_is_odd = 0;
+    float absolute_base;
+    float result;
+    memcpy(&base_bits, &base, sizeof(base_bits));
+    memcpy(&exponent_bits, &exponent, sizeof(exponent_bits));
+    absolute_base_bits = base_bits & UINT32_C(0x7fffffff);
+    absolute_exponent_bits = exponent_bits & UINT32_C(0x7fffffff);
+
+    /* pow(1, NaN) and pow(x, +/-0) are both exactly one. */
+    if (absolute_exponent_bits == 0U || base_bits == UINT32_C(0x3f800000)) {
+        return 1.0f;
+    }
+    if (absolute_base_bits > UINT32_C(0x7f800000) ||
+        absolute_exponent_bits > UINT32_C(0x7f800000)) {
+        uint32_t nan_bits = UINT32_C(0x7fc00000);
+        memcpy(&result, &nan_bits, sizeof(result));
+        return result;
+    }
+    if (absolute_base_bits == UINT32_C(0x3f800000) &&
+        absolute_exponent_bits == UINT32_C(0x7f800000)) {
+        return 1.0f;
+    }
+
+    exponent_field = absolute_exponent_bits >> 23U;
+    if (exponent_field >= 127U && exponent_field < 255U) {
+        if (exponent_field >= 150U) {
+            exponent_is_integer = 1;
+        } else {
+            unsigned shift = 150U - exponent_field;
+            uint32_t significand =
+                (absolute_exponent_bits & UINT32_C(0x007fffff)) |
+                UINT32_C(0x00800000);
+            uint32_t fractional_mask = (UINT32_C(1) << shift) - 1U;
+            if ((significand & fractional_mask) == 0U) {
+                exponent_is_integer = 1;
+                exponent_is_odd =
+                    (int)((significand >> shift) & UINT32_C(1));
+            }
+        }
+    }
+
+    if (absolute_exponent_bits == UINT32_C(0x7f800000)) {
+        if (absolute_base_bits == UINT32_C(0x3f800000)) return 1.0f;
+        if ((absolute_base_bits > UINT32_C(0x3f800000)) ==
+            ((exponent_bits & UINT32_C(0x80000000)) == 0U)) {
+            uint32_t infinity_bits = UINT32_C(0x7f800000);
+            memcpy(&result, &infinity_bits, sizeof(result));
+            return result;
+        }
+        return 0.0f;
+    }
+
+    if (absolute_base_bits == 0U ||
+        absolute_base_bits == UINT32_C(0x7f800000)) {
+        uint32_t result_bits;
+        int reciprocal = (exponent_bits & UINT32_C(0x80000000)) != 0U;
+        if ((absolute_base_bits == 0U) == reciprocal) {
+            result_bits = UINT32_C(0x7f800000);
+        } else {
+            result_bits = 0U;
+        }
+        if ((base_bits & UINT32_C(0x80000000)) != 0U &&
+            exponent_is_odd) {
+            result_bits |= UINT32_C(0x80000000);
+        }
+        memcpy(&result, &result_bits, sizeof(result));
+        return result;
+    }
+
+    if ((base_bits & UINT32_C(0x80000000)) != 0U &&
+        !exponent_is_integer) {
+        uint32_t nan_bits = UINT32_C(0x7fc00000);
+        memcpy(&result, &nan_bits, sizeof(result));
+        return result;
+    }
+    memcpy(&absolute_base, &absolute_base_bits, sizeof(absolute_base));
+    if (exponent_is_integer && exponent >= -32.0f && exponent <= 32.0f) {
+        int integer_exponent = (int)exponent;
+        unsigned magnitude = (unsigned)(integer_exponent < 0
+                                            ? -integer_exponent
+                                            : integer_exponent);
+        float factor = absolute_base;
+        result = 1.0f;
+        while (magnitude != 0U) {
+            if ((magnitude & 1U) != 0U) result *= factor;
+            magnitude >>= 1U;
+            if (magnitude != 0U) factor *= factor;
+        }
+        if (integer_exponent < 0) result = 1.0f / result;
+    } else {
+        result = expf(logf(absolute_base) * exponent);
+    }
+    return ((base_bits & UINT32_C(0x80000000)) != 0U && exponent_is_odd)
+               ? -result : result;
+#endif
+}
 #endif
 
 int pphp_integer_add(pphp_int left, pphp_int right, pphp_int *result) {
@@ -228,6 +335,40 @@ int pphp_integer_power(pphp_int base, pphp_int exponent, pphp_int *result) {
     }
     *result = value;
     return 1;
+}
+
+int pphp_format_integer(char *buffer, size_t capacity, pphp_int value) {
+    char reversed[sizeof(pphp_int) * 3U + 1U];
+#if PPHP_INT64
+    uint64_t magnitude;
+#else
+    uint32_t magnitude;
+#endif
+    size_t length = 0U;
+    size_t output = 0U;
+    if (value < 0) {
+#if PPHP_INT64
+        magnitude = (uint64_t)(-(value + 1));
+#else
+        magnitude = (uint32_t)(-(value + 1));
+#endif
+        magnitude++;
+    } else {
+#if PPHP_INT64
+        magnitude = (uint64_t)value;
+#else
+        magnitude = (uint32_t)value;
+#endif
+    }
+    do {
+        reversed[length++] = (char)('0' + magnitude % 10U);
+        magnitude /= 10U;
+    } while (magnitude != 0U);
+    if (value < 0) reversed[length++] = '-';
+    if (capacity <= length) return -1;
+    while (length != 0U) buffer[output++] = reversed[--length];
+    buffer[output] = '\0';
+    return (int)output;
 }
 
 static pphp_int integer_shift_left(pphp_int value, pphp_int distance) {
@@ -320,7 +461,7 @@ static int integer_binary_float(pv_operation operation, pphp_int left,
             if (right >= 0 && pphp_integer_power(left, right, &integer)) {
                 *result = pv_int(integer);
             } else {
-                *result = pv_float(PPHP_FLOAT_MATH(pow)(
+                *result = pv_float(pphp_float_power(
                     (pphp_float)left, (pphp_float)right));
             }
             return 1;
@@ -477,7 +618,7 @@ static int floating_string_number(const char *text, size_t length,
     if (require_complete && i != length) return 0;
     if (exponent != 0) {
 #if PPHP_ENABLE_FLOAT
-        value *= PPHP_FLOAT_MATH(pow)(
+        value *= pphp_float_power(
             (pphp_float)10, (pphp_float)(exponent * exponent_sign));
 #else
         return 0;
@@ -612,7 +753,7 @@ pstring *pv_to_string(pvalue value) {
         case PT_TRUE:
             return ps_new("1", 1U);
         case PT_INT:
-            length = snprintf(buffer, sizeof(buffer), "%lld", (long long)value.as.i);
+            length = pphp_format_integer(buffer, sizeof(buffer), value.as.i);
             return length < 0 ? NULL : ps_new(buffer, (size_t)length);
 #if PPHP_ENABLE_FLOAT
         case PT_FLOAT:
@@ -793,7 +934,7 @@ int pv_binary_operation(pv_operation operation, pvalue left, pvalue right,
 #endif
         case PV_POW:
 #if PPHP_ENABLE_FLOAT
-            *result = numeric_result(PPHP_FLOAT_MATH(pow)(a, b), 0);
+            *result = numeric_result(pphp_float_power(a, b), 0);
 #else
             if (b < 0) {
                 *error = "negative exponent requires float support";

@@ -25,3 +25,27 @@ test "$paths" = "$expected_paths"
 
 adc_voltage=$("$binary" -r "echo (new ADC(7))->read_voltage();")
 test "$adc_voltage" = '0.090586848556995'
+
+power=$(
+    "$binary" -r \
+        "echo pow(2, 5), ':', pow(-2, 3), ':', pow(-2, 4), ':', pow(4, -2), ':'; var_dump(pow(-2, 0.5), pow(0, -3), pow(-0.0, 3), pow(-0.0, -3), pow(2, 128), pow(0.5, INF), pow(2, -INF));"
+)
+expected_power='32:-8:16:0.0625:float(nan)
+float(inf)
+float(-0)
+float(-inf)
+float(inf)
+float(0)
+float(0)'
+test "$power" = "$expected_power"
+
+integers=$(
+    "$binary" -r \
+        "echo sprintf('%08d|%u|%08x|%o', -42, -1, 255, 8), ':'; print_r([-2147483648 => 2147483647]); echo ':', json_encode([-2147483648 => 2147483647]);"
+)
+expected_integers='-0000042|4294967295|000000ff|10:Array
+(
+    [-2147483648] => 2147483647
+)
+:{"-2147483648":2147483647}'
+test "$integers" = "$expected_integers"

@@ -374,7 +374,7 @@ static int module_has_persistent_functions(const pmodule *module) {
         const pproto *proto = module->protos[i];
         if (!proto->is_method && !proto->conditional &&
             proto->name->length != 0U && ps_data(proto->name)[0] != '{' &&
-            strstr(ps_data(proto->name), "::") == NULL) return 1;
+            !ps_contains_cstr(ps_data(proto->name), "::")) return 1;
     }
     return 0;
 }
@@ -386,7 +386,7 @@ static int validate_repl_functions(pphp_state *state, const pmodule *module) {
         if (proto->is_method || proto->conditional ||
             proto->name->length == 0U ||
             ps_data(proto->name)[0] == '{' ||
-            strstr(ps_data(proto->name), "::") != NULL) continue;
+            ps_contains_cstr(ps_data(proto->name), "::")) continue;
         if (pphp_find_function(state, proto->name, NULL) != NULL) {
             pphp_runtime_error(state, 0U, "function %.*s is already defined",
                                (int)proto->name->length, ps_data(proto->name));

@@ -114,7 +114,7 @@ if(PPHP_RP2040_LTO)
 endif()
 if(PPHP_RP2040_LTO_ENABLED)
   set_property(SOURCE ${PPHP_SOURCES} APPEND PROPERTY
-    COMPILE_OPTIONS "$<$<CONFIG:Release>:-Os;-flto>"
+    COMPILE_OPTIONS "$<$<CONFIG:Release>:-Os;-flto;-fipa-pta>"
   )
 endif()
 
@@ -167,11 +167,11 @@ target_link_libraries(php-pico
 if(PPHP_ENABLE_FLOAT)
   target_link_libraries(php-pico m)
   pico_minimize_runtime(php-pico INCLUDE
-    DEFAULT_ALARM_POOL PRINTF PRINTF_MINIMAL PRINTF_LONG_LONG FLOAT DOUBLE
+    DEFAULT_ALARM_POOL PRINTF PRINTF_MINIMAL FLOAT
   )
 else()
   pico_minimize_runtime(php-pico INCLUDE
-    DEFAULT_ALARM_POOL PRINTF PRINTF_MINIMAL PRINTF_LONG_LONG
+    DEFAULT_ALARM_POOL PRINTF PRINTF_MINIMAL
   )
 endif()
 pico_enable_stdio_usb(php-pico 1)

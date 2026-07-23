@@ -41,6 +41,7 @@ pstring *ps_new(const char *bytes, size_t length);
 pstring *ps_new_cstr(const char *string);
 int ps_equal(const pstring *left, const pstring *right);
 int ps_equal_bytes(const pstring *string, const char *bytes, size_t length);
+int ps_contains_cstr(const char *haystack, const char *needle);
 void ps_destroy(pstring *string);
 
 #endif

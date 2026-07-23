@@ -170,7 +170,7 @@ static int call_reflection_builtin(pphp_state *state, const pstring *name,
 
 static void output_integer(pphp_state *state, pphp_int value) {
     char buffer[32];
-    int length = snprintf(buffer, sizeof(buffer), "%lld", (long long)value);
+    int length = pphp_format_integer(buffer, sizeof(buffer), value);
     if (length > 0) {
         pphp_output(state, buffer, (size_t)length);
     }
@@ -552,7 +552,7 @@ static int call_math_builtin(pphp_state *state, const pstring *name,
         } else if (name_is(name, "fmod")) {
             *result = pv_float(PPHP_FLOAT_MATH(fmod)(a, b));
         } else if (name_is(name, "pow")) {
-            *result = pv_float(PPHP_FLOAT_MATH(pow)(a, b));
+            *result = pv_float(pphp_float_power(a, b));
         } else {
             *result = pv_float(PPHP_FLOAT_MATH(atan2)(a, b));
         }
@@ -607,8 +607,8 @@ static int call_math_builtin(pphp_state *state, const pstring *name,
             }
             precision = (int)arguments[1].as.i;
         }
-        scale = PPHP_FLOAT_MATH(pow)((pphp_float)10,
-                                      (pphp_float)precision);
+        scale = pphp_float_power((pphp_float)10,
+                                 (pphp_float)precision);
         *result = pv_float(PPHP_FLOAT_MATH(round)(a * scale) / scale);
         return 1;
     }

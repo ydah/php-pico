@@ -67,6 +67,22 @@ int ps_equal_bytes(const pstring *string, const char *bytes, size_t length) {
     return memcmp(ps_data(string), bytes, length) == 0;
 }
 
+int ps_contains_cstr(const char *haystack, const char *needle) {
+    const char *start;
+    if (haystack == NULL || needle == NULL) return 0;
+    if (*needle == '\0') return 1;
+    for (start = haystack; *start != '\0'; start++) {
+        const char *left = start;
+        const char *right = needle;
+        while (*right != '\0' && *left == *right) {
+            left++;
+            right++;
+        }
+        if (*right == '\0') return 1;
+    }
+    return 0;
+}
+
 void ps_destroy(pstring *string) {
     if (string == NULL || string->header.type == PT_ROSTRING ||
         (string->header.flags & PSTRING_INTERNED) != 0U) {
