@@ -226,7 +226,11 @@ int pphp_snprintf(char *buffer, size_t capacity, const char *format, ...) {
     return result;
 }
 
-int vprintf(const char *format, va_list arguments) {
+int pphp_vprintf(const char *format, va_list arguments) {
     pphp_format_output output = {NULL, 0U, 0U, 1};
     return format_variadic(&output, format, arguments);
+}
+
+int vprintf(const char *format, va_list arguments) {
+    return pphp_vprintf(format, arguments);
 }

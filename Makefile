@@ -253,7 +253,7 @@ $(FLOAT_FORMAT_TEST_BINARY): FORCE src/float_format.c tests/unit/test_float_form
 
 $(MINI_PRINTF_TEST_BINARY): FORCE src/mini_printf.c tests/unit/test_mini_printf.c
 	@mkdir -p $(@D)
-	$(CC) $(BASE_CPPFLAGS) $(CFLAGS) -fno-builtin-vprintf src/mini_printf.c \
+	$(CC) $(BASE_CPPFLAGS) $(CFLAGS) src/mini_printf.c \
 		tests/unit/test_mini_printf.c $(LDFLAGS) -o $@
 
 $(FLOAT_POWER_TEST_BINARY): FORCE src/value_ops.c tests/unit/test_float_power.c

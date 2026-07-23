@@ -5,7 +5,7 @@
 #include <stddef.h>
 
 int pphp_snprintf(char *buffer, size_t capacity, const char *format, ...);
-int vprintf(const char *format, va_list arguments);
+int pphp_vprintf(const char *format, va_list arguments);
 
 static char console_output[128];
 static size_t console_length;
@@ -34,7 +34,7 @@ static int console_printf(const char *format, ...) {
     int result;
     console_length = 0U;
     va_start(arguments, format);
-    result = vprintf(format, arguments);
+    result = pphp_vprintf(format, arguments);
     va_end(arguments);
     console_output[console_length < sizeof(console_output)
                        ? console_length : sizeof(console_output) - 1U] = '\0';
