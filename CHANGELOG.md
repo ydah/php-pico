@@ -6,8 +6,6 @@
   exceptions, closures, arrays, cycle collection, and required standard APIs.
 - Added the POSIX CLI, persistent REPL, P2Sh, differential PHPT runner, and
   sanitizer/unit test suites, VM instruction tracing, and release benchmarks.
-- Added Composer and Packagist metadata with a `vendor/bin/php-pico` launcher
-  that builds the POSIX host executable on first use.
 - Added the public native extension API and GPIO, ADC, PWM, I2C, SPI, UART,
   Machine, Watchdog, and RTC peripheral classes.
 - Added the RP2040 HAL, USB CDC/UART console, littlefs flash storage, serial
